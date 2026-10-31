@@ -53,6 +53,10 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna models               что из моделей настроено и живо ли
   luna manners              манеры речи: список; show <имя> — текст, use <имя> — включить, off — свой голос
   luna try prompt           показать собранный системный промпт для текущего каталога
+  luna mcp list             MCP-серверы из mcp.json: статус и число тулов
+  luna mcp add <имя> -- <команда …> | --url <адрес>   добавить MCP-сервер
+  luna mcp remove <имя>     удалить MCP-сервер
+  luna mcp test <имя>       подключиться к MCP-серверу и перечислить его тулы
   luna -p "задача"          headless: один ход; --json — события JSONL, --mode, --model
   luna --version            версия
 """
@@ -213,6 +217,10 @@ def main(argv: list[str] | None = None) -> int:
             data = DataDir()
             data.ensure()
             return run_setup(settings=Settings(), secrets=Secrets(data.secrets))
+        if cmd == "mcp":
+            from .mcp.cli import run_mcp
+
+            return run_mcp(rest)
         if cmd == "models":
             from .core.paths import DataDir
             from .core.secrets import Secrets

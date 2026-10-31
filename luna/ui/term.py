@@ -66,7 +66,8 @@ def detect_caps(env=None, out=None, settings=None) -> Caps:
         elif "256" in term_name or env.get("TERM_PROGRAM") in ("iTerm.app", "WezTerm", "ghostty"):
             level, reason = "256", f"TERM={term_name}"
         elif term_name in ("", "dumb"):
-            level, reason = "mono", f"TERM={term_name or 'не задан'}"
+            shown_term = term_name or "не задан"
+            level, reason = "mono", f"TERM={shown_term}"
         else:
             level, reason = "16", f"TERM={term_name}"
     unicode_ok = False

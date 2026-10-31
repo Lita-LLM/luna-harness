@@ -53,6 +53,20 @@ class MainTest(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             self.assertIn("Python", res.stdout)
 
+    def test_commands_survive_cp1251_stdio(self):
+        # РЕВЬЮ-01, раунд 2, п. 2: потоки ребёнка насильно в cp1251 (как
+        # пайп на Windows) — main() обязан сам переключить вывод в UTF-8,
+        # иначе ✓/✗ в doctor роняют команду UnicodeEncodeError-ом.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            for args in (["doctor"], ["settings"]):
+                env = dict(os.environ, LUNA_HOME=str(home),
+                           PYTHONIOENCODING="cp1251")
+                res = subprocess.run([sys.executable, "-m", "luna", *args],
+                                     capture_output=True, text=True, encoding="utf-8",
+                                     env=env, cwd=ROOT, timeout=30)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

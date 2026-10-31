@@ -268,18 +268,26 @@ def run_measure(as_json: bool = False) -> int:
     if as_json:
         print(json.dumps(res, ensure_ascii=False, indent=1))
         return 0
-    print(f"Замеры Луны (Python {res['python']}, {res['platform']}, терминал: {res['terminal']})")
+    python_version = res["python"]
+    platform_name = res["platform"]
+    terminal_name = res["terminal"]
+    print(f"Замеры Луны (Python {python_version}, {platform_name}, терминал: {terminal_name})")
     failed = False
+    dash = "—"
     for key, title, goal, limit, unit, op in GOALS:
         value = res.get(key)
         if value is None:
-            print(f"  ? {title:<38} {'—':>10}   цель {goal}")
+            print(f"  ? {title:<38} {dash:>10}   цель {goal}")
             continue
         ok = value <= limit if op == "le" else value < limit
         failed = failed or not ok
-        print(f"  {'✓' if ok else '✗'} {title:<38} {value:>8} {unit:<3} цель {goal}")
+        # Символ — переменной, а не литералом внутри f-строки: выражения
+        # f-строк держим без кавычек и слэшей ради Python 3.10 (РЕВЬЮ-01/2).
+        mark = "✓" if ok else "✗"
+        print(f"  {mark} {title:<38} {value:>8} {unit:<3} цель {goal}")
     if res.get("start_runs_ms"):
-        print(f"    запуски: {res['start_runs_ms']} мс")
+        runs = res["start_runs_ms"]
+        print(f"    запуски: {runs} мс")
     print("Цель не достигнута — это честный результат замера, а не повод подкрутить цифры."
           if failed else "Все цели вехи 0 по замерам достигнуты на этой машине.")
     return 0

@@ -46,7 +46,10 @@ def _cmd_settings() -> int:
     width = max(len(r["key"]) for r in rows)
     for r in rows:
         value = Settings.value_text(r["type"], r["value"])
-        print(f"{r['key']:<{width}}  {value:<10}  [{SOURCE_NAMES[r['source']]}]  {r['title']}")
+        key = r["key"]
+        source_name = SOURCE_NAMES[r["source"]]
+        title = r["title"]
+        print(f"{key:<{width}}  {value:<10}  [{source_name}]  {title}")
     unknown = settings.unknown_keys()
     if unknown:
         print()
@@ -81,7 +84,23 @@ def settings_value_type(key: str) -> str:
     return field.type if field else "str"
 
 
+def _force_utf8_stdio() -> None:
+    """Все потоки вывода — UTF-8 с заменой, а не системной кодировкой.
+
+    Простые команды (doctor/settings/measure) часто пишут в пайп или файл,
+    где Windows даёт cp1251 и ✓/✗ роняют вывод UnicodeEncodeError-ом.
+    Terminal.reconfigure спасает только полноэкранный режим, поэтому точка
+    входа настраивает потоки сама — для всех команд (РЕВЬЮ-01, раунд 2).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — заменённый поток без reconfigure не повод падать
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     from .core.errors import HumanError
 

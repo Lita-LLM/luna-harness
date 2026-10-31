@@ -52,7 +52,8 @@ def run_doctor() -> int:
     add(_OK, "Лунапарк", f"версия {__version__}")
 
     if caps.is_tty:
-        add(_OK, "Терминал", f"{caps.cols}x{caps.rows}, TERM={caps.term or '—'}")
+        term_name = caps.term or "—"
+        add(_OK, "Терминал", f"{caps.cols}x{caps.rows}, TERM={term_name}")
         add(_OK if caps.color_level != "mono" else _WARN, "Цвет",
             f"{caps.color_level} ({caps.reason})" if caps.reason else caps.color_level)
         add(_OK if caps.unicode else _WARN, "Юникод",
@@ -78,14 +79,20 @@ def run_doctor() -> int:
 
     changed = [r for r in settings.describe() if r["source"] != "default"]
     if changed:
-        desc = "; ".join(f"{r['key']}={Settings.value_text(r['type'], r['value'])} "
-                         f"[{SOURCE_NAMES[r['source']]}]" for r in changed)
+        parts = []
+        for r in changed:
+            key = r["key"]
+            value_text = Settings.value_text(r["type"], r["value"])
+            source_name = SOURCE_NAMES[r["source"]]
+            parts.append(f"{key}={value_text} [{source_name}]")
+        desc = "; ".join(parts)
         add(_OK, "Настройки", f"изменено от умолчаний: {desc}")
     else:
         add(_OK, "Настройки", "все по умолчанию (luna settings — список)")
     unknown = settings.unknown_keys()
     if unknown:
-        add(_WARN, "Настройки", f"ключи вне схемы (сохранятся при записи): {', '.join(unknown)}")
+        unknown_text = ", ".join(unknown)
+        add(_WARN, "Настройки", f"ключи вне схемы (сохранятся при записи): {unknown_text}")
     add(_OK, "Файлы", f"глобальный: {settings.global_path}")
 
     width = max(len(name) for _, name, _ in rows)

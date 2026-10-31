@@ -1,10 +1,16 @@
 """Замеры по таблице целей (ПЛАН.md, раздел 2): `luna try measure [--json]`.
 
-Честно, на живой машине: настоящая Луна запускается под псевдотерминалом.
+Честно, на живой машине: настоящая Луна запускается с настоящим терминалом.
 (а) старт до первого кадра — N холодных запусков, медиана;
 (б) память процесса в простое — /proc (POSIX) или GetProcessMemoryInfo (Windows);
 (в) ЦП в простое за 10 секунд — /proc/<pid>/stat или GetProcessTimes.
-Windows-пути написаны, но на живой Windows не проверены (веха 0).
+
+Транспорт терминала — платформенный (урок РЕВЬЮ-01, п. 3: pty есть не везде):
+POSIX — псевдотерминал, момент первого кадра виден по его выводу;
+Windows — новая консоль (CREATE_NEW_CONSOLE), а момент первого кадра Луна
+сама пишет в файл-метку (переменная LUNA_FIRST_FRAME_FILE, см. ui/screen.py).
+Контракт замера от транспорта не зависит. Windows-путь реализован после
+ревью вехи 0; в окружении исполнителя живой Windows нет — не проверен.
 """
 
 from __future__ import annotations
@@ -22,18 +28,12 @@ PROGRAM_DIR = Path(__file__).resolve().parents[2]
 IS_WINDOWS = sys.platform == "win32"
 START_RUNS = 7
 IDLE_SECONDS = 10.0
+MARKER_ENV = "LUNA_FIRST_FRAME_FILE"
+CREATE_NEW_CONSOLE = 0x00000010  # subprocess.CREATE_NEW_CONSOLE: атрибут есть только на Windows
 
 
 def _spawn_luna(home: str):
     """Запустить Луну под pty 80x24; вернуть (процесс, fd чтения, момент запуска)."""
-    if IS_WINDOWS:
-        from ..core.errors import HumanError
-
-        raise HumanError(
-            "measure_unsupported",
-            "Замеры запуском под псевдотерминалом на Windows пока не сделаны",
-            "Нужен ConPTY (CreatePseudoConsole) — отдельная работа следующей вехи; "
-            "метрики памяти и ЦП через ctypes ниже уже написаны.")
     import fcntl
     import pty
     import struct
@@ -82,6 +82,63 @@ def _stop(proc, master) -> None:
         os.close(master)
     except OSError:
         pass
+
+
+def _spawn_luna_console(home: str, marker: Path):
+    """Windows: Луна в новой консоли; вернуть (процесс, момент запуска).
+
+    У ребёнка настоящий терминал (своя консоль), размер — какой даст система.
+    Первый кадр родитель узнаёт не по выводу, а по файлу-метке: ребёнок
+    пишет в него свой time.monotonic() (часы системные, сравнимы между
+    процессами) — см. Screen._note_first_frame.
+    """
+    env = dict(os.environ, LUNA_HOME=home, PYTHONUNBUFFERED="1")
+    env[MARKER_ENV] = str(marker)
+    t0 = time.monotonic()
+    proc = subprocess.Popen([sys.executable, "-m", "luna"], cwd=PROGRAM_DIR,
+                            env=env, creationflags=CREATE_NEW_CONSOLE)
+    return proc, t0
+
+
+def _wait_first_frame_marker(marker: Path, t0: float, proc,
+                             timeout: float = 15.0) -> float | None:
+    """Ждать файла-метки; вернуть секунды от запуска до первого кадра."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return float(marker.read_text(encoding="ascii")) - t0
+        except (OSError, ValueError):
+            pass  # файла ещё нет или он пишется прямо сейчас
+        if proc.poll() is not None:
+            return None
+        time.sleep(0.005)
+    return None
+
+
+def _stop_console(proc) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:  # noqa: BLE001 — добиваем любой ценой, процесс замерный
+        try:
+            proc.kill()
+            proc.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _start_run(home: str):
+    """Один запуск Луны под замер: (процесс, ждать_первый_кадр, остановить)."""
+    if IS_WINDOWS:
+        marker = Path(tempfile.mkdtemp(prefix="luna-measure-mark-")) / "first-frame.txt"
+        proc, t0 = _spawn_luna_console(home, marker)
+        return (proc,
+                lambda: _wait_first_frame_marker(marker, t0, proc),
+                lambda: _stop_console(proc))
+    proc, master, _ = _spawn_luna(home)
+    return (proc,
+            lambda: _wait_first_frame(master, proc),
+            lambda: _stop(proc, master))
 
 
 def _rss_mb(pid: int) -> float | None:
@@ -165,23 +222,25 @@ def _cpu_seconds_windows(pid: int) -> float | None:
 
 def measure() -> dict:
     res: dict = {"python": sys.version.split()[0], "platform": sys.platform,
-                 "program_dir": str(PROGRAM_DIR)}
+                 "program_dir": str(PROGRAM_DIR),
+                 "terminal": ("новая консоль (метка первого кадра — файл)"
+                              if IS_WINDOWS else "pty 80x24")}
     home = tempfile.mkdtemp(prefix="luna-measure-")
     # (а) старт до первого кадра
     starts = []
     for _ in range(START_RUNS):
-        proc, master, _ = _spawn_luna(home)
-        dt = _wait_first_frame(master, proc)
-        _stop(proc, master)
+        proc, wait_frame, stop = _start_run(home)
+        dt = wait_frame()
+        stop()
         if dt is not None:
             starts.append(round(dt * 1000))
     if starts:
         res["start_first_frame_ms"] = int(statistics.median(starts))
         res["start_runs_ms"] = starts
     # (б)+(в) простой: один экземпляр, дать заставке закончиться
-    proc, master, _ = _spawn_luna(home)
+    proc, wait_frame, stop = _start_run(home)
     try:
-        _wait_first_frame(master, proc)
+        wait_frame()
         time.sleep(2.0)  # заставка ~1,2 с + запас: дальше настоящий простой
         res["idle_rss_mb"] = _rss_mb(proc.pid)
         c0 = _cpu_seconds(proc.pid)
@@ -193,7 +252,7 @@ def measure() -> dict:
             res["idle_cpu_pct"] = round(100 * (c1 - c0) / wall, 3)
         res["idle_seconds"] = round(wall, 1)
     finally:
-        _stop(proc, master)
+        stop()
     return res
 
 
@@ -209,7 +268,7 @@ def run_measure(as_json: bool = False) -> int:
     if as_json:
         print(json.dumps(res, ensure_ascii=False, indent=1))
         return 0
-    print(f"Замеры Луны (Python {res['python']}, {res['platform']}, терминал: pty 80x24)")
+    print(f"Замеры Луны (Python {res['python']}, {res['platform']}, терминал: {res['terminal']})")
     failed = False
     for key, title, goal, limit, unit, op in GOALS:
         value = res.get(key)

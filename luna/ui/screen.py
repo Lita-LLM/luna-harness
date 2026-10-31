@@ -13,8 +13,13 @@ Screen.present сравнивает новый буфер с показанны�
 
 from __future__ import annotations
 
+import os
+import time
+
 from . import color as _color
 from .width import char_width
+
+MARKER_ENV = "LUNA_FIRST_FRAME_FILE"  # протокол замеров, см. devtools.measure
 
 BLANK = (" ", None, None, 0)
 
@@ -107,6 +112,8 @@ class Screen:
         self.rows = max(1, rows)
         self._prev: Buffer | None = None
         self._cursor_shown = False
+        self._mark_path = os.environ.get(MARKER_ENV) or None
+        self._marked = False
 
     def resize(self, cols: int, rows: int) -> None:
         self.cols, self.rows = max(1, cols), max(1, rows)
@@ -175,7 +182,22 @@ class Screen:
         self._prev = _copy(buf)
         if frame:
             self._write(frame)
+            self._note_first_frame()
         return frame
+
+    def _note_first_frame(self) -> None:
+        """Метка первого кадра для замеров: если задан LUNA_FIRST_FRAME_FILE,
+        один раз пишем туда time.monotonic() первой записи кадра.
+        Часы монотонные системные — родитель сравнивает со своими.
+        Без переменной окружения — полное бездействие."""
+        if self._marked or not self._mark_path:
+            return
+        self._marked = True
+        try:
+            with open(self._mark_path, "w", encoding="ascii") as f:
+                f.write(repr(time.monotonic()))
+        except OSError:
+            pass
 
 
 def _copy(buf: Buffer) -> Buffer:

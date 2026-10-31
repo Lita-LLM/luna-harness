@@ -183,6 +183,74 @@ class GuardFlowTest(unittest.TestCase):
         self.assertIn("rm -rf build/", text)
 
 
+class GuardOrderTest(unittest.TestCase):
+    """ЗАДАЧА-06, п. 3: подтверждение — между вызовом тула и результатом;
+    после ответа блок сворачивается в одну строку решения на месте."""
+
+    def feed_pair(self, app, same_id=False):
+        app.on_agent_event({"type": "tool.call", "id": "t1", "name": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки"})
+        gid = "t1" if same_id else "g1"
+        app.on_agent_event({"type": "guard.ask", "id": gid, "tool": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки", "risk": "high",
+                            "reason": "необратимое удаление", "choices": []})
+
+    def rows(self, app):
+        buf, _cursor = app.draw(90, 24, 100.0)
+        return buf, buffer_text(buf).split("\n")
+
+    def test_block_between_call_and_result(self):
+        app = make_app()
+        self.feed_pair(app)
+        _buf, rows = self.rows(app)
+        head = next(i for i, r in enumerate(rows) if "bash" in r and "rm -rf" in r)
+        block = next(i for i, r in enumerate(rows) if "нужно решение" in r)
+        self.assertLess(head, block)
+        app.handle_key(Key("enter"))
+        app.on_agent_event({"type": "tool.result", "id": "t1", "ok": True,
+                            "summary": "Код выхода: 0", "output": ""})
+        _buf, rows = self.rows(app)
+        text = "\n".join(rows)
+        self.assertNotIn("нужно решение", text)
+        decision = next(i for i, r in enumerate(rows) if "решение: да" in r)
+        result = next(i for i, r in enumerate(rows) if "Код выхода: 0" in r)
+        head = next(i for i, r in enumerate(rows) if "bash" in r and "rm -rf" in r)
+        self.assertLess(head, decision)
+        self.assertLess(decision, result)
+
+    def test_same_id_links_like_real_agent(self):
+        # Настоящий агент шлёт guard.ask с id вызова тула — связь по id.
+        app = make_app()
+        self.feed_pair(app, same_id=True)
+        guard = next(e for e in app.entries if e.kind == "guard")
+        self.assertEqual(guard.guard_of, "t1")
+
+    def test_decided_block_collapses_and_bg_gone(self):
+        from luna.ui.chat import GUARD_BG
+
+        app = make_app()
+        self.feed_pair(app)
+        buf, _rows = self.rows(app)
+        warm = sum(1 for row in buf.cells for cell in row if cell[2] == GUARD_BG)
+        self.assertGreater(warm, 0)  # пока ждёт — блок тёплый
+        app.handle_key(Key("n", char="n"))
+        buf, rows = self.rows(app)
+        text = "\n".join(rows)
+        self.assertIn("решение: нет", text)
+        warm = sum(1 for row in buf.cells for cell in row if cell[2] == GUARD_BG)
+        self.assertEqual(warm, 0)  # после решения фона блока не осталось
+
+    def test_guard_without_tool_stays_standalone(self):
+        app = make_app()
+        app.on_agent_event({"type": "guard.ask", "id": "g9", "tool": "bash",
+                            "args": {"command": "ls"}, "intent": "",
+                            "risk": "", "reason": "", "choices": []})
+        _buf, rows = self.rows(app)
+        self.assertTrue(any("нужно решение" in r for r in rows))
+
+
 class AskFlowTest(unittest.TestCase):
     def test_choose_option_and_custom(self):
         app = make_app()

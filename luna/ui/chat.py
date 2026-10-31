@@ -139,6 +139,7 @@ class Entry:
     reason: str = ""
     born: float = 0.0
     streaming: bool = False
+    guard_of: str = ""     # guard: id тула, к которому относится подтверждение
 
 
 class ChatApp:
@@ -279,12 +280,26 @@ class ChatApp:
             if out and out not in entry.output:
                 entry.output += out
         elif kind == "guard.ask":
-            self._add(Entry("guard", name=str(ev.get("tool", "")),
-                            intent=str(ev.get("intent", "")),
-                            args=dict(ev.get("args") or {}),
-                            entry_id=str(ev.get("id", "")), status="pending",
-                            risk=str(ev.get("risk", "")),
-                            reason=str(ev.get("reason", ""))))
+            entry = Entry("guard", name=str(ev.get("tool", "")),
+                          intent=str(ev.get("intent", "")),
+                          args=dict(ev.get("args") or {}),
+                          entry_id=str(ev.get("id", "")), status="pending",
+                          risk=str(ev.get("risk", "")),
+                          reason=str(ev.get("reason", "")))
+            # Подтверждение относится к вызову тула: у настоящего агента
+            # guard.ask несёт тот же id, что tool.call; у фальшивого —
+            # ищем идущий тул с тем же именем. Показываться блок будет
+            # внутри записи тула — между вызовом и результатом (п. 3).
+            tool = self._find("tool", entry.entry_id)
+            if tool is None:
+                for cand in reversed(self.entries):
+                    if (cand.kind == "tool" and cand.status == "running"
+                            and cand.name == entry.name):
+                        tool = cand
+                        break
+            if tool is not None:
+                entry.guard_of = tool.entry_id
+            self._add(entry)
         elif kind == "guard.verdict":
             entry = self._find("guard", str(ev.get("id", "")))
             if entry is not None and entry.status == "pending":
@@ -766,6 +781,8 @@ class ChatApp:
             add(head)
             if entry.intent:
                 add([("  " + entry.intent, "dim")])
+            for guard in self._guards_for(entry):
+                self._guard_lines(guard, w, add)
             if entry.status == "done":
                 mark = "✓ " if entry.ok else "✗ "
                 style = "ok" if entry.ok else "err"
@@ -811,7 +828,22 @@ class ChatApp:
             add([("$ ", "cyan"), (entry.text, "text")])
         return raw
 
+    _DECISIONS = {"yes": "да", "no": "нет", "edit": "да, с правкой",
+                  "always": "да, дальше без вопросов", "stop": "стоп"}
+
     def _guard_lines(self, entry: Entry, width: int, add) -> None:
+        if entry.status != "pending":
+            # Решённый блок сворачивается в одну строку решения на месте —
+            # тёплый фон не остаётся висеть в ленте (ЗАДАЧА-06, п. 3).
+            denied = entry.status in ("no", "stop")
+            mark = "✗ " if denied else "✓ "
+            label = self._DECISIONS.get(entry.status, entry.status)
+            line = "решение: " + label
+            target = (entry.name + " " + compact_args(entry.name, entry.args)).strip()
+            if target:
+                line += " · " + target
+            add([(mark, "err" if denied else "ok"), (line, "dim")])
+            return
         mark = "⚠ " if self.glyph_mode == "emoji" else "! "
         head = "нужно решение"
         if entry.risk:
@@ -827,9 +859,7 @@ class ChatApp:
             add([("  причина: " + entry.reason, "dim")], GUARD_BG)
         add([("  Enter — да · n — нет · e — править · a — дальше без вопросов · q — стоп",
               "guard")], GUARD_BG)
-        if entry.status != "pending":
-            add([("  решение: " + entry.status, "dim")], GUARD_BG)
-        elif self.guard_editing:
+        if self.guard_editing:
             add([("  правка аргументов: Enter — отправить, Esc — отмена", "dim")], GUARD_BG)
 
     def _ask_lines(self, entry: Entry, width: int, add) -> None:  # noqa: ARG002 — единый вид строителей строк
@@ -860,9 +890,18 @@ class ChatApp:
         if not entry.expanded and len(items) > len(show):
             add([("  · Ctrl+O — весь план, Ctrl+T — панель", "dim")])
 
+    def _guards_for(self, tool_entry: Entry) -> list:
+        """Подтверждения, относящиеся к этому тулу, в порядке прихода."""
+        return [e for e in self.entries
+                if e.kind == "guard" and e.guard_of
+                and e.guard_of == tool_entry.entry_id]
+
     def _feed_lines(self, width: int, now: float):
         lines: list = []
         for entry in self.entries:
+            if (entry.kind == "guard" and entry.guard_of
+                    and self._find("tool", entry.guard_of) is not None):
+                continue  # рисуется внутри своего тула, между вызовом и результатом
             lines.extend(self._entry_lines(entry, width, now))
             lines.append(([], None))
         if lines:

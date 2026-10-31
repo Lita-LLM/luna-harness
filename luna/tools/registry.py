@@ -7,6 +7,7 @@ intent не живёт здесь: его добавляет адаптер пр
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -77,12 +78,92 @@ def truncate_output(text: str, limit: int, output_dir: Path | None, name: str) -
     return text[:half] + note + text[-half:], path
 
 
+class LazyRegistry(dict):
+    """Реестр с ленивой догрузкой MCP-тулов при первом обращении.
+
+    build_registry() вызывается при создании агента, а MCP-серверы обязаны
+    подниматься только при первом ходе (ЗАДАЧА-09): словарь обычный на вид,
+    но первое чтение (values/get/items/…) один раз догружает MCP-тулы.
+    Сбой догрузки не роняет встроенные тулы: MCP просто не появится, а
+    причины останутся в mcp_errors для диагностики.
+    """
+
+    def __init__(self, base: dict):
+        super().__init__(base)
+        self._mcp_loaded = False
+        self._mcp_lock = threading.Lock()
+        self.mcp_errors: list = []
+        self.mcp_manager = None
+
+    def _ensure_mcp(self) -> None:
+        if self._mcp_loaded:
+            return
+        with self._mcp_lock:
+            if self._mcp_loaded:
+                return
+            self._mcp_loaded = True
+            try:
+                tools, errors, manager = _load_mcp_tools()
+            except Exception:  # noqa: BLE001 — реестр встроенных тулов важнее MCP
+                return
+            self.mcp_errors = errors
+            self.mcp_manager = manager
+            for name, tool in tools.items():
+                self.setdefault(name, tool)
+
+    def values(self):
+        self._ensure_mcp()
+        return super().values()
+
+    def items(self):
+        self._ensure_mcp()
+        return super().items()
+
+    def keys(self):
+        self._ensure_mcp()
+        return super().keys()
+
+    def get(self, key, default=None):
+        self._ensure_mcp()
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self._ensure_mcp()
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self._ensure_mcp()
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self._ensure_mcp()
+        return super().__iter__()
+
+    def __len__(self):
+        self._ensure_mcp()
+        return super().__len__()
+
+
+def _load_mcp_tools() -> tuple:
+    """Догрузка MCP: нет конфигов — пусто и мгновенно; есть — поднять серверы и перечислить тулы."""
+    from ..core.paths import luna_home
+    from ..mcp.manager import Manager, build_mcp_tools, has_mcp_config
+
+    home = luna_home()
+    cwd = Path.cwd()
+    if not has_mcp_config(cwd, home):
+        return {}, [], None
+    manager = Manager(cwd=cwd, home=home)
+    tools, errors = build_mcp_tools(manager)
+    return tools, errors, manager
+
+
 def build_registry() -> dict[str, Tool]:
-    """Все встроенные тулы вехи 1."""
+    """Все встроенные тулы вехи 1; MCP-тулы догружаются лениво (LazyRegistry)."""
     from .files import edit_tool, glob_tool, grep_tool, read_tool, write_tool
     from .shell import bash_tool
     from .web import ask_user_tool, todo_tool, web_fetch_tool, web_search_tool
 
     tools = [bash_tool(), read_tool(), write_tool(), edit_tool(), glob_tool(),
              grep_tool(), web_fetch_tool(), web_search_tool(), todo_tool(), ask_user_tool()]
-    return {tool.name: tool for tool in tools}
+    return LazyRegistry({tool.name: tool for tool in tools})

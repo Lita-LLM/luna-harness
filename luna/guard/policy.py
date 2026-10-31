@@ -175,9 +175,8 @@ class Guard:
         if mode == "yolo":
             return Decision("allow", "mode", "Режим yolo: разрешено без вопросов", risk)
         if mode == "auto":
-            if mutating:
-                return Decision("ask", "mode", "Режим auto: меняющее действие подтверждаем", risk)
-            return Decision("allow", "mode", "Режим auto: чтение разрешено", risk)
+            return Decision("allow", "mode", "Режим auto: без вопросов; "
+                            "необратимое всё равно спрашивается выше по списку", risk)
         if mode == "review":
             if not mutating:
                 return Decision("allow", "mode", "Режим review: чтение разрешено", risk)

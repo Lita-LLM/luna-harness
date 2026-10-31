@@ -21,6 +21,7 @@ from . import color as _color
 from . import moon as _moon
 from . import phrases
 from .anim import Scheduler, ease_in_out, ease_out
+from .astro import moon_sky
 from .disc import draw_disc
 from .keys import Key
 from .screen import Buffer
@@ -63,12 +64,17 @@ def _sky(buf: Buffer) -> None:
 
 
 def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
-                 phrase: str, startup_ms: float | None, stars, now: float) -> None:
+                 phrase: str, startup_ms: float | None, stars, now: float,
+                 sky=None) -> None:
     """Кадр заставки при прогрессе t 0..1 в готовый буфер.
 
     Режим глифов (emoji | narrow | ascii) приходит из Caps.glyph_mode:
     декоративные звёзды ✦ шириной 2 в узком режиме заменяются на •,
     в ASCII — весь набор схлопывается в точки и звёздочки.
+
+    sky — настоящая фаза луны (ui.astro.MoonSky): если задана, диск
+    показывает её освещённость и сторону терминатора, а t отвечает только
+    за подъём; без sky — прежнее поведение вехи 0 (фаза = прогресс).
     """
     mode = _moon.normalize_mode(glyph_mode if glyph_mode is not None
                                 else (True if unicode_ok is None else unicode_ok))
@@ -88,7 +94,11 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
     r = max(4.0, rows / 3.0)
     cy_top = rows // 3
     cy = rows + r / 2.0 + (cy_top - rows - r / 2.0) * ease_out(t)
-    draw_disc(buf, cols / 2.0, cy, r, t, mode=mode)
+    if sky is not None:
+        draw_disc(buf, cols / 2.0, cy, r, sky.illumination,
+                  mode=mode, mirror=sky.mirror)
+    else:
+        draw_disc(buf, cols / 2.0, cy, r, t, mode=mode)
     # имя — после подъёма луны, неоновым градиентом, появление затуханием
     if t > 0.3:
         fade = ease_out(min(1.0, (t - 0.3) / 0.4))
@@ -121,7 +131,13 @@ def play_splash(term, screen, settings, bus, started_at: float) -> str:
     """Показать заставку. Возвращает "done" или "exit" (Ctrl+C)."""
     if not term.caps.is_tty or not settings.get("ui.splash"):
         return "done"
-    phrase = phrases.random_splash()
+    # Настоящее небо: фаза луны на сегодня — расчёт без сети (ui/astro.py),
+    # полушарие — настройка; в полнолуние приветствие особое (ДИЗАЙН.md).
+    sky = moon_sky(hemisphere=str(settings.get("ui.hemisphere") or "north"))
+    if sky.is_full:
+        phrase = phrases.event_phrase("fullmoon") or phrases.random_splash()
+    else:
+        phrase = phrases.random_splash()
     cols, rows = term.size()
     stars = _stars(cols, rows, max(20, cols * rows // 28))
     animations = bool(settings.get("ui.animations"))
@@ -130,7 +146,7 @@ def play_splash(term, screen, settings, bus, started_at: float) -> str:
     if not animations:
         buf = Buffer(cols, rows)
         render_frame(buf, 1.0, glyph_mode=term.caps.glyph_mode, phrase=phrase,
-                     startup_ms=None, stars=stars, now=0.0)
+                     startup_ms=None, stars=stars, now=0.0, sky=sky)
         screen.present(buf)
         bus.publish({"type": "ui.splash", "phase": "done", "animated": False})
         return "done"
@@ -146,7 +162,7 @@ def play_splash(term, screen, settings, bus, started_at: float) -> str:
             screen.resize(cols, rows)
         buf = Buffer(cols, rows)
         render_frame(buf, t, glyph_mode=term.caps.glyph_mode, phrase=phrase,
-                     startup_ms=startup_ms, stars=stars, now=now)
+                     startup_ms=startup_ms, stars=stars, now=now, sky=sky)
         screen.present(buf)
         if startup_ms is None:
             startup_ms = (time.monotonic() - started_at) * 1000

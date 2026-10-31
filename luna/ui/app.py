@@ -1,8 +1,9 @@
-"""Полноэкранный режим вехи 0: заставка → минимальный экран.
+"""Минимальный экран вехи 0 (MiniApp) — витрина и основа тестов.
 
-Экран — клиент шины: ввод приходит событиями ui.key / ui.mouse / ui.paste,
-состояние меняется только в подписчике, отрисовка — из состояния. Ядро позже
-станет отдельным сервером, а этот клиент не изменится.
+Живой полноэкранный путь с вехи 1 — чат (ui/chat.py): run_fullscreen ниже
+делегирует ему. MiniApp оставлен как есть: экран — клиент шины, ввод
+приходит событиями ui.key / ui.mouse / ui.paste, состояние меняется только
+в подписчике, отрисовка — из состояния.
 """
 
 from __future__ import annotations
@@ -10,17 +11,13 @@ from __future__ import annotations
 import time
 
 from ..core.bus import EventBus
-from ..core.paths import DataDir
-from ..core.run_lock import RunLock
 from ..core.settings import Settings
 from . import color as _color
 from . import moon as _moon
 from . import phrases
 from .anim import Scheduler, Spinner, ease_in_out
 from .keys import Key, Mouse, Paste, Resize
-from .screen import Buffer, Screen
-from .splash import play_splash
-from .term import Terminal
+from .screen import Buffer
 from .width import str_width
 
 SPIN_SECONDS = 2.0
@@ -178,39 +175,11 @@ class MiniApp:
 
 
 def run_fullscreen(started_at: float) -> int:
-    settings = Settings()
-    bus = EventBus()
-    term = Terminal(settings=settings)
-    if not term.caps.is_tty:
-        print("Лунапарк: нужен живой терминал. Справка: luna --help, проверка: luna doctor")
-        return 0
-    data = DataDir()
-    data.ensure()
-    with RunLock(data.root):
-        with term:
-            cols, rows = term.size()
-            screen = Screen(term.write, term.caps.color_level, cols, rows)
-            if play_splash(term, screen, settings, bus, started_at) == "exit":
-                return 0
-            scheduler = Scheduler(fps=30)
-            app = MiniApp(bus, settings, scheduler, term.caps.glyph_mode)
-            while not app.done:
-                events = term.read_events(timeout=scheduler.next_timeout())
-                size = term.size()
-                if size != (screen.cols, screen.rows):
-                    screen.resize(*size)
-                    bus.publish({"type": "ui.resize", "cols": size[0], "rows": size[1]})
-                for ev in events:
-                    if isinstance(ev, Key):
-                        bus.publish({"type": "ui.key", "key": ev})
-                    elif isinstance(ev, Mouse):
-                        bus.publish({"type": "ui.mouse", "mouse": ev})
-                    elif isinstance(ev, Paste):
-                        bus.publish({"type": "ui.paste", "paste": ev})
-                    elif isinstance(ev, Resize):
-                        bus.publish({"type": "ui.resize", "cols": ev.cols, "rows": ev.rows})
-                scheduler.tick()
-                buf, cursor = app.draw(size[0], size[1], time.monotonic())
-                screen.present(buf, cursor=cursor)
-    print(phrases.event_phrase("end") or "Орёл сел.")
-    return 0
+    """Полноэкранный режим: с вехи 1 минимальный экран заменён чатом.
+
+    MiniApp выше оставлен как витрина и для тестов; живой путь `luna`
+    без аргументов — ui/chat.py (источник событий — его create_source).
+    """
+    from .chat import run_chat
+
+    return run_chat(started_at=started_at, splash_first=True)

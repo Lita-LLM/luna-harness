@@ -22,7 +22,7 @@ from ..ui import color as _color
 from ..ui import phrases
 from ..ui.screen import Buffer
 
-SCREENS = ("splash", "render", "main")
+SCREENS = ("splash", "render", "main", "chat")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -32,7 +32,8 @@ h1 { font-size: 18px; font-weight: normal; }
 .cap { color: #8B94AC; font-size: 13px; margin: 0 0 8px 4px; }
 .scr { background: #0B0D17; border-radius: 14px; padding: 14px 16px;
        font-family: "DejaVu Sans Mono", "Cascadia Mono", Consolas, monospace;
-       font-size: 14px; line-height: 1.18; white-space: pre; overflow-x: auto; }
+       font-size: 14px; line-height: 1; white-space: pre; overflow-x: auto; }
+.line { display: block; line-height: 1; min-height: 1em; white-space: pre; }
 """
 
 
@@ -61,14 +62,20 @@ def _snapshot_caps(cols: int, rows: int, settings):
     return caps
 
 
-def _render_splash(cols: int, rows: int, at: float, caps, phrase: str) -> Buffer:
+def _render_splash(cols: int, rows: int, at: float, caps, phrase: str,
+                   settings=None) -> Buffer:
     from ..ui import splash as _splash
+    from ..ui.astro import moon_sky
 
     buf = Buffer(cols, rows)
     stars = _splash._stars(cols, rows, max(20, cols * rows // 28))
     t = max(0.0, min(1.0, at / _splash.DURATION))
+    hemisphere = "north"
+    if settings is not None:
+        hemisphere = str(settings.get("ui.hemisphere") or "north")
+    sky = moon_sky(hemisphere=hemisphere)
     _splash.render_frame(buf, t, glyph_mode=caps.glyph_mode, phrase=phrase,
-                         startup_ms=None, stars=stars, now=at)
+                         startup_ms=None, stars=stars, now=at, sky=sky)
     return buf
 
 
@@ -79,10 +86,61 @@ def _render_render(cols: int, rows: int, at: float, caps, demo) -> Buffer:
 def _render_main(cols: int, rows: int, at: float, caps, settings) -> Buffer:
     from ..core.bus import EventBus
     from ..ui.anim import Scheduler
-    from ..ui.app import MiniApp
+    from ..ui.chat import ChatApp
 
-    app = MiniApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app.start_source()
     buf, _cursor = app.draw(cols, rows, _FAKE_NOW + at)
+    return buf
+
+
+_CHAT_STATES = ("стрим", "тул", "подтверждение", "вопрос")
+
+
+def _render_chat_state(state: str, cols: int, rows: int, caps, settings) -> Buffer:
+    """Одно именованное состояние чата для снимка: события — по контракту."""
+    from ..core.bus import EventBus
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Почини сборку и поставь зависимости")
+    app.on_agent_event({"type": "turn.start", "turn": 1})
+    app.on_agent_event({"type": "agent.thinking",
+                        "text": "Сверяюсь со звёздами и смотрю логи сборки. "})
+    if state == "стрим":
+        app.on_agent_event({"type": "agent.text",
+                            "text": "## Готово\n\nСделал **по шагам** и печатаю дальше"})
+        app.on_agent_event({"type": "usage", "model": "fake-agent", "input": 900,
+                            "output": 120, "cost": 0.0031, "context_pct": 34})
+    elif state == "тул":
+        app.on_agent_event({"type": "agent.text", "text": "Ставлю зависимость."})
+        app.on_agent_event({"type": "agent.text.done"})
+        app.on_agent_event({"type": "tool.call", "id": "tool-1", "name": "bash",
+                            "args": {"command": "pip install lxml"},
+                            "intent": "Ставлю зависимость для разбора разметки"})
+        app.on_agent_event({"type": "tool.output", "id": "tool-1",
+                            "text": "Collecting lxml\nDownloading lxml-5.3.0.whl\n"})
+        app.on_agent_event({"type": "usage", "model": "fake-agent", "input": 900,
+                            "output": 120, "cost": 0.0031, "context_pct": 41})
+    elif state == "подтверждение":
+        app.on_agent_event({"type": "tool.call", "id": "tool-g", "name": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки перед пересборкой"})
+        app.on_agent_event({"type": "guard.ask", "id": "guard-1", "tool": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки перед пересборкой",
+                            "risk": "high", "reason": "необратимое удаление",
+                            "choices": ["yes", "no", "edit", "always", "stop"]})
+    else:  # вопрос
+        app.on_agent_event({"type": "agent.text", "text": "Уточню один момент."})
+        app.on_agent_event({"type": "agent.text.done"})
+        app.on_agent_event({"type": "ask.user", "id": "ask-1",
+                            "question": "Какой формат отчёта нужен?",
+                            "options": ["Короткий", "Подробный", "Только цифры"]})
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
     return buf
 
 
@@ -101,10 +159,14 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
         demo.spinner.started = _FAKE_NOW
         demo.wheel.started = _FAKE_NOW
         demo._fps_at = _FAKE_NOW
+    if name == "chat":
+        # У чата кадры — не моменты времени, а именованные состояния ленты.
+        return [(state, _render_chat_state(state, cols, rows, caps, settings))
+                for state in _CHAT_STATES]
     frames = []
     for at in times:
         if name == "splash":
-            buf = _render_splash(cols, rows, at, caps, phrase)
+            buf = _render_splash(cols, rows, at, caps, phrase, settings)
         elif name == "render":
             buf = _render_render(cols, rows, at, caps, demo)
         else:
@@ -158,7 +220,9 @@ def buffer_to_html(buf: Buffer) -> str:
                 parts.append(f'<span style="{css}">{esc}</span>')
             else:
                 parts.append(esc)
-        lines.append("".join(parts))
+        # Каждая строка — отдельный блок с line-height: 1: между строками
+        # нет щелей от строчного интервала шрифта (ЗАДАЧА-05).
+        lines.append('<div class="line">' + "".join(parts) + "</div>")
     return '<div class="scr">' + "\n".join(lines) + "</div>"
 
 

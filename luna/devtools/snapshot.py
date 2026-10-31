@@ -247,6 +247,7 @@ def run_snapshot(argv: list) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
     frames_count = len(frames)
-    size = f"{opts['cols']}x{opts['rows']}"
+    cols, rows = opts["cols"], opts["rows"]
+    size = f"{cols}x{rows}"
     print(f"Снимок: {out} — экран {name}, {size}, кадров: {frames_count}")
     return 0

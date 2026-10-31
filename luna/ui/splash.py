@@ -4,35 +4,62 @@
 время старта процесса до первого кадра: это витрина лёгкости проекта.
 Если анимации выключены — один статичный кадр; если вывод не в терминал —
 заставки нет.
+
+Мягкость (ЗАДАЧА-03): луна — круглый диск из ui/disc.py (полублоки,
+сглаженный край, пепельный свет, ореол); восход — с ease-out, небо —
+мягкий градиент с виньеткой по краям, звёзды мерцают медленно и каждая
+в своём темпе.
 """
 
 from __future__ import annotations
 
+import math
 import random
 import time
 
 from . import color as _color
 from . import moon as _moon
 from . import phrases
-from .anim import Scheduler
+from .anim import Scheduler, ease_in_out, ease_out
+from .disc import draw_disc
 from .keys import Key
 from .screen import Buffer
 
 DURATION = 1.2
-_SKY_STOPS = ((4, 5, 12), (11, 13, 23), (38, 20, 80))
-_MOON_TOP = (0xE8, 0xED, 0xF7)
-_MOON_BOTTOM = (0x9F, 0xAC, 0xC4)
-_NEW_MOON = (0x16, 0x1A, 0x2E)
+_SKY_STOPS = ((3, 4, 10), (11, 13, 23), (23, 16, 50), (40, 22, 84))
 
 
-def _stars(cols: int, rows: int, count: int) -> list[tuple[int, int, float, str]]:
+def _stars(cols: int, rows: int, count: int) -> list:
+    """Звёзды: (x, y, фаза мерцания, глиф, скорость) — темп у каждой свой."""
     rng = random.Random(cols * 100003 + rows)
     glyphs = ("·", "•", "+", "✦", "*")
     out = []
     for _ in range(count):
         out.append((rng.randrange(cols), rng.randrange(rows),
-                    rng.uniform(0, 6.28), rng.choice(glyphs)))
+                    rng.uniform(0, 6.28), rng.choice(glyphs),
+                    rng.uniform(0.5, 1.1)))
     return out
+
+
+def _sky(buf: Buffer) -> None:
+    """Небо: вертикальный градиент из четырёх опор, сканлайны, виньетка.
+
+    Буфер у вызывающих всегда свежий, поэтому фон кладём прямой записью
+    в ячейки — без полной цены Buffer.set на каждую клетку.
+    """
+    cols, rows = buf.cols, buf.rows
+    line = _color.gradient(_SKY_STOPS, rows)
+    cxv = max(1.0, (cols - 1) / 2.0)
+    cyv = max(1.0, (rows - 1) / 2.0)
+    for y in range(rows):
+        c = line[y]
+        if y % 2 == 1:  # сканлайны — мягко, это настроение, а не решётка
+            c = tuple(int(v * 0.93) for v in c)
+        ny = (y - cyv) / cyv
+        for x in range(cols):
+            nx = (x - cxv) / cxv
+            f = 1.0 - 0.22 * min(1.0, (nx * nx + ny * ny) / 2.0)
+            buf.cells[y][x] = (" ", None, tuple(round(v * f) for v in c), 0)
 
 
 def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
@@ -46,50 +73,29 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
     mode = _moon.normalize_mode(glyph_mode if glyph_mode is not None
                                 else (True if unicode_ok is None else unicode_ok))
     cols, rows = buf.cols, buf.rows
-    sky = _color.gradient(_SKY_STOPS, rows)
-    for y in range(rows):
-        c = sky[y]
-        if y % 2 == 1:  # сканлайны
-            c = tuple(int(v * 0.9) for v in c)
-        buf.fill_rect(0, y, cols, 1, " ", bg=c)
-    # звёзды: яркость дышит по синусу со своей фазой
-    import math
-
-    for x, y, phase, glyph in stars:
+    _sky(buf)
+    # звёзды: яркость дышит медленно, у каждой своя фаза и свой темп
+    for x, y, phase, glyph, speed in stars:
         if mode == "ascii" and glyph not in (".", "*", "+"):
             glyph = "."
         elif mode == "narrow" and glyph == "✦":
             glyph = "•"
-        bright = 0.5 + 0.5 * math.sin(now * 2.2 + phase)
+        bright = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(now * speed + phase))
         fg = _color.lerp((70, 78, 105), (230, 238, 255), bright)
         buf.set(x, y, glyph, fg=fg, bg=buf.cell(x, y)[2])
-    # луна: радиус и подъём
-    ry = max(2, rows // 6)
-    rx = ry * 2
-    cx = cols // 2
-    cy = int((rows + ry) - t * (rows + ry - rows // 3))
-    lit = t  # доля освещённой части: растёт слева тенью к полной справа→влево
-    for dy in range(-ry, ry + 1):
-        for dx in range(-rx, rx + 1):
-            nx, ny = dx / rx, dy / ry
-            if nx * nx + ny * ny > 1.0:
-                continue
-            x, y = cx + dx, cy + dy
-            if not (0 <= x < cols and 0 <= y < rows):
-                continue
-            bg_here = buf.cell(x, y)[2]
-            if nx >= 1 - 2 * lit:
-                shade = _color.lerp(_MOON_BOTTOM, _MOON_TOP, 1 - (ny + 1) / 2)
-                buf.set(x, y, " ", bg=shade)
-            else:
-                buf.set(x, y, " ", bg=_NEW_MOON if bg_here is None else _color.lerp(bg_here, _NEW_MOON, 0.65))
-    # имя — после подъёма луны, неоновым градиентом
+    # луна: круглый диск; подъём с замедлением в конце (ease-out),
+    # освещённость растёт вместе с подъёмом, как было задумано в вехе 0
+    r = max(4.0, rows / 3.0)
+    cy_top = rows // 3
+    cy = rows + r / 2.0 + (cy_top - rows - r / 2.0) * ease_out(t)
+    draw_disc(buf, cols / 2.0, cy, r, t, mode=mode)
+    # имя — после подъёма луны, неоновым градиентом, появление затуханием
     if t > 0.3:
-        fade = min(1.0, (t - 0.3) / 0.4)
+        fade = ease_out(min(1.0, (t - 0.3) / 0.4))
         title = "Л У Н А П А Р К"
         grad = _color.gradient(_color.NEON_STOPS, len(title))
         x0 = max(0, (cols - len(title)) // 2)
-        y0 = min(rows - 3, cy + ry + 2)
+        y0 = min(rows - 3, int(cy + r / 2.0) + 2)
         if 0 <= y0 < rows:
             for i, ch in enumerate(title):
                 if ch == " " or x0 + i >= cols:
@@ -97,11 +103,14 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
                 bg_here = buf.cell(x0 + i, y0)[2]
                 c = _color.lerp(bg_here or (0, 0, 0), grad[i], fade)
                 buf.set(x0 + i, y0, ch, fg=c, bg=bg_here, attrs=_color.BOLD)
-            if t > 0.55 and phrase:
+            p_fade = ease_in_out(max(0.0, min(1.0, (t - 0.5) / 0.5)))
+            if p_fade > 0.0 and phrase:
                 px = max(0, (cols - len(phrase)) // 2)
                 if y0 + 2 < rows:
-                    buf.text(px, y0 + 2, phrase, fg=_color.lerp((40, 45, 70), _color.SILVER, fade),
-                             bg=buf.cell(px, y0 + 2)[2], attrs=_color.DIM)
+                    bg_phrase = buf.cell(px, y0 + 2)[2]
+                    fg_phrase = _color.lerp((40, 45, 70), _color.SILVER, p_fade)
+                    buf.text(px, y0 + 2, phrase, fg=fg_phrase,
+                             bg=bg_phrase, attrs=_color.DIM)
     if startup_ms is not None:
         label = f"старт: {startup_ms:.0f} мс"
         buf.text(cols - len(label) - 1, rows - 1, label,

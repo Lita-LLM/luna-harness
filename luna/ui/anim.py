@@ -58,6 +58,62 @@ def _call(fn, now) -> bool:
         return False
 
 
+def _clamp01(t: float) -> float:
+    return 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+
+
+def ease_in_out(t: float) -> float:
+    """Плавный старт и плавный конец (smoothstep): спокойное движение."""
+    t = _clamp01(t)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def ease_out(t: float) -> float:
+    """Быстрый старт, мягкое приземление: так восходит луна на заставке."""
+    t = _clamp01(t)
+    u = 1.0 - t
+    return 1.0 - u * u * u
+
+
+def ease_in(t: float) -> float:
+    """Мягкий разгон из покоя."""
+    t = _clamp01(t)
+    return t * t * t
+
+
+def fade(t: float) -> float:
+    """Появление через затухание: доля видимости по прогрессу 0..1."""
+    return ease_in_out(t)
+
+
+class PhraseWheel:
+    """Фразы по кругу, смена — затуханием, а не прыжком.
+
+    text_alpha(now) -> (фраза, доля видимости 0..1): в конце периода фраза
+    уходит в фон (доля → 0), в начале следующего — выходит из фона.
+    Видимость дальше превращается в цвет смешением с фоном.
+    """
+
+    def __init__(self, phrases, period: float = 5.0, fade_seconds: float = 0.4,
+                 started: float | None = None):
+        self.phrases = list(phrases) or ["Думает"]
+        self.period = max(0.5, float(period))
+        self.fade = max(0.0, min(float(fade_seconds), self.period / 2))
+        self.started = time.monotonic() if started is None else started
+
+    def text_alpha(self, now: float) -> tuple:
+        elapsed = max(0.0, now - self.started)
+        idx = int(elapsed / self.period) % len(self.phrases)
+        local = elapsed - int(elapsed / self.period) * self.period
+        if self.fade <= 0:
+            return self.phrases[idx], 1.0
+        if local < self.fade:
+            return self.phrases[idx], ease_in_out(local / self.fade)
+        if local > self.period - self.fade:
+            return self.phrases[idx], ease_in_out((self.period - local) / self.fade)
+        return self.phrases[idx], 1.0
+
+
 class Spinner:
     """Крутилка: кадр по времени, glyph(now) — текущий символ.
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from .. import __version__
 from ..core.paths import DataDir
 from ..core.settings import SOURCE_NAMES, Settings
+from ..core.stdio import ensure_utf8_stdio
 
 _OK, _WARN, _BAD = "✓", "!", "✗"
 
@@ -31,6 +32,7 @@ def _writable(path: Path) -> tuple[bool, str]:
 
 
 def run_doctor() -> int:
+    ensure_utf8_stdio()  # печатаем сами (✓/✗) — кодировка наша забота, не main()
     settings = Settings()
     from ..ui.term import detect_caps
 

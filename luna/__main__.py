@@ -7,12 +7,33 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
 _T0 = time.monotonic()
 
 from . import __version__  # noqa: E402 — лёгкий импорт, только строка версии
+from .core.stdio import ensure_utf8_stdio  # noqa: E402 — лёгкий: внутри только sys
+
+
+def _note_start_marker() -> None:
+    """Метка старта процесса для замеров: если задан LUNA_START_FILE, пишем
+    туда монотонное время старта и PID самой Луны. Родитель (luna try
+    measure на Windows) считает старт от этой метки внутри процесса,
+    а не от Popen — иначе в замер падает создание новой консоли —
+    и меряет память/ЦП по этому PID, а не по обёртке (ЗАДАЧА-03)."""
+    path = os.environ.get("LUNA_START_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="ascii") as f:
+            f.write(repr(_T0) + "\n" + str(os.getpid()) + "\n")
+    except OSError:
+        pass
+
+
+_note_start_marker()
 
 USAGE = """Лунапарк — сессионный ИИ-агент.
 
@@ -22,6 +43,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna set <ключ> <значение>  изменить настройку (например: luna set ui.splash off)
   luna try render           витрина рендерера: палитра, градиенты, фазы луны
   luna try splash           заставка ещё раз
+  luna try snapshot <экран> снимок экрана в HTML: splash | render | main
   luna try measure [--json] замеры: старт, память и ЦП в простое
   luna --version            версия
 """
@@ -84,23 +106,8 @@ def settings_value_type(key: str) -> str:
     return field.type if field else "str"
 
 
-def _force_utf8_stdio() -> None:
-    """Все потоки вывода — UTF-8 с заменой, а не системной кодировкой.
-
-    Простые команды (doctor/settings/measure) часто пишут в пайп или файл,
-    где Windows даёт cp1251 и ✓/✗ роняют вывод UnicodeEncodeError-ом.
-    Terminal.reconfigure спасает только полноэкранный режим, поэтому точка
-    входа настраивает потоки сама — для всех команд (РЕВЬЮ-01, раунд 2).
-    """
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001 — заменённый поток без reconfigure не повод падать
-            pass
-
-
 def main(argv: list[str] | None = None) -> int:
-    _force_utf8_stdio()
+    ensure_utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     from .core.errors import HumanError
 
@@ -140,8 +147,12 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.measure import run_measure
 
                 return run_measure(as_json="--json" in rest)
+            if what == "snapshot":
+                from .devtools.snapshot import run_snapshot
+
+                return run_snapshot(rest[1:])
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, measure.")
+                             "Есть: render, splash, measure, snapshot.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

@@ -9,8 +9,14 @@
 POSIX — псевдотерминал, момент первого кадра виден по его выводу;
 Windows — новая консоль (CREATE_NEW_CONSOLE), а момент первого кадра Луна
 сама пишет в файл-метку (переменная LUNA_FIRST_FRAME_FILE, см. ui/screen.py).
-Контракт замера от транспорта не зависит. Windows-путь реализован после
-ревью вехи 0; в окружении исполнителя живой Windows нет — не проверен.
+Контракт замера от транспорта не зависит.
+
+Старт на Windows считается честно (ЗАДАЧА-03, диагноз тимлида): не от
+Popen — туда падало создание консоли и выходило 475 мс, — а от метки
+старта внутри самого процесса Луны (LUNA_START_FILE, пишет __main__ при
+импорте: монотонные часы + PID). Память и ЦП меряются по PID из той же
+метки — именно процесс Луны, не обёртка и не conhost. В окружении
+исполнителя живой Windows нет — путь покрыт тестами по частям.
 """
 
 from __future__ import annotations
@@ -24,11 +30,14 @@ import tempfile
 import time
 from pathlib import Path
 
+from ..core.stdio import ensure_utf8_stdio
+
 PROGRAM_DIR = Path(__file__).resolve().parents[2]
 IS_WINDOWS = sys.platform == "win32"
 START_RUNS = 7
 IDLE_SECONDS = 10.0
 MARKER_ENV = "LUNA_FIRST_FRAME_FILE"
+START_ENV = "LUNA_START_FILE"
 CREATE_NEW_CONSOLE = 0x00000010  # subprocess.CREATE_NEW_CONSOLE: атрибут есть только на Windows
 
 
@@ -84,20 +93,61 @@ def _stop(proc, master) -> None:
         pass
 
 
-def _spawn_luna_console(home: str, marker: Path):
+def _spawn_luna_console(home: str, marker: Path, start_file: Path):
     """Windows: Луна в новой консоли; вернуть (процесс, момент запуска).
 
     У ребёнка настоящий терминал (своя консоль), размер — какой даст система.
     Первый кадр родитель узнаёт не по выводу, а по файлу-метке: ребёнок
     пишет в него свой time.monotonic() (часы системные, сравнимы между
-    процессами) — см. Screen._note_first_frame.
+    процессами) — см. Screen._note_first_frame. Метку старта ребёнок пишет
+    в start_file при импорте __main__ — см. _read_start_marker.
     """
     env = dict(os.environ, LUNA_HOME=home, PYTHONUNBUFFERED="1")
     env[MARKER_ENV] = str(marker)
+    env[START_ENV] = str(start_file)
     t0 = time.monotonic()
     proc = subprocess.Popen([sys.executable, "-m", "luna"], cwd=PROGRAM_DIR,
                             env=env, creationflags=CREATE_NEW_CONSOLE)
     return proc, t0
+
+
+def _read_start_marker(path: Path):
+    """Прочитать метку старта ребёнка: (монотонное время, PID) или None.
+
+    Формат файла (пишет luna/__main__.py при импорте): первая строка —
+    repr(time.monotonic()) момента старта процесса, вторая — его PID.
+    Второй строки может не быть у старых версий — тогда PID None.
+    """
+    try:
+        lines = path.read_text(encoding="ascii").splitlines()
+        started = float(lines[0])
+        pid = int(lines[1]) if len(lines) > 1 else None
+        return started, pid
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _metric_pid(proc_pid: int, marker_data) -> int:
+    """Чей PID мерять: из метки ребёнка (сам процесс Луны), а не обёртки."""
+    if marker_data and marker_data[1]:
+        return marker_data[1]
+    return proc_pid
+
+
+def _wait_start_frame(marker: Path, start_file: Path, t0: float, proc,
+                      timeout: float = 15.0) -> float | None:
+    """Старт по-честному: первый кадр минус метка старта внутри процесса.
+
+    Если метка старта не читается (старый ребёнок, сбой записи) — падаем
+    на прежнюю семантику «от Popen», чтобы замер не умирал совсем.
+    """
+    frame_ts = _wait_first_frame_marker(marker, 0.0, proc, timeout)
+    if frame_ts is None:
+        return None
+    got = _read_start_marker(start_file)
+    if got is None:
+        return frame_ts - t0
+    return frame_ts - got[0]
 
 
 def _wait_first_frame_marker(marker: Path, t0: float, proc,
@@ -128,17 +178,26 @@ def _stop_console(proc) -> None:
 
 
 def _start_run(home: str):
-    """Один запуск Луны под замер: (процесс, ждать_первый_кадр, остановить)."""
+    """Один запуск Луны под замер.
+
+    Возвращает (процесс, ждать_первый_кадр, остановить, pid_для_метрик).
+    pid_для_метрик звать после первого кадра: на Windows он берёт PID из
+    метки старта ребёнка (сам процесс Луны), на POSIX это просто proc.pid.
+    """
     if IS_WINDOWS:
-        marker = Path(tempfile.mkdtemp(prefix="luna-measure-mark-")) / "first-frame.txt"
-        proc, t0 = _spawn_luna_console(home, marker)
+        mark_dir = Path(tempfile.mkdtemp(prefix="luna-measure-mark-"))
+        marker = mark_dir / "first-frame.txt"
+        start_file = mark_dir / "start.txt"
+        proc, t0 = _spawn_luna_console(home, marker, start_file)
         return (proc,
-                lambda: _wait_first_frame_marker(marker, t0, proc),
-                lambda: _stop_console(proc))
+                lambda: _wait_start_frame(marker, start_file, t0, proc),
+                lambda: _stop_console(proc),
+                lambda: _metric_pid(proc.pid, _read_start_marker(start_file)))
     proc, master, _ = _spawn_luna(home)
     return (proc,
             lambda: _wait_first_frame(master, proc),
-            lambda: _stop(proc, master))
+            lambda: _stop(proc, master),
+            lambda: proc.pid)
 
 
 def _rss_mb(pid: int) -> float | None:
@@ -153,28 +212,58 @@ def _rss_mb(pid: int) -> float | None:
     return None
 
 
+def _memory_counters_class():
+    """Класс PROCESS_MEMORY_COUNTERS с честной раскладкой полей.
+
+    Первые два поля (cb, PageFaultCount) — DWORD (4 байта), остальные —
+    SIZE_T. Прежняя версия объявляла все поля c_size_t, из-за чего
+    WorkingSetSize читался не со своего смещения и замер на Windows
+    показывал 0,1 МБ у живого процесса (диагноз тимлида, ЗАДАЧА-03).
+    Отдельной функцией — чтобы раскладку можно было проверить тестом
+    на любой платформе, без windll.
+    """
+    import ctypes
+
+    class PMC(ctypes.Structure):
+        _fields_ = [("cb", ctypes.c_uint32), ("PageFaultCount", ctypes.c_uint32)] + [
+            (n, ctypes.c_size_t) for n in
+            ("PeakWorkingSetSize", "WorkingSetSize",
+             "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
+             "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+             "PagefileUsage", "PeakPagefileUsage")]
+
+    return PMC
+
+
+def _open_process(kernel32, access: int, pid: int):
+    """OpenProcess с объявленными типами: без restype=c_void_p хэндл на
+    64-битной Windows урезается до C int и указывает не туда."""
+    import ctypes
+
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    return kernel32.OpenProcess(access, False, pid)
+
+
 def _rss_mb_windows(pid: int) -> float | None:
-    """НЕ ПРОВЕРЕНО на живой Windows."""
+    """НЕ ПРОВЕРЕНО на живой Windows; раскладка структуры и типы — тестами."""
     try:
         import ctypes
-        from ctypes import wintypes
-
-        class PMC(ctypes.Structure):
-            _fields_ = [(n, ctypes.c_size_t) for n in
-                        ("cb", "PageFaultCount", "PeakWorkingSetSize", "WorkingSetSize",
-                         "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
-                         "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
-                         "PagefileUsage", "PeakPagefileUsage")]
 
         kernel32 = ctypes.windll.kernel32
-        psapi = ctypes.windll.psapi
-        handle = kernel32.OpenProcess(0x0410, False, pid)
+        handle = _open_process(kernel32, 0x0410, pid)  # QUERY_INFORMATION | VM_READ
         if not handle:
             return None
         try:
+            PMC = _memory_counters_class()
             counters = PMC()
             counters.cb = ctypes.sizeof(PMC)
-            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            get_info = getattr(kernel32, "K32GetProcessMemoryInfo", None)
+            if get_info is None:
+                get_info = ctypes.windll.psapi.GetProcessMemoryInfo
+            get_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(PMC), ctypes.c_uint32]
+            get_info.restype = ctypes.c_int
+            if get_info(handle, ctypes.byref(counters), counters.cb):
                 return round(counters.WorkingSetSize / 1048576, 1)
         finally:
             kernel32.CloseHandle(handle)
@@ -197,18 +286,21 @@ def _cpu_seconds(pid: int) -> float | None:
 
 
 def _cpu_seconds_windows(pid: int) -> float | None:
-    """НЕ ПРОВЕРЕНО на живой Windows."""
+    """НЕ ПРОВЕРЕНО на живой Windows; типы вызовов объявлены, как в RSS."""
     try:
         import ctypes
         from ctypes import wintypes
 
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x0400, False, pid)
+        handle = _open_process(kernel32, 0x0400, pid)  # QUERY_INFORMATION
         if not handle:
             return None
         try:
             ft = [wintypes.FILETIME() for _ in range(4)]
-            if kernel32.GetProcessTimes(handle, *ft):
+            kernel32.GetProcessTimes.restype = ctypes.c_int
+            kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + \
+                [ctypes.POINTER(wintypes.FILETIME)] * 4
+            if kernel32.GetProcessTimes(handle, *[ctypes.byref(f) for f in ft]):
                 def val(f):
                     return (f.dwHighDateTime << 32 | f.dwLowDateTime) / 1e7
 
@@ -229,7 +321,7 @@ def measure() -> dict:
     # (а) старт до первого кадра
     starts = []
     for _ in range(START_RUNS):
-        proc, wait_frame, stop = _start_run(home)
+        proc, wait_frame, stop, _pid = _start_run(home)
         dt = wait_frame()
         stop()
         if dt is not None:
@@ -238,15 +330,16 @@ def measure() -> dict:
         res["start_first_frame_ms"] = int(statistics.median(starts))
         res["start_runs_ms"] = starts
     # (б)+(в) простой: один экземпляр, дать заставке закончиться
-    proc, wait_frame, stop = _start_run(home)
+    proc, wait_frame, stop, metric_pid = _start_run(home)
     try:
         wait_frame()
         time.sleep(2.0)  # заставка ~1,2 с + запас: дальше настоящий простой
-        res["idle_rss_mb"] = _rss_mb(proc.pid)
-        c0 = _cpu_seconds(proc.pid)
+        pid = metric_pid()  # процесс самой Луны (на Windows — из её метки)
+        res["idle_rss_mb"] = _rss_mb(pid)
+        c0 = _cpu_seconds(pid)
         t0 = time.monotonic()
         time.sleep(IDLE_SECONDS)
-        c1 = _cpu_seconds(proc.pid)
+        c1 = _cpu_seconds(pid)
         wall = time.monotonic() - t0
         if c0 is not None and c1 is not None:
             res["idle_cpu_pct"] = round(100 * (c1 - c0) / wall, 3)
@@ -264,6 +357,7 @@ GOALS = [
 
 
 def run_measure(as_json: bool = False) -> int:
+    ensure_utf8_stdio()  # печатаем сами (✓/✗, русский) — кодировка наша забота
     res = measure()
     if as_json:
         print(json.dumps(res, ensure_ascii=False, indent=1))

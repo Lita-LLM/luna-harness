@@ -72,17 +72,25 @@ class _Demo:
                 buf.set(10 + i, y, " ", bg=_color.degrade(c, level))
             y += 1
         y += 1
-        # фазы луны
-        x = 0
+        # Фазы луны двумя рядами на одной шкале процентов: «цикл» —
+        # phase(pct) (50% — полнолуние, 100% — снова новолуние);
+        # «контекст» — context_phase(pct), как фаза выглядит в строке
+        # состояния по заполненности контекста (100% — полнолуние).
+        buf.text(0, y, "цикл:", fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)
+        buf.text(0, y + 2, "контекст:", fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)
+        x = 10
         for pct in (0, 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100):
             glyph = _moon.phase(pct, self.unicode_ok)
             w = str_width(glyph)
             buf.text(x, y, glyph, fg=_color.SILVER, bg=_color.SPACE_BG)
-            buf.text(x, y + 1, f"{pct:g}%", fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)
+            buf.text(x, y + 1, f"{pct:g}%", fg=_color.SILVER, bg=_color.SPACE_BG,
+                     attrs=_color.DIM)
+            buf.text(x, y + 2, _moon.context_phase(pct, self.unicode_ok),
+                     fg=_color.SILVER, bg=_color.SPACE_BG)
             x += w + 4
             if x > cols - 8:
                 break
-        y += 3
+        y += 4
         # ширина: линейка и строка с CJK и эмодзи должны совпасть по правому краю
         ruler = "".join(str(i % 10) for i in range(min(cols, 40)))
         buf.text(0, y, ruler, fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)

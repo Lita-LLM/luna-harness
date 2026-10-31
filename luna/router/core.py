@@ -1,0 +1,185 @@
+# Перенесено из BENDER: bender/router/core.py (коммит 6552ed660bfabf5202569f9905212b77dbf6d31a), сокращено до синхронного ядра.
+"""Роутер: роли моделей, провайдеры, запасные модели при ошибке.
+
+Ссылка на модель — «провайдер:модель» или просто «модель» (провайдер по
+умолчанию из настроек). Ключ провайдера — только из сейфа секретов
+(имя «provider:<провайдер>»), в логи и события он не попадает.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..core.errors import HumanError
+from ..net.http_client import HttpClient
+from .adapters import adapter_for
+from .errors import is_retryable
+from .types import ChatResult
+
+DEFAULT_BASE = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+    "gemini": "https://generativelanguage.googleapis.com",
+}
+
+KNOWN_PROVIDERS = {
+    "openai": ("openai", "https://api.openai.com/v1"),
+    "openrouter": ("openai", "https://openrouter.ai/api/v1"),
+    "deepseek": ("openai", "https://api.deepseek.com/v1"),
+    "anthropic": ("anthropic", "https://api.anthropic.com"),
+    "gemini": ("gemini", "https://generativelanguage.googleapis.com"),
+    "google": ("gemini", "https://generativelanguage.googleapis.com"),
+    "ollama": ("openai", "http://localhost:11434/v1"),
+    "lmstudio": ("openai", "http://localhost:1234/v1"),
+    "llamacpp": ("openai", "http://localhost:8080/v1"),
+}
+
+LOCAL_PROVIDERS = {"ollama", "lmstudio", "llamacpp"}
+
+
+@dataclass
+class ProviderConfig:
+    name: str
+    kind: str
+    base_url: str
+    api_key: str | None = None
+
+
+def secret_name(provider: str) -> str:
+    return "provider:" + provider
+
+
+def parse_ref(ref: str, default_provider: str = "") -> tuple[str, str]:
+    """«провайдер:модель» → (провайдер, модель); без двоеточия — провайдер по умолчанию."""
+    ref = (ref or "").strip()
+    if ":" in ref:
+        provider, model = ref.split(":", 1)
+        return provider.strip(), model.strip()
+    return default_provider, ref
+
+
+class Router:
+    def __init__(self, settings, secrets, http: HttpClient | None = None, providers: dict | None = None):
+        self.settings = settings
+        self.secrets = secrets
+        self.http = http or HttpClient()
+        self._providers = providers or {}
+
+    # --- конфигурация ---
+
+    def provider_config(self, name: str) -> ProviderConfig:
+        if name in self._providers:
+            return self._providers[name]
+        default_name = self.settings.get("model.provider", "") if self.settings else ""
+        if name and name == default_name:
+            kind = self.settings.get("model.kind", "openai")
+            base = self.settings.get("model.base_url", "") or DEFAULT_BASE.get(kind, "")
+        elif name in KNOWN_PROVIDERS:
+            kind, base = KNOWN_PROVIDERS[name]
+        else:
+            kind = "openai"
+            base = DEFAULT_BASE["openai"]
+        key = None
+        if self.secrets is not None and name:
+            key = self.secrets.get(secret_name(name))
+        cfg = ProviderConfig(name=name, kind=kind, base_url=base, api_key=key)
+        self._providers[name] = cfg
+        return cfg
+
+    def role_ref(self, role: str) -> str:
+        """Ссылка роли: пустая роль = главная; главная пуста — ошибка настройки."""
+        if self.settings is None:
+            return ""
+        ref = self.settings.get("model." + role, "")
+        if not ref and role != "main":
+            ref = self.settings.get("model.main", "")
+        return ref or ""
+
+    def resolve(self, ref: str) -> tuple[ProviderConfig, str]:
+        default_name = self.settings.get("model.provider", "") if self.settings else ""
+        provider_name, model = parse_ref(ref, default_name)
+        if not model:
+            raise HumanError(
+                "model_not_set",
+                "Модель не настроена",
+                "Запусти luna setup или задай модель: luna set model.main <модель>.",
+            )
+        if not provider_name:
+            provider_name = default_name or "openai"
+        return self.provider_config(provider_name), model
+
+    # --- вызовы ---
+
+    def _chat_once(self, cfg: ProviderConfig, model: str, messages, tools, emit) -> ChatResult:
+        if cfg.kind == "fake":
+            from ..devtools.fake_llm import FakeModelClient
+
+            client = FakeModelClient()
+            return client.chat(model, messages, tools, emit)
+        adapter = adapter_for(cfg.kind, cfg.base_url)
+        body = adapter.body(model, messages, tools, True)
+        if cfg.kind == "gemini":
+            url = adapter.url(model)
+        else:
+            url = adapter.url()
+        lines = self.http.stream_lines(url, body, adapter.headers(cfg.api_key))
+        try:
+            return adapter.parse_stream(lines, model, emit)
+        except Exception:
+            # Стрим мог не поддерживаться провайдером: пробуем одним ответом.
+            data = self.http.post_json(url if cfg.kind != "gemini" else adapter.full_url(model),
+                                       adapter.body(model, messages, tools, False),
+                                       adapter.headers(cfg.api_key))
+            return adapter.parse_full(data, model)
+
+    def chat(self, messages, tools=None, *, role: str = "main", ref: str = "",
+             on_event=None) -> ChatResult:
+        """Один запрос модели роли (или явной ссылки) со стримом и запасными."""
+        emit = on_event or (lambda kind, text: None)
+        primary = ref or self.role_ref(role)
+        chain = [primary]
+        if self.settings is not None:
+            fallbacks = self.settings.get("model.fallbacks", "") or ""
+            for item in fallbacks.split(","):
+                item = item.strip()
+                if item and item not in chain:
+                    chain.append(item)
+        last_exc: BaseException | None = None
+        for candidate in chain:
+            cfg, model = self.resolve(candidate)
+            try:
+                result = self._chat_once(cfg, model, messages, tools, emit)
+                result.model = candidate
+                return result
+            except Exception as exc:  # noqa: BLE001 — решает классификация ниже
+                last_exc = exc
+                if not is_retryable(exc):
+                    raise
+        if last_exc is not None:
+            raise last_exc
+        raise HumanError("model_not_set", "Модель не настроена", "Запусти luna setup.")
+
+    # --- каталог ---
+
+    def fetch_models(self, provider_name: str = "") -> list[str]:
+        """Список моделей прямо из API провайдера (без чужих каталогов)."""
+        name = provider_name or (self.settings.get("model.provider", "") if self.settings else "")
+        cfg = self.provider_config(name)
+        if cfg.kind == "fake":
+            from ..devtools.fake_llm import MODELS
+
+            return list(MODELS)
+        adapter = adapter_for(cfg.kind, cfg.base_url)
+        data = self.http.get_json(adapter.models_url(), adapter.headers(cfg.api_key), timeout=30.0)
+        items = data.get("data") or data.get("models") or []
+        out = []
+        for item in items:
+            if isinstance(item, dict):
+                mid = item.get("id") or item.get("name") or ""
+                if mid.startswith("models/"):
+                    mid = mid[len("models/"):]
+                if mid:
+                    out.append(mid)
+            elif isinstance(item, str):
+                out.append(item)
+        return sorted(out)

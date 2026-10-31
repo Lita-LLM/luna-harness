@@ -58,6 +58,10 @@ def run_doctor() -> int:
         add(_OK if caps.unicode else _WARN, "Юникод",
             "есть: эмодзи и широкие символы" if caps.unicode
             else "нет: интерфейс перейдёт на ASCII-наборы")
+        if caps.unicode:
+            add(_OK, "Эмодзи",
+                "если координаты в терминале разъезжаются — luna set ui.unicode off "
+                "(ASCII-фазы; рендерер и так якорно переставляет курсор)")
     else:
         add(_WARN, "Терминал", "вывод не в терминал: полноэкранный режим недоступен, "
                                "doctor, settings и set работают")

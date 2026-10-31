@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 import unittest
 from datetime import datetime, timezone
 
@@ -179,6 +181,74 @@ class GuardFlowTest(unittest.TestCase):
         text = buffer_text(buf)
         self.assertIn("Enter — да · n — нет · e — править", text)
         self.assertIn("rm -rf build/", text)
+
+
+class GuardOrderTest(unittest.TestCase):
+    """ЗАДАЧА-06, п. 3: подтверждение — между вызовом тула и результатом;
+    после ответа блок сворачивается в одну строку решения на месте."""
+
+    def feed_pair(self, app, same_id=False):
+        app.on_agent_event({"type": "tool.call", "id": "t1", "name": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки"})
+        gid = "t1" if same_id else "g1"
+        app.on_agent_event({"type": "guard.ask", "id": gid, "tool": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки", "risk": "high",
+                            "reason": "необратимое удаление", "choices": []})
+
+    def rows(self, app):
+        buf, _cursor = app.draw(90, 24, 100.0)
+        return buf, buffer_text(buf).split("\n")
+
+    def test_block_between_call_and_result(self):
+        app = make_app()
+        self.feed_pair(app)
+        _buf, rows = self.rows(app)
+        head = next(i for i, r in enumerate(rows) if "bash" in r and "rm -rf" in r)
+        block = next(i for i, r in enumerate(rows) if "нужно решение" in r)
+        self.assertLess(head, block)
+        app.handle_key(Key("enter"))
+        app.on_agent_event({"type": "tool.result", "id": "t1", "ok": True,
+                            "summary": "Код выхода: 0", "output": ""})
+        _buf, rows = self.rows(app)
+        text = "\n".join(rows)
+        self.assertNotIn("нужно решение", text)
+        decision = next(i for i, r in enumerate(rows) if "решение: да" in r)
+        result = next(i for i, r in enumerate(rows) if "Код выхода: 0" in r)
+        head = next(i for i, r in enumerate(rows) if "bash" in r and "rm -rf" in r)
+        self.assertLess(head, decision)
+        self.assertLess(decision, result)
+
+    def test_same_id_links_like_real_agent(self):
+        # Настоящий агент шлёт guard.ask с id вызова тула — связь по id.
+        app = make_app()
+        self.feed_pair(app, same_id=True)
+        guard = next(e for e in app.entries if e.kind == "guard")
+        self.assertEqual(guard.guard_of, "t1")
+
+    def test_decided_block_collapses_and_bg_gone(self):
+        from luna.ui.chat import GUARD_BG
+
+        app = make_app()
+        self.feed_pair(app)
+        buf, _rows = self.rows(app)
+        warm = sum(1 for row in buf.cells for cell in row if cell[2] == GUARD_BG)
+        self.assertGreater(warm, 0)  # пока ждёт — блок тёплый
+        app.handle_key(Key("n", char="n"))
+        buf, rows = self.rows(app)
+        text = "\n".join(rows)
+        self.assertIn("решение: нет", text)
+        warm = sum(1 for row in buf.cells for cell in row if cell[2] == GUARD_BG)
+        self.assertEqual(warm, 0)  # после решения фона блока не осталось
+
+    def test_guard_without_tool_stays_standalone(self):
+        app = make_app()
+        app.on_agent_event({"type": "guard.ask", "id": "g9", "tool": "bash",
+                            "args": {"command": "ls"}, "intent": "",
+                            "risk": "", "reason": "", "choices": []})
+        _buf, rows = self.rows(app)
+        self.assertTrue(any("нужно решение" in r for r in rows))
 
 
 class AskFlowTest(unittest.TestCase):
@@ -478,6 +548,261 @@ class AstroTest(unittest.TestCase):
         self.assertFalse(north.mirror)
         self.assertTrue(south.mirror)
         self.assertEqual(north.illumination, south.illumination)
+
+
+class TerminalModel:
+    """Модель настоящего терминала (Windows Terminal): применяет поток
+    Screen.present к собственной сетке ячеек.
+
+    Ширина глифов — СВОЯ таблица модели, а не luna.ui.width: дингбаты и
+    текстовые символы — 1 ячейка, эмодзи с представлением и CJK — 2.
+    Если модель ширины Луны разойдётся с терминалом, якорь курсора в
+    present перепрыгнет живую ячейку и в сетке останется «хвост»
+    прошлого кадра — сравнение сетки с буфером это ловит.
+    """
+
+    WIDE2 = set("⚠✨☀❤➕⬛⬜⭐⭕🌑🌒🌓🌔🌕🌖🌗🌘🌙🚀")
+
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        self.cells = [[(" ", None) for _x in range(cols)] for _y in range(rows)]
+        self.x = self.y = 0
+        self.bg = None
+
+    @classmethod
+    def term_width(cls, ch):
+        if not ch or unicodedata.combining(ch):
+            return 0
+        if ch in cls.WIDE2 or ord(ch) >= 0x1F000:
+            return 2
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            return 2
+        return 1
+
+    def feed(self, frame: str) -> None:
+        i = 0
+        while i < len(frame):
+            if frame[i] == "\x1b":
+                m = re.match(r"\x1b\[([0-9;?]*)([A-Za-z])", frame[i:])
+                self.assert_match = m
+                if m is None:
+                    raise AssertionError("непонятная последовательность: "
+                                         + repr(frame[i:i + 16]))
+                params, final = m.group(1), m.group(2)
+                i += m.end()
+                if final == "H":
+                    parts = params.split(";")
+                    self.y = int(parts[0]) - 1
+                    self.x = int(parts[1]) - 1 if len(parts) > 1 and parts[1] else 0
+                elif final == "m":
+                    self._sgr(params)
+                continue
+            self._put(frame[i])
+            i += 1
+
+    def _sgr(self, params: str) -> None:
+        nums = [int(p) if p else 0 for p in params.split(";")] if params else [0]
+        j = 0
+        while j < len(nums):
+            n = nums[j]
+            if n == 0:
+                self.bg = None
+            elif n == 48 and j + 1 < len(nums) and nums[j + 1] == 2:
+                self.bg = (nums[j + 2], nums[j + 3], nums[j + 4])
+                j += 4
+            elif n == 48 and j + 1 < len(nums) and nums[j + 1] == 5:
+                from luna.ui import color
+
+                self.bg = color.rgb_of_256(nums[j + 2])
+                j += 2
+            j += 1
+
+    def _put(self, ch: str) -> None:
+        w = self.term_width(ch)
+        if w == 0 or not (0 <= self.y < self.rows):
+            return
+        x, y = self.x, self.y
+        if w == 2 and x + 1 >= self.cols:
+            return
+        # Запись поверх половины широкого символа зачищает и вторую половину.
+        if self.cells[y][x][0] == "" and x > 0:
+            self.cells[y][x - 1] = (" ", self.bg)
+        elif (self.term_width(self.cells[y][x][0]) == 2 and x + 1 < self.cols
+                and self.cells[y][x + 1][0] == ""):
+            self.cells[y][x + 1] = (" ", self.bg)
+        if w == 2:
+            self.cells[y][x] = (ch, self.bg)
+            self.cells[y][x + 1] = ("", self.bg)
+            self.x = x + 2
+        else:
+            self.cells[y][x] = (ch, self.bg)
+            self.x = x + 1
+
+    def assert_matches(self, tc, buf) -> None:
+        for y in range(buf.rows):
+            model_text = "".join(c[0] for c in self.cells[y])
+            buf_text = "".join(c[0] for c in buf.cells[y])
+            tc.assertEqual(model_text, buf_text, "текст строки " + str(y))
+            for x in range(buf.cols):
+                tc.assertEqual(self.cells[y][x][1], buf.cells[y][x][2],
+                               "фон ячейки " + str(x) + "," + str(y))
+
+
+class NoTailsTest(unittest.TestCase):
+    """ЗАДАЧА-06, п. 1: после сворачивания/разворачивания блока и сдвига
+    ленты в терминале не остаётся хвостов прошлого кадра."""
+
+    def step(self, app, screen, model, frames, tc):
+        buf, cursor = app.draw(60, 16, 100.0)
+        screen.present(buf, cursor=cursor)
+        model.feed(frames[-1])
+        model.assert_matches(tc, buf)
+
+    def test_collapse_expand_and_block_shift(self):
+        from luna.ui.screen import Screen
+
+        app = make_app()
+        frames = []
+        screen = Screen(frames.append, "truecolor", 60, 16)
+        model = TerminalModel(60, 16)
+        app.on_agent_event({"type": "session.start", "model": "m", "mode": "normal",
+                            "cwd": "/tmp"})
+        app.submit_text("подтверди чистку")
+        app.on_agent_event({"type": "turn.start", "turn": 1})
+        app.on_agent_event({"type": "tool.call", "id": "t1", "name": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки"})
+        self.step(app, screen, model, frames, self)          # строка тула, идёт ход
+        app.on_agent_event({"type": "guard.ask", "id": "g1", "tool": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки", "risk": "high",
+                            "reason": "необратимое удаление", "choices": []})
+        self.step(app, screen, model, frames, self)          # блок подтверждения
+        app.handle_key(Key("enter"))                  # человек сказал «да»
+        app.on_agent_event({"type": "tool.result", "id": "t1", "ok": True,
+                            "summary": "Код выхода: 0",
+                            "output": "первая строка\nвторая строка\n"})
+        self.step(app, screen, model, frames, self)          # решение + результат
+        app.handle_key(Key("o", mods=frozenset({"ctrl"})))
+        self.step(app, screen, model, frames, self)          # вывод развёрнут
+        app.handle_key(Key("o", mods=frozenset({"ctrl"})))
+        self.step(app, screen, model, frames, self)          # вывод свёрнут обратно
+        app.on_agent_event({"type": "agent.text", "text": "Готово, чисто."})
+        app.on_agent_event({"type": "turn.done", "turn": 1, "reason": "end"})
+        self.step(app, screen, model, frames, self)          # лента сдвинулась
+
+
+class CopyTest(unittest.TestCase):
+    """ЗАДАЧА-06, п. 4: OSC 52, выделение мышью, /copy и /copy err."""
+
+    def test_osc52_roundtrip(self):
+        import base64
+
+        from luna.ui import clipboard
+
+        seq = clipboard.osc52_sequence("привет ✦")
+        self.assertTrue(seq.startswith("\x1b]52;c;"))
+        self.assertTrue(seq.endswith("\a"))
+        payload = seq[len("\x1b]52;c;"):-1]
+        self.assertEqual(base64.b64decode(payload).decode("utf-8"), "привет ✦")
+
+    def test_copy_text_write_path(self):
+        from unittest import mock
+
+        from luna.ui import clipboard
+
+        out = []
+        with mock.patch.object(clipboard, "IS_WINDOWS", False):
+            way = clipboard.copy_text("текст", write=out.append)
+        self.assertEqual(way, "osc52")
+        self.assertEqual(len(out), 1)
+        self.assertIn("52;c;", out[0])
+
+    def test_copy_text_windows_clip_backup(self):
+        from unittest import mock
+
+        from luna.ui import clipboard
+
+        with mock.patch.object(clipboard, "IS_WINDOWS", True), \
+                mock.patch.object(clipboard, "_clip_exe", lambda text: True):
+            self.assertEqual(clipboard.copy_text("текст", write=lambda s: None),
+                             "osc52+clip")
+            self.assertEqual(clipboard.copy_text("текст"), "clip")
+        with mock.patch.object(clipboard, "IS_WINDOWS", False):
+            self.assertEqual(clipboard.copy_text("текст"), "none")
+
+    def make_feed_app(self):
+        app = make_app()
+        app.copied = []
+        app.copy_hook = app.copied.append
+        app.on_agent_event({"type": "notice", "text": "альфа бета гамма"})
+        app.draw(60, 16, 100.0)
+        return app
+
+    def test_drag_selection_copies_on_release(self):
+        from luna.ui.keys import Mouse
+
+        app = self.make_feed_app()
+        app.handle_mouse(Mouse("press", 2, 1, button=0))    # строка 0, колонка 1
+        app.handle_mouse(Mouse("move", 7, 1, button=0))     # тянем до колонки 6
+        app.handle_mouse(Mouse("release", 7, 1, button=0))
+        self.assertEqual(app.copied, ["льфа б"])
+
+    def test_double_click_selects_word(self):
+        from luna.ui.keys import Mouse
+
+        app = self.make_feed_app()
+        app.handle_mouse(Mouse("press", 9, 1, button=0))    # внутри слова «бета»
+        app.handle_mouse(Mouse("release", 9, 1, button=0))
+        app.handle_mouse(Mouse("press", 9, 1, button=0))    # второй клик — слово
+        self.assertEqual(app.copied, ["бета"])
+
+    def test_selection_highlight_reverse(self):
+        from luna.ui import color
+        from luna.ui.keys import Mouse
+
+        app = self.make_feed_app()
+        app.handle_mouse(Mouse("press", 2, 1, button=0))
+        app.handle_mouse(Mouse("move", 5, 1, button=0))
+        buf, _cursor = app.draw(60, 16, 100.0)
+        attrs = buf.cells[0][2][3]
+        self.assertTrue(attrs & color.REVERSE)
+        plain = buf.cells[0][10][3]
+        self.assertFalse(plain & color.REVERSE)
+
+    def test_copy_last_answer_and_error(self):
+        app = make_app()
+        app.copied = []
+        app.copy_hook = app.copied.append
+        app.on_agent_event({"type": "agent.text", "text": "Готовый ответ"})
+        app.on_agent_event({"type": "agent.text.done"})
+        app.submit_text("/copy")
+        self.assertEqual(app.copied, ["Готовый ответ"])
+        app.on_agent_event({"type": "error", "message": "упало",
+                            "detail": "подробности падения"})
+        app.submit_text("/copy err")
+        self.assertEqual(app.copied[-1], "упало\nподробности падения")
+        notes = [e.text for e in app.entries if e.kind == "notice"]
+        self.assertTrue(any("Скопировано" in t for t in notes))
+
+    def test_copy_nothing_and_no_hook(self):
+        app = make_app()
+        app.copied = []
+        app.copy_hook = app.copied.append
+        app.submit_text("/copy")
+        self.assertEqual(app.copied, [])
+        app2 = make_app()  # без хука
+        app2.on_agent_event({"type": "agent.text", "text": "ответ"})
+        app2.submit_text("/copy")
+        notes = [e.text for e in app2.entries if e.kind == "notice"]
+        self.assertTrue(any("недоступен" in t for t in notes))
+
+    def test_help_mentions_shift_drag(self):
+        app = make_app()
+        app.submit_text("/help")
+        help_entry = next(e for e in app.entries if e.kind == "help")
+        self.assertIn("Shift+протяжка", help_entry.text)
+        self.assertIn("/copy err", help_entry.text)
 
 
 class ChatSnapshotTest(unittest.TestCase):

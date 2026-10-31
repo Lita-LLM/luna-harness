@@ -30,7 +30,7 @@ from .markdown import Span, render_markdown, wrap_spans, wrap_text
 from .panels import LayoutTree, create_panel
 from .screen import Buffer, Screen
 from .term import Terminal
-from .width import str_width
+from .width import char_width, str_width
 
 MODES = ("normal", "plan", "review", "auto", "yolo")
 STATUS_BG = (0x16, 0x1B, 0x30)
@@ -64,6 +64,10 @@ _STYLE_MAP = {
 HELP_TEXT = """Команды и клавиши Луны
 /mode [режим] — режим по кругу или по имени (normal plan review auto yolo)
 /clear — очистить ленту · /help — эта справка · /exit — выход
+/copy — скопировать последний ответ · /copy err — последнюю ошибку целиком
+/sessions — сессии этого каталога на диске (LUNA_HOME/sessions)
+Выделение мышью: протяжка по ленте копирует текст, двойной клик — слово
+Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
 /panels или Ctrl+T — панель плана (todo) · /layout save|load|list <имя> — раскладки
 !команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить путь)
 Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор
@@ -105,6 +109,23 @@ def diff_counts(summary: str, output: str):
     return None
 
 
+def _wordy(ch: str) -> bool:
+    """Символ «слова» для двойного клика: буквы, цифры и знаки путей/команд."""
+    return ch.isalnum() or ch in "_-./:\\@#~"
+
+
+def _cells_slice(text: str, a: int, b) -> str:
+    """Срез строки по колонкам ячеек [a..b] включительно; b=None — до конца."""
+    out = []
+    pos = 0
+    for ch in text:
+        w = char_width(ch)
+        if pos >= a and (b is None or pos <= b):
+            out.append(ch)
+        pos += w
+    return "".join(out)
+
+
 def compact_args(name: str, args: dict) -> str:
     """Однострочная суть вызова тула для компактной строки ленты."""
     if not isinstance(args, dict) or not args:
@@ -139,18 +160,23 @@ class Entry:
     reason: str = ""
     born: float = 0.0
     streaming: bool = False
+    guard_of: str = ""     # guard: id тула, к которому относится подтверждение
 
 
 class ChatApp:
     """Состояние чат-экрана и реакции на ввод и события источника."""
 
     def __init__(self, bus=None, settings=None, scheduler=None,
-                 glyph_mode="emoji", source=None, cwd=None):
+                 glyph_mode="emoji", source=None, cwd=None, trap=None,
+                 copy_hook=None, journal=None):
         self.bus = bus or EventBus()
         self.settings = settings or Settings()
         self.scheduler = scheduler or Scheduler()
         self.glyph_mode = _moon.normalize_mode(glyph_mode)
         self.cwd = cwd or os.getcwd()
+        self.trap = trap  # ErrorTrap полноэкранного сеанса: ошибки потоков — в ленту
+        self.journal = journal  # SessionJournal: события и команды на диск (п. 5)
+        self._restoring = False
         self.source = source if source is not None else create_source(self.settings)
         self.editor = TextEditor()
         self.entries: list = []
@@ -170,6 +196,15 @@ class ChatApp:
         self.guard_editing = False
         self.completions: list = []
         self.completion_index = 0
+        # Копирование (п. 4): хук в буфер обмена ставит run_chat; выделение —
+        # пара ((строка, колонка), (строка, колонка)) визуальных линий ленты.
+        self.copy_hook = copy_hook
+        self.selection: tuple | None = None
+        self._sel_anchor: tuple | None = None
+        self._last_press: tuple | None = None
+        self._feed_texts: list = []
+        self._feed_first = 0
+        self._feed_geom = (0, 0)
         self._clock = time.monotonic
         self._last_esc = -10.0
         self._last_change = 0.0
@@ -191,15 +226,61 @@ class ChatApp:
         self.poll_source()
 
     def poll_source(self) -> list:
+        events = []
+        if self.trap is not None:
+            # Ошибки фоновых потоков приходят событиями error — как от источника.
+            events.extend(self.trap.drain())
         poll = getattr(self.source, "poll", None)
-        if not callable(poll):
-            return []
-        events = poll()
+        if callable(poll):
+            events.extend(poll())
         for ev in events:
             self.on_agent_event(ev)
         return events
 
+    def restore(self, records: list) -> None:
+        """Воспроизвести журнал прошлой сессии в ленту (luna --continue).
+
+        События идут обычным путём on_agent_event, команды применяют только
+        свой видимый эффект: источнику ничего не отправляется, в журнал
+        ничего не дописывается. Висячие подтверждения и вопросы прошлой
+        сессии помечаются «прервано» — отвечать на них некому.
+        """
+        self._restoring = True
+        try:
+            for rec in records:
+                data = rec.get("data") or {}
+                if rec.get("kind") == "event":
+                    self.on_agent_event(data)
+                elif rec.get("kind") == "command":
+                    self._restore_command(data)
+        finally:
+            self._restoring = False
+        self.busy = False
+        for entry in self.entries:
+            entry.streaming = False
+            if entry.kind in ("guard", "ask") and entry.status == "pending":
+                entry.status = "прервано"
+
+    def _restore_command(self, cmd: dict) -> None:
+        kind = cmd.get("type")
+        if kind == "user.message":
+            self._add(Entry("user", text=str(cmd.get("text", ""))))
+        elif kind == "shell":
+            self._add(Entry("shell", text=str(cmd.get("command", ""))))
+        elif kind == "guard.answer":
+            entry = self._find("guard", str(cmd.get("id", "")))
+            if entry is not None:
+                entry.status = str(cmd.get("decision", ""))
+        elif kind == "user.answer":
+            entry = self._find("ask", str(cmd.get("id", "")))
+            if entry is not None:
+                entry.status = "answered"
+                entry.answer = str(cmd.get("text", ""))
+        # mode.set восстановится событием mode.changed из того же журнала
+
     def send_command(self, cmd: dict) -> None:
+        if self.journal is not None:
+            self.journal.append_command(cmd)
         self.sent_commands.append(dict(cmd))
         handler = getattr(self.source, "handle_command", None)
         if callable(handler):
@@ -210,6 +291,8 @@ class ChatApp:
     def needs_frame(self, now: float) -> bool:
         """Кадры нужны, пока идёт ход, есть события или что-то затухает."""
         if self.busy:
+            return True
+        if self.trap is not None and self.trap.pending:
             return True
         pending = getattr(self.source, "has_pending", None)
         if callable(pending) and pending():
@@ -243,6 +326,8 @@ class ChatApp:
         return None
 
     def on_agent_event(self, ev: dict) -> None:
+        if self.journal is not None and not self._restoring:
+            self.journal.append_event(ev)
         kind = ev.get("type")
         self._last_change = self._clock()
         if kind == "session.start":
@@ -279,12 +364,26 @@ class ChatApp:
             if out and out not in entry.output:
                 entry.output += out
         elif kind == "guard.ask":
-            self._add(Entry("guard", name=str(ev.get("tool", "")),
-                            intent=str(ev.get("intent", "")),
-                            args=dict(ev.get("args") or {}),
-                            entry_id=str(ev.get("id", "")), status="pending",
-                            risk=str(ev.get("risk", "")),
-                            reason=str(ev.get("reason", ""))))
+            entry = Entry("guard", name=str(ev.get("tool", "")),
+                          intent=str(ev.get("intent", "")),
+                          args=dict(ev.get("args") or {}),
+                          entry_id=str(ev.get("id", "")), status="pending",
+                          risk=str(ev.get("risk", "")),
+                          reason=str(ev.get("reason", "")))
+            # Подтверждение относится к вызову тула: у настоящего агента
+            # guard.ask несёт тот же id, что tool.call; у фальшивого —
+            # ищем идущий тул с тем же именем. Показываться блок будет
+            # внутри записи тула — между вызовом и результатом (п. 3).
+            tool = self._find("tool", entry.entry_id)
+            if tool is None:
+                for cand in reversed(self.entries):
+                    if (cand.kind == "tool" and cand.status == "running"
+                            and cand.name == entry.name):
+                        tool = cand
+                        break
+            if tool is not None:
+                entry.guard_of = tool.entry_id
+            self._add(entry)
         elif kind == "guard.verdict":
             entry = self._find("guard", str(ev.get("id", "")))
             if entry is not None and entry.status == "pending":
@@ -376,6 +475,10 @@ class ChatApp:
                 self._add(Entry("notice", text="Нет режима " + parts[1]))
             else:
                 self.cycle_mode(1)
+        elif cmd == "/copy":
+            self._copy_command(parts[1:])
+        elif cmd == "/sessions":
+            self._sessions_command()
         elif cmd in ("/panels", "/todo"):
             self.toggle_panel("todo")
         elif cmd == "/layout":
@@ -402,6 +505,43 @@ class ChatApp:
             self._add(Entry("notice", text="Сохранённые раскладки: " + names))
         else:
             self._add(Entry("notice", text="Нужно: /layout save|load|list <имя>"))
+
+    def _sessions_command(self) -> None:
+        """/sessions — сессии на диске, свежие сверху; этот каталог помечен."""
+        from ..core.sessions import list_sessions
+
+        items = list_sessions(DataDir())
+        if not items:
+            self._add(Entry("notice", text="Сессий на диске пока нет."))
+            return
+        lines = ["Сессии на диске (свежие сверху, «·» — этот каталог):"]
+        for s in items[:10]:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["started"]))
+            mark = "· " if s["cwd"] == self.cwd else "  "
+            lines.append(mark + when + " · записей: " + str(s["records"])
+                         + " · " + s["cwd"])
+        self._add(Entry("help", text="\n".join(lines)))
+
+    def _copy_command(self, args: list) -> None:
+        """/copy — последний ответ агента; /copy err — последняя ошибка целиком."""
+        if args and args[0] == "err":
+            entry = next((e for e in reversed(self.entries)
+                          if e.kind == "error" and e.text), None)
+            what, empty = "ошибку", "Ошибок в ленте пока нет."
+        else:
+            entry = next((e for e in reversed(self.entries)
+                          if e.kind == "agent" and e.text), None)
+            what, empty = "ответ", "Ответов агента в ленте пока нет."
+        if entry is None:
+            self._add(Entry("notice", text=empty))
+            return
+        if self.copy_hook is None:
+            self._add(Entry("notice", text="Буфер обмена недоступен в этом режиме."))
+            return
+        self.copy_hook(entry.text)
+        count = str(len(entry.text))
+        self._add(Entry("notice", text="Скопировано в буфер обмена (" + what
+                                       + "): " + count + " символов."))
 
     def toggle_panel(self, panel_id: str) -> None:
         if not self.settings.get("ui.panels"):
@@ -503,6 +643,8 @@ class ChatApp:
         if key.label == "ctrl+c" or key.name == "eof":
             self.done = True
             return
+        if key.name not in ("pageup", "pagedown"):
+            self.selection = None  # любая работа с клавиатуры снимает выделение
         guard = self.pending_guard
         if guard is not None:
             self._guard_key(key, guard)
@@ -664,6 +806,118 @@ class ChatApp:
             self.scroll = min(self.scroll + 3, 100000)
         elif mouse.kind == "wheel_down":
             self.scroll = max(0, self.scroll - 3)
+        elif mouse.kind == "press" and mouse.button == 0:
+            self._mouse_press(mouse)
+        elif mouse.kind == "move" and self._sel_anchor is not None:
+            pos = self._feed_pos(mouse)
+            if pos is not None:
+                self.selection = (self._sel_anchor, pos)
+        elif mouse.kind == "release" and mouse.button == 0:
+            anchor, self._sel_anchor = self._sel_anchor, None
+            if anchor is None or self.selection is None:
+                return
+            (l0, c0), (l1, c1) = self._sel_range()
+            if (l0, c0) == (l1, c1):
+                return  # простой клик без протяжки — не выделение
+            text = self.selection_text()
+            if text.strip() and self.copy_hook is not None:
+                self.copy_hook(text)
+
+    # --- выделение мышью и копирование ------------------------------------------------
+
+    def _feed_pos(self, mouse: Mouse):
+        """Мышь → (индекс визуальной строки ленты, колонка ячеек) или None."""
+        chat_w, feed_h = self._feed_geom
+        x, y = mouse.x - 1, mouse.y - 1
+        if not (0 <= y < feed_h and 0 <= x < chat_w):
+            return None
+        idx = self._feed_first + y
+        if idx >= len(self._feed_texts):
+            return None
+        return idx, x
+
+    def _mouse_press(self, mouse: Mouse) -> None:
+        pos = self._feed_pos(mouse)
+        if pos is None:
+            self.selection = None
+            self._sel_anchor = None
+            return
+        now = self._clock()
+        last = self._last_press
+        self._last_press = (now, mouse.x, mouse.y)
+        if (last is not None and now - last[0] < 0.45
+                and abs(mouse.x - last[1]) <= 1 and abs(mouse.y - last[2]) <= 1):
+            self._select_word(pos)  # двойной клик — слово целиком, сразу в буфер
+            self._sel_anchor = None
+            text = self.selection_text()
+            if text.strip() and self.copy_hook is not None:
+                self.copy_hook(text)
+            return
+        self._sel_anchor = pos
+        self.selection = (pos, pos)
+
+    def _select_word(self, pos) -> None:
+        idx, col = pos
+        text = self._feed_texts[idx]
+        starts = []
+        p = 0
+        for ch in text:
+            starts.append(p)
+            p += char_width(ch)
+        ci = None
+        for i, start in enumerate(starts):
+            if start <= col < start + char_width(text[i]):
+                ci = i
+                break
+        if ci is None or not _wordy(text[ci]):
+            self.selection = (pos, pos)
+            return
+        a = ci
+        while a > 0 and _wordy(text[a - 1]):
+            a -= 1
+        b = ci
+        while b + 1 < len(text) and _wordy(text[b + 1]):
+            b += 1
+        end_col = starts[b] + char_width(text[b]) - 1
+        self.selection = ((idx, starts[a]), (idx, end_col))
+
+    def _sel_range(self):
+        (l0, c0), (l1, c1) = self.selection
+        if (l1, c1) < (l0, c0):
+            return (l1, c1), (l0, c0)
+        return (l0, c0), (l1, c1)
+
+    def selection_text(self) -> str:
+        """Текст выделения по визуальным строкам последнего кадра."""
+        if self.selection is None:
+            return ""
+        (l0, c0), (l1, c1) = self._sel_range()
+        out = []
+        for idx in range(l0, l1 + 1):
+            if idx >= len(self._feed_texts):
+                break
+            text = self._feed_texts[idx]
+            a = c0 if idx == l0 else 0
+            b = c1 if idx == l1 else None
+            out.append(_cells_slice(text, a, b))
+        return "\n".join(out)
+
+    def _draw_selection(self, buf: Buffer, first: int, feed_h: int) -> None:
+        """Подсветка выделения: REVERSE на ячейках видимой части диапазона."""
+        if self.selection is None:
+            return
+        (l0, c0), (l1, c1) = self._sel_range()
+        for idx in range(l0, l1 + 1):
+            row = idx - first
+            if not (0 <= row < feed_h) or idx >= len(self._feed_texts):
+                continue
+            text = self._feed_texts[idx]
+            line_w = str_width(text)
+            a = c0 if idx == l0 else 0
+            b = c1 if idx == l1 else max(0, line_w - 1)
+            for x in range(a, min(b, buf.cols - 1) + 1):
+                ch, fg, bg, attrs = buf.cells[row][x]
+                buf.cells[row][x] = (ch, fg, bg, attrs | _color.REVERSE)
 
     # --- автодополнение @файл --------------------------------------------------------------
 
@@ -766,6 +1020,8 @@ class ChatApp:
             add(head)
             if entry.intent:
                 add([("  " + entry.intent, "dim")])
+            for guard in self._guards_for(entry):
+                self._guard_lines(guard, w, add)
             if entry.status == "done":
                 mark = "✓ " if entry.ok else "✗ "
                 style = "ok" if entry.ok else "err"
@@ -811,7 +1067,22 @@ class ChatApp:
             add([("$ ", "cyan"), (entry.text, "text")])
         return raw
 
+    _DECISIONS = {"yes": "да", "no": "нет", "edit": "да, с правкой",
+                  "always": "да, дальше без вопросов", "stop": "стоп"}
+
     def _guard_lines(self, entry: Entry, width: int, add) -> None:
+        if entry.status != "pending":
+            # Решённый блок сворачивается в одну строку решения на месте —
+            # тёплый фон не остаётся висеть в ленте (ЗАДАЧА-06, п. 3).
+            denied = entry.status in ("no", "stop", "прервано")
+            mark = "✗ " if denied else "✓ "
+            label = self._DECISIONS.get(entry.status, entry.status)
+            line = "решение: " + label
+            target = (entry.name + " " + compact_args(entry.name, entry.args)).strip()
+            if target:
+                line += " · " + target
+            add([(mark, "err" if denied else "ok"), (line, "dim")])
+            return
         mark = "⚠ " if self.glyph_mode == "emoji" else "! "
         head = "нужно решение"
         if entry.risk:
@@ -827,9 +1098,7 @@ class ChatApp:
             add([("  причина: " + entry.reason, "dim")], GUARD_BG)
         add([("  Enter — да · n — нет · e — править · a — дальше без вопросов · q — стоп",
               "guard")], GUARD_BG)
-        if entry.status != "pending":
-            add([("  решение: " + entry.status, "dim")], GUARD_BG)
-        elif self.guard_editing:
+        if self.guard_editing:
             add([("  правка аргументов: Enter — отправить, Esc — отмена", "dim")], GUARD_BG)
 
     def _ask_lines(self, entry: Entry, width: int, add) -> None:  # noqa: ARG002 — единый вид строителей строк
@@ -860,9 +1129,18 @@ class ChatApp:
         if not entry.expanded and len(items) > len(show):
             add([("  · Ctrl+O — весь план, Ctrl+T — панель", "dim")])
 
+    def _guards_for(self, tool_entry: Entry) -> list:
+        """Подтверждения, относящиеся к этому тулу, в порядке прихода."""
+        return [e for e in self.entries
+                if e.kind == "guard" and e.guard_of
+                and e.guard_of == tool_entry.entry_id]
+
     def _feed_lines(self, width: int, now: float):
         lines: list = []
         for entry in self.entries:
+            if (entry.kind == "guard" and entry.guard_of
+                    and self._find("tool", entry.guard_of) is not None):
+                continue  # рисуется внутри своего тула, между вызовом и результатом
             lines.extend(self._entry_lines(entry, width, now))
             lines.append(([], None))
         if lines:
@@ -950,12 +1228,19 @@ class ChatApp:
         self.scroll = max(0, min(self.scroll, max_scroll))
         end = len(lines) - self.scroll
         start = max(0, end - feed_h)
+        # Геометрия и тексты ленты — для выделения мышью и копирования (п. 4):
+        # строки хранятся все, first — индекс первой видимой на этом кадре.
+        self._feed_texts = ["".join(t for t, _f, _a in spans)
+                            for spans, _bg in lines]
+        self._feed_first = start
+        self._feed_geom = (chat_w, feed_h)
         for row, (spans, bg) in enumerate(lines[start:end]):
             if bg is not None:
                 buf.fill_rect(0, row, chat_w, 1, " ", bg=bg)
             x = 0
             for text, fg, attrs in spans:
                 x += buf.text(x, row, text, fg=fg, bg=bg or _color.SPACE_BG, attrs=attrs)
+        self._draw_selection(buf, start, feed_h)
         if panel_w:
             self._draw_panels(buf, chat_w, 0, panel_w, feed_h + input_h + completion_h, now)
         cy = feed_h
@@ -979,8 +1264,38 @@ class ChatApp:
         return buf, cursor
 
 
-def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True) -> int:
+def _copy_to_clipboard(text: str, term: Terminal) -> str:
+    """Хук копирования для ChatApp: OSC 52 в терминал (+ clip.exe на Windows)."""
+    from .clipboard import copy_text
+
+    return copy_text(text, write=term.write)
+
+
+def _open_session(settings, data, continue_last: bool, fake: bool):
+    """(журнал, записи для восстановления) сеанса чата (п. 5).
+
+    Журнал ведётся, если включён настройкой chat.session_log; витрина
+    `luna try chat` (фальшивый агент) историю не пишет. При --continue
+    берём последнюю сессию этого каталога и дописываем в тот же файл.
+    """
+    if fake and not continue_last:
+        return None, []
+    if not settings.get("chat.session_log"):
+        return None, []
+    from ..core.sessions import SessionJournal, find_last
+
+    cwd = os.getcwd()
+    if continue_last:
+        path = find_last(data, cwd)
+        if path is not None:
+            return SessionJournal.resume(data, path)
+    return SessionJournal.create(data, cwd), []
+
+
+def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
+             continue_last: bool = False) -> int:
     """Полноэкранный чат: терминал, цикл ввода, источник событий."""
+    from .errtrap import ErrorTrap
     from .splash import play_splash
 
     settings = Settings()
@@ -991,31 +1306,51 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
         return 0
     data = DataDir()
     data.ensure()
+    # Пока экран наш, ошибки потоков и stderr уходят в лог, а не поверх
+    # ленты (ЗАДАЧА-06, п. 2): лог — LUNA_HOME/logs/chat-<время>.log.
+    trap = ErrorTrap(data.logs / ("chat-" + time.strftime("%Y%m%d-%H%M%S") + ".log"))
+    journal, restored = _open_session(settings, data, continue_last, fake)
     with RunLock(data.root):
         with term:
-            cols, rows = term.size()
-            screen = Screen(term.write, term.caps.color_level, cols, rows)
-            if splash_first and play_splash(term, screen, settings, bus, started_at) == "exit":
-                return 0
-            app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
-                          source=create_source(settings, fake=fake))
-            app.start_source()
-            while not app.done:
-                events = term.read_events(timeout=app.next_timeout())
-                size = term.size()
-                if size != (screen.cols, screen.rows):
-                    screen.resize(*size)
-                for ev in events:
-                    if isinstance(ev, Key):
-                        app.handle_key(ev)
-                    elif isinstance(ev, Mouse):
-                        app.handle_mouse(ev)
-                    elif isinstance(ev, Paste):
-                        app.handle_paste(ev)
-                    elif isinstance(ev, Resize):
-                        screen.resize(ev.cols, ev.rows)
-                app.poll_source()
-                buf, cursor = app.draw(size[0], size[1], time.monotonic())
-                screen.present(buf, cursor=cursor)
+            trap.install()
+            try:
+                cols, rows = term.size()
+                screen = Screen(term.write, term.caps.color_level, cols, rows)
+                if splash_first and play_splash(term, screen, settings, bus, started_at) == "exit":
+                    return 0
+                app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
+                              source=create_source(settings, fake=fake), trap=trap,
+                              copy_hook=lambda text: _copy_to_clipboard(text, term),
+                              journal=journal)
+                if restored:
+                    app.restore(restored)
+                elif continue_last:
+                    if journal is None:
+                        note = "Журнал сессий выключен настройкой chat.session_log."
+                    else:
+                        note = "Продолжить нечего: прошлых сессий в этом каталоге нет."
+                    app._add(Entry("notice", text=note))
+                app.start_source()
+                while not app.done:
+                    events = term.read_events(timeout=app.next_timeout())
+                    size = term.size()
+                    if size != (screen.cols, screen.rows):
+                        screen.resize(*size)
+                    for ev in events:
+                        if isinstance(ev, Key):
+                            app.handle_key(ev)
+                        elif isinstance(ev, Mouse):
+                            app.handle_mouse(ev)
+                        elif isinstance(ev, Paste):
+                            app.handle_paste(ev)
+                        elif isinstance(ev, Resize):
+                            screen.resize(ev.cols, ev.rows)
+                    app.poll_source()
+                    buf, cursor = app.draw(size[0], size[1], time.monotonic())
+                    screen.present(buf, cursor=cursor)
+            finally:
+                trap.uninstall()
+                if journal is not None:
+                    journal.close()
     print(phrases.event_phrase("end") or "Орёл сел.")
     return 0

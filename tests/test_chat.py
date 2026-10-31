@@ -692,6 +692,119 @@ class NoTailsTest(unittest.TestCase):
         self.step(app, screen, model, frames, self)          # лента сдвинулась
 
 
+class CopyTest(unittest.TestCase):
+    """ЗАДАЧА-06, п. 4: OSC 52, выделение мышью, /copy и /copy err."""
+
+    def test_osc52_roundtrip(self):
+        import base64
+
+        from luna.ui import clipboard
+
+        seq = clipboard.osc52_sequence("привет ✦")
+        self.assertTrue(seq.startswith("\x1b]52;c;"))
+        self.assertTrue(seq.endswith("\a"))
+        payload = seq[len("\x1b]52;c;"):-1]
+        self.assertEqual(base64.b64decode(payload).decode("utf-8"), "привет ✦")
+
+    def test_copy_text_write_path(self):
+        from unittest import mock
+
+        from luna.ui import clipboard
+
+        out = []
+        with mock.patch.object(clipboard, "IS_WINDOWS", False):
+            way = clipboard.copy_text("текст", write=out.append)
+        self.assertEqual(way, "osc52")
+        self.assertEqual(len(out), 1)
+        self.assertIn("52;c;", out[0])
+
+    def test_copy_text_windows_clip_backup(self):
+        from unittest import mock
+
+        from luna.ui import clipboard
+
+        with mock.patch.object(clipboard, "IS_WINDOWS", True), \
+                mock.patch.object(clipboard, "_clip_exe", lambda text: True):
+            self.assertEqual(clipboard.copy_text("текст", write=lambda s: None),
+                             "osc52+clip")
+            self.assertEqual(clipboard.copy_text("текст"), "clip")
+        with mock.patch.object(clipboard, "IS_WINDOWS", False):
+            self.assertEqual(clipboard.copy_text("текст"), "none")
+
+    def make_feed_app(self):
+        app = make_app()
+        app.copied = []
+        app.copy_hook = app.copied.append
+        app.on_agent_event({"type": "notice", "text": "альфа бета гамма"})
+        app.draw(60, 16, 100.0)
+        return app
+
+    def test_drag_selection_copies_on_release(self):
+        from luna.ui.keys import Mouse
+
+        app = self.make_feed_app()
+        app.handle_mouse(Mouse("press", 2, 1, button=0))    # строка 0, колонка 1
+        app.handle_mouse(Mouse("move", 7, 1, button=0))     # тянем до колонки 6
+        app.handle_mouse(Mouse("release", 7, 1, button=0))
+        self.assertEqual(app.copied, ["льфа б"])
+
+    def test_double_click_selects_word(self):
+        from luna.ui.keys import Mouse
+
+        app = self.make_feed_app()
+        app.handle_mouse(Mouse("press", 9, 1, button=0))    # внутри слова «бета»
+        app.handle_mouse(Mouse("release", 9, 1, button=0))
+        app.handle_mouse(Mouse("press", 9, 1, button=0))    # второй клик — слово
+        self.assertEqual(app.copied, ["бета"])
+
+    def test_selection_highlight_reverse(self):
+        from luna.ui import color
+        from luna.ui.keys import Mouse
+
+        app = self.make_feed_app()
+        app.handle_mouse(Mouse("press", 2, 1, button=0))
+        app.handle_mouse(Mouse("move", 5, 1, button=0))
+        buf, _cursor = app.draw(60, 16, 100.0)
+        attrs = buf.cells[0][2][3]
+        self.assertTrue(attrs & color.REVERSE)
+        plain = buf.cells[0][10][3]
+        self.assertFalse(plain & color.REVERSE)
+
+    def test_copy_last_answer_and_error(self):
+        app = make_app()
+        app.copied = []
+        app.copy_hook = app.copied.append
+        app.on_agent_event({"type": "agent.text", "text": "Готовый ответ"})
+        app.on_agent_event({"type": "agent.text.done"})
+        app.submit_text("/copy")
+        self.assertEqual(app.copied, ["Готовый ответ"])
+        app.on_agent_event({"type": "error", "message": "упало",
+                            "detail": "подробности падения"})
+        app.submit_text("/copy err")
+        self.assertEqual(app.copied[-1], "упало\nподробности падения")
+        notes = [e.text for e in app.entries if e.kind == "notice"]
+        self.assertTrue(any("Скопировано" in t for t in notes))
+
+    def test_copy_nothing_and_no_hook(self):
+        app = make_app()
+        app.copied = []
+        app.copy_hook = app.copied.append
+        app.submit_text("/copy")
+        self.assertEqual(app.copied, [])
+        app2 = make_app()  # без хука
+        app2.on_agent_event({"type": "agent.text", "text": "ответ"})
+        app2.submit_text("/copy")
+        notes = [e.text for e in app2.entries if e.kind == "notice"]
+        self.assertTrue(any("недоступен" in t for t in notes))
+
+    def test_help_mentions_shift_drag(self):
+        app = make_app()
+        app.submit_text("/help")
+        help_entry = next(e for e in app.entries if e.kind == "help")
+        self.assertIn("Shift+протяжка", help_entry.text)
+        self.assertIn("/copy err", help_entry.text)
+
+
 class ChatSnapshotTest(unittest.TestCase):
     def test_chat_frames_states(self):
         frames = snapshot.render_frames("chat", 100, 28, [0.0])

@@ -30,7 +30,7 @@ from .markdown import Span, render_markdown, wrap_spans, wrap_text
 from .panels import LayoutTree, create_panel
 from .screen import Buffer, Screen
 from .term import Terminal
-from .width import str_width
+from .width import char_width, str_width
 
 MODES = ("normal", "plan", "review", "auto", "yolo")
 STATUS_BG = (0x16, 0x1B, 0x30)
@@ -64,6 +64,10 @@ _STYLE_MAP = {
 HELP_TEXT = """Команды и клавиши Луны
 /mode [режим] — режим по кругу или по имени (normal plan review auto yolo)
 /clear — очистить ленту · /help — эта справка · /exit — выход
+/copy — скопировать последний ответ · /copy err — последнюю ошибку целиком
+/sessions — сессии этого каталога на диске (LUNA_HOME/sessions)
+Выделение мышью: протяжка по ленте копирует текст, двойной клик — слово
+Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
 /panels или Ctrl+T — панель плана (todo) · /layout save|load|list <имя> — раскладки
 !команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить путь)
 Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор
@@ -103,6 +107,23 @@ def diff_counts(summary: str, output: str):
     if plus or minus:
         return plus, minus
     return None
+
+
+def _wordy(ch: str) -> bool:
+    """Символ «слова» для двойного клика: буквы, цифры и знаки путей/команд."""
+    return ch.isalnum() or ch in "_-./:\\@#~"
+
+
+def _cells_slice(text: str, a: int, b) -> str:
+    """Срез строки по колонкам ячеек [a..b] включительно; b=None — до конца."""
+    out = []
+    pos = 0
+    for ch in text:
+        w = char_width(ch)
+        if pos >= a and (b is None or pos <= b):
+            out.append(ch)
+        pos += w
+    return "".join(out)
 
 
 def compact_args(name: str, args: dict) -> str:
@@ -146,7 +167,8 @@ class ChatApp:
     """Состояние чат-экрана и реакции на ввод и события источника."""
 
     def __init__(self, bus=None, settings=None, scheduler=None,
-                 glyph_mode="emoji", source=None, cwd=None, trap=None):
+                 glyph_mode="emoji", source=None, cwd=None, trap=None,
+                 copy_hook=None):
         self.bus = bus or EventBus()
         self.settings = settings or Settings()
         self.scheduler = scheduler or Scheduler()
@@ -172,6 +194,15 @@ class ChatApp:
         self.guard_editing = False
         self.completions: list = []
         self.completion_index = 0
+        # Копирование (п. 4): хук в буфер обмена ставит run_chat; выделение —
+        # пара ((строка, колонка), (строка, колонка)) визуальных линий ленты.
+        self.copy_hook = copy_hook
+        self.selection: tuple | None = None
+        self._sel_anchor: tuple | None = None
+        self._last_press: tuple | None = None
+        self._feed_texts: list = []
+        self._feed_first = 0
+        self._feed_geom = (0, 0)
         self._clock = time.monotonic
         self._last_esc = -10.0
         self._last_change = 0.0
@@ -397,6 +428,8 @@ class ChatApp:
                 self._add(Entry("notice", text="Нет режима " + parts[1]))
             else:
                 self.cycle_mode(1)
+        elif cmd == "/copy":
+            self._copy_command(parts[1:])
         elif cmd in ("/panels", "/todo"):
             self.toggle_panel("todo")
         elif cmd == "/layout":
@@ -423,6 +456,27 @@ class ChatApp:
             self._add(Entry("notice", text="Сохранённые раскладки: " + names))
         else:
             self._add(Entry("notice", text="Нужно: /layout save|load|list <имя>"))
+
+    def _copy_command(self, args: list) -> None:
+        """/copy — последний ответ агента; /copy err — последняя ошибка целиком."""
+        if args and args[0] == "err":
+            entry = next((e for e in reversed(self.entries)
+                          if e.kind == "error" and e.text), None)
+            what, empty = "ошибку", "Ошибок в ленте пока нет."
+        else:
+            entry = next((e for e in reversed(self.entries)
+                          if e.kind == "agent" and e.text), None)
+            what, empty = "ответ", "Ответов агента в ленте пока нет."
+        if entry is None:
+            self._add(Entry("notice", text=empty))
+            return
+        if self.copy_hook is None:
+            self._add(Entry("notice", text="Буфер обмена недоступен в этом режиме."))
+            return
+        self.copy_hook(entry.text)
+        count = str(len(entry.text))
+        self._add(Entry("notice", text="Скопировано в буфер обмена (" + what
+                                       + "): " + count + " символов."))
 
     def toggle_panel(self, panel_id: str) -> None:
         if not self.settings.get("ui.panels"):
@@ -524,6 +578,8 @@ class ChatApp:
         if key.label == "ctrl+c" or key.name == "eof":
             self.done = True
             return
+        if key.name not in ("pageup", "pagedown"):
+            self.selection = None  # любая работа с клавиатуры снимает выделение
         guard = self.pending_guard
         if guard is not None:
             self._guard_key(key, guard)
@@ -685,6 +741,118 @@ class ChatApp:
             self.scroll = min(self.scroll + 3, 100000)
         elif mouse.kind == "wheel_down":
             self.scroll = max(0, self.scroll - 3)
+        elif mouse.kind == "press" and mouse.button == 0:
+            self._mouse_press(mouse)
+        elif mouse.kind == "move" and self._sel_anchor is not None:
+            pos = self._feed_pos(mouse)
+            if pos is not None:
+                self.selection = (self._sel_anchor, pos)
+        elif mouse.kind == "release" and mouse.button == 0:
+            anchor, self._sel_anchor = self._sel_anchor, None
+            if anchor is None or self.selection is None:
+                return
+            (l0, c0), (l1, c1) = self._sel_range()
+            if (l0, c0) == (l1, c1):
+                return  # простой клик без протяжки — не выделение
+            text = self.selection_text()
+            if text.strip() and self.copy_hook is not None:
+                self.copy_hook(text)
+
+    # --- выделение мышью и копирование ------------------------------------------------
+
+    def _feed_pos(self, mouse: Mouse):
+        """Мышь → (индекс визуальной строки ленты, колонка ячеек) или None."""
+        chat_w, feed_h = self._feed_geom
+        x, y = mouse.x - 1, mouse.y - 1
+        if not (0 <= y < feed_h and 0 <= x < chat_w):
+            return None
+        idx = self._feed_first + y
+        if idx >= len(self._feed_texts):
+            return None
+        return idx, x
+
+    def _mouse_press(self, mouse: Mouse) -> None:
+        pos = self._feed_pos(mouse)
+        if pos is None:
+            self.selection = None
+            self._sel_anchor = None
+            return
+        now = self._clock()
+        last = self._last_press
+        self._last_press = (now, mouse.x, mouse.y)
+        if (last is not None and now - last[0] < 0.45
+                and abs(mouse.x - last[1]) <= 1 and abs(mouse.y - last[2]) <= 1):
+            self._select_word(pos)  # двойной клик — слово целиком, сразу в буфер
+            self._sel_anchor = None
+            text = self.selection_text()
+            if text.strip() and self.copy_hook is not None:
+                self.copy_hook(text)
+            return
+        self._sel_anchor = pos
+        self.selection = (pos, pos)
+
+    def _select_word(self, pos) -> None:
+        idx, col = pos
+        text = self._feed_texts[idx]
+        starts = []
+        p = 0
+        for ch in text:
+            starts.append(p)
+            p += char_width(ch)
+        ci = None
+        for i, start in enumerate(starts):
+            if start <= col < start + char_width(text[i]):
+                ci = i
+                break
+        if ci is None or not _wordy(text[ci]):
+            self.selection = (pos, pos)
+            return
+        a = ci
+        while a > 0 and _wordy(text[a - 1]):
+            a -= 1
+        b = ci
+        while b + 1 < len(text) and _wordy(text[b + 1]):
+            b += 1
+        end_col = starts[b] + char_width(text[b]) - 1
+        self.selection = ((idx, starts[a]), (idx, end_col))
+
+    def _sel_range(self):
+        (l0, c0), (l1, c1) = self.selection
+        if (l1, c1) < (l0, c0):
+            return (l1, c1), (l0, c0)
+        return (l0, c0), (l1, c1)
+
+    def selection_text(self) -> str:
+        """Текст выделения по визуальным строкам последнего кадра."""
+        if self.selection is None:
+            return ""
+        (l0, c0), (l1, c1) = self._sel_range()
+        out = []
+        for idx in range(l0, l1 + 1):
+            if idx >= len(self._feed_texts):
+                break
+            text = self._feed_texts[idx]
+            a = c0 if idx == l0 else 0
+            b = c1 if idx == l1 else None
+            out.append(_cells_slice(text, a, b))
+        return "\n".join(out)
+
+    def _draw_selection(self, buf: Buffer, first: int, feed_h: int) -> None:
+        """Подсветка выделения: REVERSE на ячейках видимой части диапазона."""
+        if self.selection is None:
+            return
+        (l0, c0), (l1, c1) = self._sel_range()
+        for idx in range(l0, l1 + 1):
+            row = idx - first
+            if not (0 <= row < feed_h) or idx >= len(self._feed_texts):
+                continue
+            text = self._feed_texts[idx]
+            line_w = str_width(text)
+            a = c0 if idx == l0 else 0
+            b = c1 if idx == l1 else max(0, line_w - 1)
+            for x in range(a, min(b, buf.cols - 1) + 1):
+                ch, fg, bg, attrs = buf.cells[row][x]
+                buf.cells[row][x] = (ch, fg, bg, attrs | _color.REVERSE)
 
     # --- автодополнение @файл --------------------------------------------------------------
 
@@ -995,12 +1163,19 @@ class ChatApp:
         self.scroll = max(0, min(self.scroll, max_scroll))
         end = len(lines) - self.scroll
         start = max(0, end - feed_h)
+        # Геометрия и тексты ленты — для выделения мышью и копирования (п. 4):
+        # строки хранятся все, first — индекс первой видимой на этом кадре.
+        self._feed_texts = ["".join(t for t, _f, _a in spans)
+                            for spans, _bg in lines]
+        self._feed_first = start
+        self._feed_geom = (chat_w, feed_h)
         for row, (spans, bg) in enumerate(lines[start:end]):
             if bg is not None:
                 buf.fill_rect(0, row, chat_w, 1, " ", bg=bg)
             x = 0
             for text, fg, attrs in spans:
                 x += buf.text(x, row, text, fg=fg, bg=bg or _color.SPACE_BG, attrs=attrs)
+        self._draw_selection(buf, start, feed_h)
         if panel_w:
             self._draw_panels(buf, chat_w, 0, panel_w, feed_h + input_h + completion_h, now)
         cy = feed_h
@@ -1022,6 +1197,13 @@ class ChatApp:
             return buf, None
         cursor = (min(cols - 1, 2 + cursor_pos[1]), iy + cursor_pos[0])
         return buf, cursor
+
+
+def _copy_to_clipboard(text: str, term: Terminal) -> str:
+    """Хук копирования для ChatApp: OSC 52 в терминал (+ clip.exe на Windows)."""
+    from .clipboard import copy_text
+
+    return copy_text(text, write=term.write)
 
 
 def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
@@ -1050,7 +1232,8 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                 if splash_first and play_splash(term, screen, settings, bus, started_at) == "exit":
                     return 0
                 app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
-                              source=create_source(settings, fake=fake), trap=trap)
+                              source=create_source(settings, fake=fake), trap=trap,
+                              copy_hook=lambda text: _copy_to_clipboard(text, term))
                 app.start_source()
                 while not app.done:
                     events = term.read_events(timeout=app.next_timeout())

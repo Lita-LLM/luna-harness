@@ -64,8 +64,14 @@ def _coverage(sx: float, sy: float, cx: float, cy: float, r: float) -> float:
     return inside / float(_SAMPLES * _SAMPLES)
 
 
-def _surface(u: float, v: float, phase: float):
-    """Цвет точки диска по нормированным координатам u, v (-1..1)."""
+def _surface(u: float, v: float, phase: float, mirror: bool = False):
+    """Цвет точки диска по нормированным координатам u, v (-1..1).
+
+    mirror — свет приходит слева, а не справа: убывающая луна северного
+    полушария и растущая — южного (см. ui/astro.py).
+    """
+    if mirror:
+        u = -u
     # вертикальное затенение: верх светлее
     base = _color.lerp(MOON_BOTTOM, MOON_TOP, 1.0 - (v + 1.0) / 2.0)
     factor = 1.0
@@ -80,7 +86,7 @@ def _surface(u: float, v: float, phase: float):
 
 
 def _subpixel(sx: float, sy: float, cx: float, cy: float, r: float,
-              phase: float, sky):
+              phase: float, sky, mirror: bool = False):
     """Итоговый цвет подпикселя: небо + ореол, поверх — диск по покрытию."""
     u = (sx - cx) / r
     v = (sy - cy) / r
@@ -100,12 +106,12 @@ def _subpixel(sx: float, sy: float, cx: float, cy: float, r: float,
     else:
         cov = _coverage(sx, sy, cx, cy, r)
     if cov > 0.0:
-        out = _color.lerp(out, _surface(u, v, phase), cov)
+        out = _color.lerp(out, _surface(u, v, phase, mirror), cov)
     return out
 
 
 def draw_disc(buf, cx: float, cy: float, r: float, phase: float, *,
-              mode: str = "emoji") -> None:
+              mode: str = "emoji", mirror: bool = False) -> None:
     """Нарисовать диск луны в буфер.
 
     cx, r — в клетках по горизонтали; cy — в строках (вертикальный радиус
@@ -127,8 +133,8 @@ def draw_disc(buf, cx: float, cy: float, r: float, phase: float, *,
             sky = buf.cell(x, y)[2]
             if sky is None:
                 sky = _color.SPACE_BG
-            top = _subpixel(x + 0.5, 2 * y + 0.5, scx, scy, r, phase, sky)
-            bottom = _subpixel(x + 0.5, 2 * y + 1.5, scx, scy, r, phase, sky)
+            top = _subpixel(x + 0.5, 2 * y + 0.5, scx, scy, r, phase, sky, mirror)
+            bottom = _subpixel(x + 0.5, 2 * y + 1.5, scx, scy, r, phase, sky, mirror)
             if top == sky and bottom == sky:
                 continue  # ни диска, ни ореола: ячейку (и звёзды на ней) не трогаем
             if mode == "ascii":

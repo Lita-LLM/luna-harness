@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
-from luna.ui import color, moon, width
+from luna.ui import color, moon, term, width
 from luna.ui.keys import Key, KeyParser, Mouse, Paste
 from luna.ui.screen import Buffer, Screen
 from luna.ui.term import detect_caps
@@ -206,8 +207,8 @@ class _FakeOut:
 
 
 class CapsTest(unittest.TestCase):
-    def detect(self, env, settings=None):
-        return detect_caps(env=env, out=_FakeOut(), settings=settings)
+    def detect(self, env, settings=None, encoding="utf-8"):
+        return detect_caps(env=env, out=_FakeOut(encoding), settings=settings)
 
     def test_levels(self):
         self.assertEqual(self.detect({"COLORTERM": "truecolor", "TERM": "xterm"}).color_level,
@@ -221,6 +222,16 @@ class CapsTest(unittest.TestCase):
     def test_unicode(self):
         self.assertTrue(self.detect({"TERM": "xterm-256color"}).unicode)
         self.assertFalse(self.detect({"TERM": "linux"}).unicode)
+
+    def test_linux_rule_beats_windows_codepage(self):
+        # Сценарий РЕВЬЮ-01, п. 2, смоделированный на любой платформе:
+        # Windows, кодовая страница 65001, но TERM=linux — юникода нет,
+        # потому что правило про linux применяется последним.
+        with mock.patch.object(term, "IS_WINDOWS", True), \
+                mock.patch.object(term, "_windows_cp", lambda: 65001):
+            self.assertFalse(self.detect({"TERM": "linux"}, encoding="cp1251").unicode)
+            # А без TERM=linux та же кодовая страница юникод разрешает:
+            self.assertTrue(self.detect({"TERM": "xterm"}, encoding="cp1251").unicode)
 
     def test_settings_override(self):
         class Stub:

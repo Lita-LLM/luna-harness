@@ -73,10 +73,13 @@ def detect_caps(env=None, out=None, settings=None) -> Caps:
     if is_tty:
         encoding = (getattr(out, "encoding", None) or locale.getpreferredencoding(False) or "")
         unicode_ok = "utf" in encoding.lower().replace("-", "") or _env_unicode(env)
-        if term_name == "linux":
-            unicode_ok = False  # консоль Linux: юникод урезанный, эмодзи нет
         if IS_WINDOWS and not unicode_ok:
             unicode_ok = _windows_cp() == 65001
+        if term_name == "linux":
+            # Последним: специфичный запрет сильнее общего разрешения.
+            # Консоль Linux: юникод урезанный, эмодзи нет — и кодовая
+            # страница Windows 65001 не должна это перебивать (РЕВЬЮ-01, п. 2).
+            unicode_ok = False
     if settings is not None:
         color_setting = settings.get("ui.color")
         if color_setting and color_setting != "auto":

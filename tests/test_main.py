@@ -15,8 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def run(args, home, cwd=ROOT):
     env = dict(os.environ, LUNA_HOME=str(home))
+    # Луна пишет в UTF-8; системная кодировка (на Windows — cp1251) вывод
+    # не декодирует: кодировка задаётся явно, а не «как повезёт» (РЕВЬЮ-01, п. 2).
     return subprocess.run([sys.executable, "-m", "luna", *args],
-                          capture_output=True, text=True, env=env, cwd=cwd, timeout=30)
+                          capture_output=True, text=True, encoding="utf-8",
+                          env=env, cwd=cwd, timeout=30)
 
 
 class MainTest(unittest.TestCase):
@@ -26,7 +29,7 @@ class MainTest(unittest.TestCase):
                 "and m != 'luna.ui']; "
                 "assert not bad, bad")
         res = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                             text=True, cwd=ROOT, timeout=30)
+                             text=True, encoding="utf-8", cwd=ROOT, timeout=30)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("0.0.1", res.stdout)
 

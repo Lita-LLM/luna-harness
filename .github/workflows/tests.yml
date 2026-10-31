@@ -24,3 +24,25 @@ jobs:
       - name: unittest
         if: hashFiles('tests/**/*.py') != ''
         run: python -m unittest -q
+      # Установка во временный HOME (ЗАДАЧА-08): установщик → luna --version → --uninstall.
+      - name: Установка (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export HOME="$RUNNER_TEMP/luna-home"
+          mkdir -p "$HOME"
+          bash install.sh
+          "$HOME/.local/bin/luna" --version
+          bash install.sh --uninstall
+          test ! -e "$HOME/.local/bin/luna"
+      - name: Установка (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "luna-local"
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+          .\install.bat
+          & "$env:LOCALAPPDATA\Luna\bin\luna.cmd" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\install.bat --uninstall
+          if (Test-Path "$env:LOCALAPPDATA\Luna\bin\luna.cmd") { exit 1 }

@@ -48,6 +48,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try snapshot <экран> снимок экрана в HTML: splash | render | main | chat
   luna try measure [--json] замеры: старт, память и ЦП в простое
   luna try brain            мозг на фальшивой модели: ход с тулом, без сети
+  luna update [--check]     обновление git-копии программы (--check — только проверить)
   luna setup                настройка провайдера и моделей (ключ — скрытым вводом)
   luna models               что из моделей настроено и живо ли
   luna manners              манеры речи: список; show <имя> — текст, use <имя> — включить, off — свой голос
@@ -226,6 +227,10 @@ def main(argv: list[str] | None = None) -> int:
             from .diagnostics.doctor import run_doctor
 
             return run_doctor()
+        if cmd == "update":
+            from .diagnostics.update import run_update
+
+            return run_update(check_only="--check" in rest)
         if cmd == "settings":
             return _cmd_settings()
         if cmd == "set":

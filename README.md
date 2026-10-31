@@ -6,6 +6,28 @@
 
 Третий брат [Блэкджека](https://github.com/Nickup22/blackjack) и [Бендера](https://github.com/Nickup22/BENDER). Наследник `ta` — агента на чистом bash для Termux.
 
+## Установка
+
+Нужен только Python 3.10 или новее — ни pip, ни venv, ни зависимостей. Распакуй архив (или склонируй репозиторий) и запусти установщик из папки программы: он положит команду `luna` в PATH пользователя, без прав администратора.
+
+Linux, macOS, Termux:
+
+```sh
+bash install.sh
+luna
+bash install.sh --uninstall   # убрать команду; данные (~/.luna) останутся
+```
+
+Windows:
+
+```bat
+install.bat
+luna
+install.bat --uninstall
+```
+
+Обновление git-копии — одной командой: `luna update` (только проверить: `luna update --check`).
+
 **Статус:** замысел и планирование, кода пока нет.
 
 - Для разработки: [AGENTS.md](AGENTS.md), [замысел](ЗАМЫСЕЛ.md), [летопись](ЛЕТОПИСЬ.md), [решения](DECISIONS.md), [вопросы](QUESTIONS.md), [исследования](docs/research/).

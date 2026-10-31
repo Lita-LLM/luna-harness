@@ -50,6 +50,8 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try brain            мозг на фальшивой модели: ход с тулом, без сети
   luna setup                настройка провайдера и моделей (ключ — скрытым вводом)
   luna models               что из моделей настроено и живо ли
+  luna manners              манеры речи: список; show <имя> — текст, use <имя> — включить, off — свой голос
+  luna try prompt           показать собранный системный промпт для текущего каталога
   luna -p "задача"          headless: один ход; --json — события JSONL, --mode, --model
   luna --version            версия
 """
@@ -103,6 +105,51 @@ def _cmd_set(argv: list[str]) -> int:
     settings.set(key, value)
     print(f"{key} = {Settings.value_text(settings_value_type(key), value)} (записано в {settings.global_path})")
     return 0
+
+
+def _cmd_manners(argv: list[str]) -> int:
+    from .core.errors import HumanError
+    from .core.settings import Settings
+    from .mind import manners
+
+    settings = Settings()
+    if not argv or argv[0] == "list":
+        current_id = str(settings.get("agent.manner", "") or "")
+        items = manners.library(settings)
+        if not items:
+            print("Манер нет: ни встроенных, ни своих.")
+            return 0
+        for item in items:
+            mark = "→ " if item["id"] == current_id else "• "
+            line = mark + item["name"] + " (" + item["id"] + ", " + manners.SOURCE_NAMES[item["source"]] + ")"
+            if item["description"]:
+                line += " — " + item["description"]
+            print(line)
+        print()
+        if current_id:
+            print("Сейчас: " + current_id)
+        else:
+            print("Сейчас: свой голос (манера не выбрана)")
+        print("Свои манеры кладутся файлами .md в LUNA_HOME/manners или .luna/manners проекта.")
+        return 0
+    if argv[0] == "show" and len(argv) == 2:
+        item = manners.resolve(settings, argv[1])
+        print("«" + item["name"] + "» (" + item["id"] + ", " + manners.SOURCE_NAMES[item["source"]] + ")")
+        if item["description"]:
+            print(item["description"])
+        print()
+        print(item["text"])
+        return 0
+    if argv[0] == "use" and len(argv) == 2:
+        item = manners.choose(settings, argv[1])
+        print("Манера «" + item["name"] + "» (" + item["id"] + ") включена: настройка agent.manner записана.")
+        return 0
+    if argv[0] == "off" and len(argv) == 1:
+        manners.choose(settings, "")
+        print("Манера выключена: Луна говорит своим голосом.")
+        return 0
+    raise HumanError("usage", "Нужно: luna manners [list | show <имя> | use <имя> | off]",
+                     "Без аргументов — список манер и текущая.")
 
 
 def settings_value_type(key: str) -> str:
@@ -173,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
 
             data = DataDir()
             return run_models(settings=Settings(), secrets=Secrets(data.secrets))
+        if cmd == "manners":
+            return _cmd_manners(rest)
         if cmd == "doctor":
             from .diagnostics.doctor import run_doctor
 
@@ -209,8 +258,12 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.brain import run_brain_try
 
                 return run_brain_try()
+            if what == "prompt":
+                from .devtools.prompt_try import run_prompt_try
+
+                return run_prompt_try()
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, chat, measure, snapshot, brain.")
+                             "Есть: render, splash, chat, measure, snapshot, brain, prompt.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

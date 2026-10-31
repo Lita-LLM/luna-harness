@@ -76,6 +76,7 @@ _f("model.price_out", "float", 0.0, "Цена главной модели за �
 _f("agent.max_steps", "int", 30, "Максимум шагов модели в одном ходе")
 _f("agent.mode", "choice", "normal", "Режим Предохранителя по умолчанию",
    ("normal", "plan", "review", "auto", "yolo"))
+_f("agent.manner", "str", "luna", "Манера речи: имя из luna manners (встроенные, LUNA_HOME/manners, .luna/manners проекта); пусто — без манеры")
 _f("guard.enabled", "bool", True, "Предохранитель включён (выключение ослабляет безопасность)")
 _f("guard.rules", "str", "", "Правила allow/ask/deny по строкам: «шаблон=действие», шаблон — тул или тул:подстрока аргументов")
 _f("tools.bash_timeout", "int", 120, "Таймаут команды bash, секунд")

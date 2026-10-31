@@ -18,7 +18,7 @@ from pathlib import Path
 from ..core.secrets import redact, redact_obj
 from ..guard.policy import Guard, denied_text
 from ..tools.registry import WRITE_TOOLS, ToolContext, build_registry, truncate_output
-from .context import build_system_prompt
+from .prompt import build_system_prompt
 
 LOOP_LIMIT = 3  # одинаковых вызовов подряд — и стоп
 
@@ -49,6 +49,7 @@ class Agent:
         self._interrupt = threading.Event()
         self._turn = 0
         self._started = False
+        self._prompt_sig: tuple | None = None
         self._history: list[dict] = []
         self._total_in = 0
         self._total_out = 0
@@ -197,6 +198,28 @@ class Agent:
                       "input": result.usage.input, "output": result.usage.output,
                       "cost": round(cost, 6), "context_pct": round(pct, 2)})
 
+    # --- системный промпт ---
+
+    def _current_prompt_sig(self) -> tuple:
+        """От чего зависит промпт вне истории: режим и выбранная манера."""
+        manner = ""
+        if self.settings is not None:
+            manner = str(self.settings.get("agent.manner", "") or "")
+        return (self.mode, manner)
+
+    def _ensure_system_prompt(self) -> None:
+        """Собрать промпт к первому ходу; дальше — пересобрать, если сменились
+        режим или манера (тул manner и mode.set действуют со следующего хода)."""
+        sig = self._current_prompt_sig()
+        if self._started and sig == self._prompt_sig:
+            return
+        content = build_system_prompt(self.cwd, self.mode, settings=self.settings)
+        if self._history and self._history[0].get("role") == "system":
+            self._history[0] = {"role": "system", "content": content}
+        else:
+            self._history.insert(0, {"role": "system", "content": content})
+        self._prompt_sig = sig
+
     def run_turn(self, text: str, attachments=None) -> str:
         """Один ход до финала. Возвращает причину turn.done."""
         self._active = True
@@ -204,11 +227,25 @@ class Agent:
         self._turn += 1
         turn = self._turn
         if not self._started:
+            try:
+                self._ensure_system_prompt()
+            except Exception as exc:  # noqa: BLE001 — например, манера из настройки не найдена
+                from ..core.errors import HumanError, unexpected
+
+                err = exc if isinstance(exc, HumanError) else unexpected(exc, "сборка системного промпта")
+                self.publish({"type": "error", "message": err.title,
+                              "detail": err.detail or err.hint})
+                self.publish({"type": "turn.done", "turn": turn, "reason": "error"})
+                self._active = False
+                return "error"
             self._started = True
             self.publish({"type": "session.start", "cwd": str(self.cwd),
                           "model": self._model_label(), "mode": self.mode})
-            self._history.append({"role": "system",
-                                  "content": build_system_prompt(self.cwd, self.mode)})
+        else:
+            try:
+                self._ensure_system_prompt()
+            except Exception:  # noqa: BLE001 — пересборка не должна ронять ход: едем на старом промпте
+                pass
         self.publish({"type": "turn.start", "turn": turn})
         user_msg: dict = {"role": "user", "content": text}
         if attachments:
@@ -305,7 +342,7 @@ class Agent:
         """Предохранитель + исполнение одного вызова; события tool.* и guard.*."""
         self.publish({"type": "tool.call", "id": call_id, "name": tool.name,
                       "args": args, "intent": intent})
-        decision = self.guard.decide(tool.name, tool.mutating, args, intent, self.mode)
+        decision = self.guard.decide(tool.name, tool.is_mutating(args), args, intent, self.mode)
         final_args = args
         if decision.decision == "ask":
             answer = self._ask_human(call_id, tool.name, args, intent, decision)

@@ -1,0 +1,21 @@
+# Данные и секреты пользователя
+data/
+.env
+*.secret
+secrets.json
+
+# Python / сборка
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+
+# Редакторы и ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Локальные настройки агентов
+.claude/settings.local.json

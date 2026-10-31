@@ -57,12 +57,14 @@ def run_doctor() -> int:
         add(_OK if caps.color_level != "mono" else _WARN, "Цвет",
             f"{caps.color_level} ({caps.reason})" if caps.reason else caps.color_level)
         add(_OK if caps.unicode else _WARN, "Юникод",
-            "есть: эмодзи и широкие символы" if caps.unicode
+            "есть: широкие символы" if caps.unicode
             else "нет: интерфейс перейдёт на ASCII-наборы")
-        if caps.unicode:
-            add(_OK, "Эмодзи",
-                "если координаты в терминале разъезжаются — luna set ui.unicode off "
-                "(ASCII-фазы; рендерер и так якорно переставляет курсор)")
+        if caps.emoji:
+            emoji_text = "включены (" + caps.emoji_reason + ")"
+        else:
+            emoji_text = ("выключены (" + caps.emoji_reason + "); фазы луны — "
+                          "узким набором, вернуть: luna set ui.emoji on")
+        add(_OK if caps.emoji else _WARN, "Эмодзи", emoji_text)
     else:
         add(_WARN, "Терминал", "вывод не в терминал: полноэкранный режим недоступен, "
                                "doctor, settings и set работают")

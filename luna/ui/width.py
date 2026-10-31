@@ -32,6 +32,9 @@ _KNOWN_WIDTHS = {
     "🌙": 2, "🚀": 2,
 }
 _KNOWN_WIDTHS.update({ch: 1 for ch in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"})
+# Узкие фазы и узкий спиннер — честная одна ячейка: фиксируем таблицей,
+# чтобы общие диапазоны (у ◐/◑ east_asian_width «ambiguous») не передумали.
+_KNOWN_WIDTHS.update({ch: 1 for ch in "○◔◑◕●◐◓◒"})
 
 _ZERO_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc"})
 

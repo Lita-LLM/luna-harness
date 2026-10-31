@@ -30,6 +30,10 @@ class SettingsTest(unittest.TestCase):
     def test_defaults(self):
         s = self.make()
         self.assertEqual(s.get("ui.color"), "auto")
+        self.assertEqual(s.get("ui.emoji"), "auto")
+        self.assertEqual(s.parse_value("ui.emoji", "off"), "off")
+        with self.assertRaises(HumanError):
+            s.parse_value("ui.emoji", "sometimes")
         self.assertIs(s.get("ui.splash"), True)
         self.assertEqual(s.source("ui.splash"), "default")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -72,6 +73,23 @@ class MoonTest(unittest.TestCase):
         self.assertEqual(moon.context_phase(0), "🌑")    # пустой контекст
         self.assertEqual(moon.context_phase(100), "🌕")  # полный контекст
         self.assertEqual(len(set(moon.EMOJI_PHASES)), 8)
+
+    def test_narrow_phases_are_really_narrow(self):
+        # Узкий набор — замена эмодзи там, где терминал их ширину считает
+        # по-своему (ConPTY): каждый глиф обязан быть шириной ровно 1.
+        self.assertEqual(moon.phase_narrow(0), "○")
+        self.assertEqual(moon.phase_narrow(50), "●")
+        self.assertEqual(moon.phase(50, "narrow"), "●")
+        self.assertEqual(moon.context_phase(0, "narrow"), "○")
+        self.assertEqual(moon.context_phase(100, "narrow"), "●")
+        for glyph in moon.NARROW_PHASES:
+            self.assertNotIn(unicodedata.east_asian_width(glyph), ("W", "F"), glyph)
+            self.assertEqual(width.char_width(glyph), 1, glyph)
+        joined = "".join(moon.NARROW_PHASES)
+        self.assertEqual(width.str_width(joined), len(moon.NARROW_PHASES))
+        # Старые bool-вызовы живут: True — эмодзи, False — ASCII.
+        self.assertEqual(moon.phase(50, True), "🌕")
+        self.assertEqual(moon.phase(50, False), "[####]")
 
 
 class KeysTest(unittest.TestCase):
@@ -206,6 +224,16 @@ class _FakeOut:
         return True
 
 
+class _Stub:
+    """Заглушка настроек для detect_caps: только .get по словарю."""
+
+    def __init__(self, values):
+        self.values = values
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+
 class CapsTest(unittest.TestCase):
     def detect(self, env, settings=None, encoding="utf-8"):
         return detect_caps(env=env, out=_FakeOut(encoding), settings=settings)
@@ -234,17 +262,47 @@ class CapsTest(unittest.TestCase):
             self.assertTrue(self.detect({"TERM": "xterm"}, encoding="cp1251").unicode)
 
     def test_settings_override(self):
-        class Stub:
-            def __init__(self, values):
-                self.values = values
-
-            def get(self, key, default=None):
-                return self.values.get(key, default)
-
         caps = self.detect({"TERM": "xterm-256color"},
-                           settings=Stub({"ui.color": "16", "ui.unicode": "off"}))
+                           settings=_Stub({"ui.color": "16", "ui.unicode": "off"}))
         self.assertEqual(caps.color_level, "16")
         self.assertFalse(caps.unicode)
+
+    def test_emoji_auto_windows_conpty_vs_terminal(self):
+        # auto на Windows: без WT_SESSION — ConPTY-хост, эмодзи выключены
+        # и интерфейс уходит в узкие фазы; в Windows Terminal — включены.
+        with mock.patch.object(term, "IS_WINDOWS", True):
+            caps = self.detect({"TERM": "xterm-256color"})
+            self.assertTrue(caps.unicode)
+            self.assertFalse(caps.emoji)
+            self.assertEqual(caps.glyph_mode, "narrow")
+            self.assertIn("ConPTY", caps.emoji_reason)
+            caps = self.detect({"TERM": "xterm-256color", "WT_SESSION": "x"})
+            self.assertTrue(caps.emoji)
+            self.assertEqual(caps.glyph_mode, "emoji")
+
+    def test_emoji_auto_posix(self):
+        with mock.patch.object(term, "IS_WINDOWS", False):
+            caps = self.detect({"TERM": "xterm-256color"})
+            self.assertTrue(caps.emoji)
+            self.assertEqual(caps.glyph_mode, "emoji")
+
+    def test_emoji_setting_overrides_auto(self):
+        # Настройка перекрывает автоопределение в обе стороны.
+        with mock.patch.object(term, "IS_WINDOWS", True):
+            caps = self.detect({"TERM": "xterm-256color"},
+                               settings=_Stub({"ui.emoji": "on"}))
+            self.assertTrue(caps.emoji)
+            self.assertEqual(caps.emoji_reason, "настройка ui.emoji")
+        with mock.patch.object(term, "IS_WINDOWS", False):
+            caps = self.detect({"TERM": "xterm-256color"},
+                               settings=_Stub({"ui.emoji": "off"}))
+            self.assertFalse(caps.emoji)
+            self.assertEqual(caps.glyph_mode, "narrow")
+        # ui.unicode=off сильнее ui.emoji=on: режим — ASCII.
+        caps = self.detect({"TERM": "xterm-256color"},
+                           settings=_Stub({"ui.emoji": "on", "ui.unicode": "off"}))
+        self.assertFalse(caps.emoji)
+        self.assertEqual(caps.glyph_mode, "ascii")
 
 
 if __name__ == "__main__":

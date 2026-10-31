@@ -12,6 +12,7 @@ import random
 import time
 
 from . import color as _color
+from . import moon as _moon
 from . import phrases
 from .anim import Scheduler
 from .keys import Key
@@ -34,9 +35,16 @@ def _stars(cols: int, rows: int, count: int) -> list[tuple[int, int, float, str]
     return out
 
 
-def render_frame(buf: Buffer, t: float, *, unicode_ok: bool, phrase: str,
-                 startup_ms: float | None, stars, now: float) -> None:
-    """Кадр заставки при прогрессе t 0..1 в готовый буфер."""
+def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
+                 phrase: str, startup_ms: float | None, stars, now: float) -> None:
+    """Кадр заставки при прогрессе t 0..1 в готовый буфер.
+
+    Режим глифов (emoji | narrow | ascii) приходит из Caps.glyph_mode:
+    декоративные звёзды ✦ шириной 2 в узком режиме заменяются на •,
+    в ASCII — весь набор схлопывается в точки и звёздочки.
+    """
+    mode = _moon.normalize_mode(glyph_mode if glyph_mode is not None
+                                else (True if unicode_ok is None else unicode_ok))
     cols, rows = buf.cols, buf.rows
     sky = _color.gradient(_SKY_STOPS, rows)
     for y in range(rows):
@@ -48,8 +56,10 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok: bool, phrase: str,
     import math
 
     for x, y, phase, glyph in stars:
-        if not unicode_ok and glyph not in (".", "*", "+"):
+        if mode == "ascii" and glyph not in (".", "*", "+"):
             glyph = "."
+        elif mode == "narrow" and glyph == "✦":
+            glyph = "•"
         bright = 0.5 + 0.5 * math.sin(now * 2.2 + phase)
         fg = _color.lerp((70, 78, 105), (230, 238, 255), bright)
         buf.set(x, y, glyph, fg=fg, bg=buf.cell(x, y)[2])
@@ -110,7 +120,7 @@ def play_splash(term, screen, settings, bus, started_at: float) -> str:
     startup_ms: float | None = None
     if not animations:
         buf = Buffer(cols, rows)
-        render_frame(buf, 1.0, unicode_ok=term.caps.unicode, phrase=phrase,
+        render_frame(buf, 1.0, glyph_mode=term.caps.glyph_mode, phrase=phrase,
                      startup_ms=None, stars=stars, now=0.0)
         screen.present(buf)
         bus.publish({"type": "ui.splash", "phase": "done", "animated": False})
@@ -126,7 +136,7 @@ def play_splash(term, screen, settings, bus, started_at: float) -> str:
             stars = _stars(cols, rows, max(20, cols * rows // 28))
             screen.resize(cols, rows)
         buf = Buffer(cols, rows)
-        render_frame(buf, t, unicode_ok=term.caps.unicode, phrase=phrase,
+        render_frame(buf, t, glyph_mode=term.caps.glyph_mode, phrase=phrase,
                      startup_ms=startup_ms, stars=stars, now=now)
         screen.present(buf)
         if startup_ms is None:

@@ -36,7 +36,16 @@ class Caps:
     cols: int
     rows: int
     term: str = ""
-    reason: str = ""  # как определили — для doctor
+    reason: str = ""  # как определили цвет — для doctor
+    emoji: bool = True
+    emoji_reason: str = ""  # почему эмодзи включены или выключены — для doctor
+
+    @property
+    def glyph_mode(self) -> str:
+        """Режим глифов фаз и значков: emoji | narrow | ascii (см. ui/moon.py)."""
+        if self.emoji:
+            return "emoji"
+        return "narrow" if self.unicode else "ascii"
 
 
 def _env_unicode(env) -> bool:
@@ -71,6 +80,8 @@ def detect_caps(env=None, out=None, settings=None) -> Caps:
         else:
             level, reason = "16", f"TERM={term_name}"
     unicode_ok = False
+    emoji_ok = False
+    emoji_reason = "вывод не в терминал"
     if is_tty:
         encoding = (getattr(out, "encoding", None) or locale.getpreferredencoding(False) or "")
         unicode_ok = "utf" in encoding.lower().replace("-", "") or _env_unicode(env)
@@ -81,6 +92,19 @@ def detect_caps(env=None, out=None, settings=None) -> Caps:
             # Консоль Linux: юникод урезанный, эмодзи нет — и кодовая
             # страница Windows 65001 не должна это перебивать (РЕВЬЮ-01, п. 2).
             unicode_ok = False
+        # Эмодзи — отдельная возможность, а не следствие юникода: ConPTY-хосты
+        # пересобирают поток и считают эмодзи шириной 1, поэтому на Windows
+        # без WT_SESSION они в auto выключены (РЕВЬЮ-01, раунд 2, п. 3).
+        if IS_WINDOWS:
+            if env.get("WT_SESSION"):
+                emoji_ok, emoji_reason = True, "Windows Terminal (WT_SESSION)"
+            else:
+                emoji_ok, emoji_reason = False, "Windows без WT_SESSION: ConPTY-хост"
+        elif unicode_ok:
+            emoji_ok, emoji_reason = True, "POSIX-терминал с юникодом"
+        else:
+            emoji_reason = "терминал без юникода"
+    unicode_setting = None
     if settings is not None:
         color_setting = settings.get("ui.color")
         if color_setting and color_setting != "auto":
@@ -90,7 +114,16 @@ def detect_caps(env=None, out=None, settings=None) -> Caps:
             unicode_ok = True
         elif unicode_setting == "off":
             unicode_ok = False
-    return Caps(level, unicode_ok, is_tty, size.columns, size.lines, term_name, reason)
+        emoji_setting = settings.get("ui.emoji")
+        if emoji_setting == "on":
+            emoji_ok, emoji_reason = True, "настройка ui.emoji"
+        elif emoji_setting == "off":
+            emoji_ok, emoji_reason = False, "настройка ui.emoji"
+        if unicode_setting == "off":
+            # ASCII-режим сильнее: при ui.unicode=off глифы — только ASCII.
+            emoji_ok, emoji_reason = False, "настройка ui.unicode=off: ASCII-режим"
+    return Caps(level, unicode_ok, is_tty, size.columns, size.lines, term_name, reason,
+                emoji_ok, emoji_reason)
 
 
 def _windows_cp() -> int:

@@ -66,6 +66,8 @@ class MainTest(unittest.TestCase):
                                      capture_output=True, text=True, encoding="utf-8",
                                      env=env, cwd=ROOT, timeout=30)
                 self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            res = run(["settings"], home)
+            self.assertIn("ui.emoji", res.stdout)
 
 
 if __name__ == "__main__":

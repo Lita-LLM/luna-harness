@@ -29,11 +29,12 @@ SPIN_SECONDS = 2.0
 class MiniApp:
     """Состояние минимального экрана и реакции на события шины."""
 
-    def __init__(self, bus: EventBus, settings: Settings, scheduler: Scheduler, unicode_ok: bool):
+    def __init__(self, bus: EventBus, settings: Settings, scheduler: Scheduler,
+                 glyph_mode="emoji"):
         self.bus = bus
         self.settings = settings
         self.scheduler = scheduler
-        self.unicode_ok = unicode_ok
+        self.glyph_mode = _moon.normalize_mode(glyph_mode)
         self.lines: list[tuple[str, str]] = []  # (роль, текст): user | note
         self.input = ""
         self.cursor = 0
@@ -102,7 +103,7 @@ class MiniApp:
         self.lines.append(("user", text))
         self.bus.publish({"type": "chat.message", "role": "user", "text": text})
         if self.settings.get("ui.animations"):
-            self._spinner = Spinner(self.unicode_ok)
+            self._spinner = Spinner(self.glyph_mode)
             self._spin_phrase = phrases.random_spinner()
             self._spin_until = time.monotonic() + SPIN_SECONDS
             self.scheduler.add(self._spin_tick)
@@ -139,16 +140,21 @@ class MiniApp:
                 buf.text(0, y, "› ", fg=_color.CYAN, bg=_color.SPACE_BG, attrs=_color.BOLD)
                 buf.text(2, y, text, fg=_color.SILVER, bg=_color.SPACE_BG)
             else:
-                glyph = "🌙 " if self.unicode_ok else "» "
+                if self.glyph_mode == "emoji":
+                    glyph, text_x = "🌙 ", 3
+                elif self.glyph_mode == "narrow":
+                    glyph, text_x = "◑ ", 2
+                else:
+                    glyph, text_x = "» ", 2
                 buf.text(0, y, glyph, fg=_color.VIOLET, bg=_color.SPACE_BG)
-                buf.text(2 if not self.unicode_ok else 3, y, text,
+                buf.text(text_x, y, text,
                          fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)
             y += 1
         # строка состояния
         sy = rows - 2
         buf.fill_rect(0, sy, cols, 1, " ", bg=(0x16, 0x1B, 0x30))
         pct = self.context_pct()
-        left = f" {_moon.context_phase(pct, self.unicode_ok)} контекст {pct}%"
+        left = f" {_moon.context_phase(pct, self.glyph_mode)} контекст {pct}%"
         buf.text(0, sy, left, fg=_color.SILVER, bg=(0x16, 0x1B, 0x30))
         if self._spinner is not None:
             mid = f"{self._spinner.glyph(now)} {self._spin_phrase}…"
@@ -181,7 +187,7 @@ def run_fullscreen(started_at: float) -> int:
             if play_splash(term, screen, settings, bus, started_at) == "exit":
                 return 0
             scheduler = Scheduler(fps=30)
-            app = MiniApp(bus, settings, scheduler, term.caps.unicode)
+            app = MiniApp(bus, settings, scheduler, term.caps.glyph_mode)
             while not app.done:
                 events = term.read_events(timeout=scheduler.next_timeout())
                 size = term.size()

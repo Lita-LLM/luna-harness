@@ -23,15 +23,15 @@ from .width import str_width
 
 
 class _Demo:
-    def __init__(self, unicode_ok: bool):
-        self.unicode_ok = unicode_ok
+    def __init__(self, glyph_mode="emoji"):
+        self.glyph_mode = _moon.normalize_mode(glyph_mode)
         self.done = False
         self.frames = 0
         self.fps = 0
         self._fps_at = time.monotonic()
         self._fps_count = 0
         self.last_event = "—"
-        self.spinner = Spinner(unicode_ok)
+        self.spinner = Spinner(self.glyph_mode)
         self.phrase = phrases.random_spinner()
 
     def on_key(self, ev) -> None:
@@ -80,12 +80,12 @@ class _Demo:
         buf.text(0, y + 2, "контекст:", fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)
         x = 10
         for pct in (0, 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100):
-            glyph = _moon.phase(pct, self.unicode_ok)
+            glyph = _moon.phase(pct, self.glyph_mode)
             w = str_width(glyph)
             buf.text(x, y, glyph, fg=_color.SILVER, bg=_color.SPACE_BG)
             buf.text(x, y + 1, f"{pct:g}%", fg=_color.SILVER, bg=_color.SPACE_BG,
                      attrs=_color.DIM)
-            buf.text(x, y + 2, _moon.context_phase(pct, self.unicode_ok),
+            buf.text(x, y + 2, _moon.context_phase(pct, self.glyph_mode),
                      fg=_color.SILVER, bg=_color.SPACE_BG)
             x += w + 4
             if x > cols - 8:
@@ -94,7 +94,10 @@ class _Demo:
         # ширина: линейка и строка с CJK и эмодзи должны совпасть по правому краю
         ruler = "".join(str(i % 10) for i in range(min(cols, 40)))
         buf.text(0, y, ruler, fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)
-        sample = "ширина: 你好世界 " + ("🌕🚀" if self.unicode_ok else "") + " кот"
+        # Образец ширины честно следует режиму глифов: эмодзи — только
+        # в emoji-режиме; в узком вместо них узкая полная фаза, без ракеты.
+        sample_glyphs = {"emoji": "🌕🚀", "narrow": "●", "ascii": ""}[self.glyph_mode]
+        sample = "ширина: 你好世界 " + sample_glyphs + (" " if sample_glyphs else "") + "кот"
         buf.text(0, y + 1, sample, fg=_color.SILVER, bg=_color.SPACE_BG)
         buf.text(0, y + 2, f"str_width(sample) = {str_width(sample)} ячеек",
                  fg=_color.SILVER, bg=_color.SPACE_BG, attrs=_color.DIM)
@@ -122,7 +125,7 @@ def run_render_demo(started_at: float) -> int:  # noqa: ARG001 — единый 
     if not term.caps.is_tty:
         print("luna try render нужен живой терминал.")
         return 0
-    demo = _Demo(term.caps.unicode)
+    demo = _Demo(term.caps.glyph_mode)
     scheduler = Scheduler(fps=30)
     scheduler.add(lambda now: True)  # витрина живёт, пока открыта: кадры идут всегда
     with term:

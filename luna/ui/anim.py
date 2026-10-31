@@ -11,7 +11,10 @@ from __future__ import annotations
 import time
 
 SPINNER_GLYPHS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER_NARROW = "◐◓◑◒"  # вращающиеся полукруги шириной 1 — режим без эмодзи
 SPINNER_ASCII = "|/-\\"
+_SPINNER_BY_MODE = {"emoji": SPINNER_GLYPHS, "narrow": SPINNER_NARROW,
+                    "ascii": SPINNER_ASCII}
 
 
 class Scheduler:
@@ -56,10 +59,21 @@ def _call(fn, now) -> bool:
 
 
 class Spinner:
-    """Крутилка: кадр по времени, glyph(now) — текущий символ."""
+    """Крутилка: кадр по времени, glyph(now) — текущий символ.
 
-    def __init__(self, unicode_ok: bool = True, interval: float = 0.08):
-        self.glyphs = SPINNER_GLYPHS if unicode_ok else SPINNER_ASCII
+    Режим глифов — как у фаз луны (emoji | narrow | ascii); bool принимается
+    для старых вызовов: True — emoji, False — ascii.
+    """
+
+    def __init__(self, mode="emoji", interval: float = 0.08):
+        if mode is True:
+            mode = "emoji"
+        elif mode is False:
+            mode = "ascii"
+        if mode not in _SPINNER_BY_MODE:
+            raise ValueError(f"Неизвестный режим спиннера: {mode!r}")
+        self.mode = mode
+        self.glyphs = _SPINNER_BY_MODE[mode]
         self.interval = interval
         self.started = time.monotonic()
 

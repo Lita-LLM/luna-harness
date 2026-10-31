@@ -41,7 +41,10 @@ def _f(key: str, type_: str, default: Any, title: str, choices: tuple = ()) -> N
 
 _f("ui.color", "choice", "auto", "Цвет терминала: auto — по возможностям, иначе вручную",
    ("auto", "truecolor", "256", "16", "mono"))
-_f("ui.unicode", "choice", "auto", "Юникод и эмодзи в интерфейсе: auto — по терминалу, on, off",
+_f("ui.unicode", "choice", "auto", "Юникод в интерфейсе: auto — по терминалу, on, off",
+   ("auto", "on", "off"))
+_f("ui.emoji", "choice", "auto",
+   "Эмодзи в интерфейсе: auto — по терминалу (на Windows без Windows Terminal выключены), on, off",
    ("auto", "on", "off"))
 _f("ui.animations", "bool", True, "Анимации: заставка, спиннеры, мерцание звёзд")
 _f("ui.splash", "bool", True, "Заставка с восходом луны при старте")

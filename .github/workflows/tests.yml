@@ -4,7 +4,14 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      macos:
+        description: "Прогнать и на macOS (минута там стоит как 10 минут Linux)"
+        type: boolean
+        default: false
 
+# Приватный репозиторий: минута Windows = 2, macOS = 10 минут квоты.
+# На каждый пуш — Linux 3.10/3.13 и Windows 3.13; macOS — только вручную.
 jobs:
   unittest:
     name: ${{ matrix.os }} · Python ${{ matrix.python }}
@@ -13,8 +20,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
         python: ["3.10", "3.13"]
+        exclude:
+          - os: windows-latest
+            python: "3.10"
+        include:
+          - os: ${{ inputs.macos && 'macos-latest' || 'ubuntu-latest' }}
+            python: "3.13"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

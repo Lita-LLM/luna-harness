@@ -7,12 +7,32 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
 _T0 = time.monotonic()
 
 from . import __version__  # noqa: E402 — лёгкий импорт, только строка версии
+
+
+def _note_start_marker() -> None:
+    """Метка старта процесса для замеров: если задан LUNA_START_FILE, пишем
+    туда монотонное время старта и PID самой Луны. Родитель (luna try
+    measure на Windows) считает старт от этой метки внутри процесса,
+    а не от Popen — иначе в замер падает создание новой консоли —
+    и меряет память/ЦП по этому PID, а не по обёртке (ЗАДАЧА-03)."""
+    path = os.environ.get("LUNA_START_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="ascii") as f:
+            f.write(repr(_T0) + "\n" + str(os.getpid()) + "\n")
+    except OSError:
+        pass
+
+
+_note_start_marker()
 
 USAGE = """Лунапарк — сессионный ИИ-агент.
 

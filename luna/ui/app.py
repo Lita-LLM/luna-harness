@@ -174,7 +174,7 @@ class MiniApp:
         return buf, (min(cursor_x, cols - 1), iy)
 
 
-def run_fullscreen(started_at: float) -> int:
+def run_fullscreen(started_at: float, continue_last: bool = False) -> int:
     """Полноэкранный режим: с вехи 1 минимальный экран заменён чатом.
 
     MiniApp выше оставлен как витрина и для тестов; живой путь `luna`
@@ -182,4 +182,5 @@ def run_fullscreen(started_at: float) -> int:
     """
     from .chat import run_chat
 
-    return run_chat(started_at=started_at, splash_first=True, fake=False)
+    return run_chat(started_at=started_at, splash_first=True, fake=False,
+                    continue_last=continue_last)

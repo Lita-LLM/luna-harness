@@ -38,6 +38,7 @@ _note_start_marker()
 USAGE = """Лунапарк — сессионный ИИ-агент.
 
   luna                      чат с агентом (заставка, затем полноэкранный чат)
+  luna --continue           продолжить последнюю сессию этого каталога (журнал — LUNA_HOME/sessions)
   luna doctor               самопроверка: Python, терминал, каталоги, настройки
   luna settings             список настроек со значениями и источниками
   luna set <ключ> <значение>  изменить настройку (например: luna set ui.splash off)
@@ -116,11 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     from .core.errors import HumanError
 
+    continue_last = "--continue" in argv
+    argv = [a for a in argv if a != "--continue"]
     try:
         if not argv:
             from .ui.app import run_fullscreen
 
-            return run_fullscreen(started_at=_T0)
+            return run_fullscreen(started_at=_T0, continue_last=continue_last)
         cmd, rest = argv[0], argv[1:]
         if cmd in ("--version", "-V", "version"):
             print(f"Лунапарк {__version__}")

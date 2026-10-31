@@ -168,13 +168,15 @@ class ChatApp:
 
     def __init__(self, bus=None, settings=None, scheduler=None,
                  glyph_mode="emoji", source=None, cwd=None, trap=None,
-                 copy_hook=None):
+                 copy_hook=None, journal=None):
         self.bus = bus or EventBus()
         self.settings = settings or Settings()
         self.scheduler = scheduler or Scheduler()
         self.glyph_mode = _moon.normalize_mode(glyph_mode)
         self.cwd = cwd or os.getcwd()
         self.trap = trap  # ErrorTrap полноэкранного сеанса: ошибки потоков — в ленту
+        self.journal = journal  # SessionJournal: события и команды на диск (п. 5)
+        self._restoring = False
         self.source = source if source is not None else create_source(self.settings)
         self.editor = TextEditor()
         self.entries: list = []
@@ -235,7 +237,50 @@ class ChatApp:
             self.on_agent_event(ev)
         return events
 
+    def restore(self, records: list) -> None:
+        """Воспроизвести журнал прошлой сессии в ленту (luna --continue).
+
+        События идут обычным путём on_agent_event, команды применяют только
+        свой видимый эффект: источнику ничего не отправляется, в журнал
+        ничего не дописывается. Висячие подтверждения и вопросы прошлой
+        сессии помечаются «прервано» — отвечать на них некому.
+        """
+        self._restoring = True
+        try:
+            for rec in records:
+                data = rec.get("data") or {}
+                if rec.get("kind") == "event":
+                    self.on_agent_event(data)
+                elif rec.get("kind") == "command":
+                    self._restore_command(data)
+        finally:
+            self._restoring = False
+        self.busy = False
+        for entry in self.entries:
+            entry.streaming = False
+            if entry.kind in ("guard", "ask") and entry.status == "pending":
+                entry.status = "прервано"
+
+    def _restore_command(self, cmd: dict) -> None:
+        kind = cmd.get("type")
+        if kind == "user.message":
+            self._add(Entry("user", text=str(cmd.get("text", ""))))
+        elif kind == "shell":
+            self._add(Entry("shell", text=str(cmd.get("command", ""))))
+        elif kind == "guard.answer":
+            entry = self._find("guard", str(cmd.get("id", "")))
+            if entry is not None:
+                entry.status = str(cmd.get("decision", ""))
+        elif kind == "user.answer":
+            entry = self._find("ask", str(cmd.get("id", "")))
+            if entry is not None:
+                entry.status = "answered"
+                entry.answer = str(cmd.get("text", ""))
+        # mode.set восстановится событием mode.changed из того же журнала
+
     def send_command(self, cmd: dict) -> None:
+        if self.journal is not None:
+            self.journal.append_command(cmd)
         self.sent_commands.append(dict(cmd))
         handler = getattr(self.source, "handle_command", None)
         if callable(handler):
@@ -281,6 +326,8 @@ class ChatApp:
         return None
 
     def on_agent_event(self, ev: dict) -> None:
+        if self.journal is not None and not self._restoring:
+            self.journal.append_event(ev)
         kind = ev.get("type")
         self._last_change = self._clock()
         if kind == "session.start":
@@ -430,6 +477,8 @@ class ChatApp:
                 self.cycle_mode(1)
         elif cmd == "/copy":
             self._copy_command(parts[1:])
+        elif cmd == "/sessions":
+            self._sessions_command()
         elif cmd in ("/panels", "/todo"):
             self.toggle_panel("todo")
         elif cmd == "/layout":
@@ -456,6 +505,22 @@ class ChatApp:
             self._add(Entry("notice", text="Сохранённые раскладки: " + names))
         else:
             self._add(Entry("notice", text="Нужно: /layout save|load|list <имя>"))
+
+    def _sessions_command(self) -> None:
+        """/sessions — сессии на диске, свежие сверху; этот каталог помечен."""
+        from ..core.sessions import list_sessions
+
+        items = list_sessions(DataDir())
+        if not items:
+            self._add(Entry("notice", text="Сессий на диске пока нет."))
+            return
+        lines = ["Сессии на диске (свежие сверху, «·» — этот каталог):"]
+        for s in items[:10]:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["started"]))
+            mark = "· " if s["cwd"] == self.cwd else "  "
+            lines.append(mark + when + " · записей: " + str(s["records"])
+                         + " · " + s["cwd"])
+        self._add(Entry("help", text="\n".join(lines)))
 
     def _copy_command(self, args: list) -> None:
         """/copy — последний ответ агента; /copy err — последняя ошибка целиком."""
@@ -1009,7 +1074,7 @@ class ChatApp:
         if entry.status != "pending":
             # Решённый блок сворачивается в одну строку решения на месте —
             # тёплый фон не остаётся висеть в ленте (ЗАДАЧА-06, п. 3).
-            denied = entry.status in ("no", "stop")
+            denied = entry.status in ("no", "stop", "прервано")
             mark = "✗ " if denied else "✓ "
             label = self._DECISIONS.get(entry.status, entry.status)
             line = "решение: " + label
@@ -1206,6 +1271,27 @@ def _copy_to_clipboard(text: str, term: Terminal) -> str:
     return copy_text(text, write=term.write)
 
 
+def _open_session(settings, data, continue_last: bool, fake: bool):
+    """(журнал, записи для восстановления) сеанса чата (п. 5).
+
+    Журнал ведётся, если включён настройкой chat.session_log; витрина
+    `luna try chat` (фальшивый агент) историю не пишет. При --continue
+    берём последнюю сессию этого каталога и дописываем в тот же файл.
+    """
+    if fake and not continue_last:
+        return None, []
+    if not settings.get("chat.session_log"):
+        return None, []
+    from ..core.sessions import SessionJournal, find_last
+
+    cwd = os.getcwd()
+    if continue_last:
+        path = find_last(data, cwd)
+        if path is not None:
+            return SessionJournal.resume(data, path)
+    return SessionJournal.create(data, cwd), []
+
+
 def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
              continue_last: bool = False) -> int:
     """Полноэкранный чат: терминал, цикл ввода, источник событий."""
@@ -1223,6 +1309,7 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
     # Пока экран наш, ошибки потоков и stderr уходят в лог, а не поверх
     # ленты (ЗАДАЧА-06, п. 2): лог — LUNA_HOME/logs/chat-<время>.log.
     trap = ErrorTrap(data.logs / ("chat-" + time.strftime("%Y%m%d-%H%M%S") + ".log"))
+    journal, restored = _open_session(settings, data, continue_last, fake)
     with RunLock(data.root):
         with term:
             trap.install()
@@ -1233,7 +1320,16 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                     return 0
                 app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
                               source=create_source(settings, fake=fake), trap=trap,
-                              copy_hook=lambda text: _copy_to_clipboard(text, term))
+                              copy_hook=lambda text: _copy_to_clipboard(text, term),
+                              journal=journal)
+                if restored:
+                    app.restore(restored)
+                elif continue_last:
+                    if journal is None:
+                        note = "Журнал сессий выключен настройкой chat.session_log."
+                    else:
+                        note = "Продолжить нечего: прошлых сессий в этом каталоге нет."
+                    app._add(Entry("notice", text=note))
                 app.start_source()
                 while not app.done:
                     events = term.read_events(timeout=app.next_timeout())
@@ -1254,5 +1350,7 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                     screen.present(buf, cursor=cursor)
             finally:
                 trap.uninstall()
+                if journal is not None:
+                    journal.close()
     print(phrases.event_phrase("end") or "Орёл сел.")
     return 0

@@ -129,6 +129,30 @@ class Guard:
                 return True
         return False
 
+    def hard_block(self, tool_name: str, args: dict) -> Decision | None:
+        """Жёсткие блоки вне режимов: правило deny, необратимое, утечки, локальная сеть.
+
+        Возвращает Decision (deny/ask) или None, если жёстких причин нет.
+        Используется и для правленых человеком аргументов: их режимный ask
+        уже отвечен человеком, а жёсткое обязано сработать и на новых данных.
+        """
+        args_text = _args_text(args)
+        rule = self._rule(tool_name, args_text)
+        if rule == "deny":
+            return Decision("deny", "rules", "Запрещено правилом в настройках (guard.rules)", "medium")
+        irreversible = check_irreversible(tool_name, args)
+        if irreversible:
+            return Decision("ask", "rules", "Необратимое: " + irreversible +
+                            ". Спрашиваю даже в режиме yolo", "high")
+        if tool_name in ("web_fetch", "web_search", "bash") and self._secret_in_args(args_text):
+            return Decision("ask", "rules", "В аргументах есть значение секрета: "
+                            "оно уйдёт наружу, если выполнить", "high")
+        if tool_name == "web_fetch":
+            host = _host_of(str(args.get("url", "")))
+            if is_local_host(host):
+                return Decision("ask", "rules", "Запрос в локальную сеть: " + host, "high")
+        return None
+
     def decide(self, tool_name: str, mutating: bool, args: dict, intent: str = "",
                mode: str = "normal") -> Decision:
         """Решение по вызову. ask означает: цикл спрашивает человека (guard.ask)."""
@@ -142,22 +166,10 @@ class Guard:
         if not enabled:
             return Decision("allow", "mode", "Предохранитель выключен настройкой guard.enabled", risk)
 
+        hard = self.hard_block(tool_name, args)
+        if hard is not None:
+            return Decision(hard.decision, hard.by, hard.reason, hard.risk)
         rule = self._rule(tool_name, args_text)
-        if rule == "deny":
-            return Decision("deny", "rules", "Запрещено правилом в настройках (guard.rules)", risk)
-
-        irreversible = check_irreversible(tool_name, args)
-        if irreversible:
-            return Decision("ask", "rules", "Необратимое: " + irreversible +
-                            ". Спрашиваю даже в режиме " + mode, "high")
-
-        if tool_name in ("web_fetch", "web_search", "bash") and self._secret_in_args(args_text):
-            return Decision("ask", "rules", "В аргументах есть значение секрета: "
-                            "оно уйдёт наружу, если выполнить", "high")
-        if tool_name == "web_fetch":
-            host = _host_of(str(args.get("url", "")))
-            if is_local_host(host):
-                return Decision("ask", "rules", "Запрос в локальную сеть: " + host, "high")
 
         if _RISK_ORDER[risk] <= self._always_rank:
             return Decision("allow", "human", "Человек разрешил «дальше без вопросов» на этом уровне", risk)

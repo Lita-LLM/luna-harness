@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import subprocess
 
-from .registry import Tool, ToolResult, truncate_output
+from .registry import Tool, ToolResult
 
 
 def _bash(ctx, args) -> ToolResult:
@@ -15,13 +15,14 @@ def _bash(ctx, args) -> ToolResult:
     timeout = int(args.get("timeout") or 0)
     if not timeout:
         timeout = int(ctx.settings.get("tools.bash_timeout", 120)) if ctx.settings else 120
-    limit = int(ctx.settings.get("tools.output_limit", 8000)) if ctx.settings else 8000
     if args.get("background"):
         proc = subprocess.Popen(command, shell=True, cwd=str(ctx.cwd),
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         ctx.background[proc.pid] = proc
         return ToolResult(True, "Фоновая команда запущена, pid " + str(proc.pid) +
                           ". Вывод соберёт её завершение; pid держим в этой сессии.")
+    # Обрезку большого вывода делает цикл агента один раз (с сохранением в файл):
+    # если резать и здесь, и там — модель получит двойной маркер и два файла.
     try:
         done = subprocess.run(command, shell=True, cwd=str(ctx.cwd), timeout=timeout,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -29,12 +30,10 @@ def _bash(ctx, args) -> ToolResult:
         code = done.returncode
     except subprocess.TimeoutExpired as exc:
         out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        shown, _ = truncate_output(out, limit, ctx.output_dir, "bash")
         return ToolResult(False, "Команда не уложилась в " + str(timeout) +
-                          " с и убита.\n" + shown)
-    shown, _ = truncate_output(out, limit, ctx.output_dir, "bash")
+                          " с и убита.\n" + out)
     head = "Код выхода: " + str(code) + "\n"
-    return ToolResult(code == 0, head + shown if shown else head + "(вывода нет)")
+    return ToolResult(code == 0, head + out if out else head + "(вывода нет)")
 
 
 def bash_tool() -> Tool:

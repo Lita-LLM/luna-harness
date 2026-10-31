@@ -368,13 +368,13 @@ class Agent:
             new_args = answer.get("args")
             if not isinstance(new_args, dict):
                 return ("deny", "human", "Правка без новых аргументов не принята", args)
-            # Правленые аргументы проходят Предохранитель ещё раз: спросить снова нельзя.
-            tool = self.tools.get(tool_name)
-            again = self.guard.decide(tool_name, bool(tool and tool.mutating),
-                                       new_args, intent, self.mode)
-            if again.decision != "allow":
-                return ("deny", again.by, "Правленые аргументы не прошли Предохранитель: " +
-                        again.reason, args)
+            # Правленые аргументы проходят жёсткие блоки Предохранителя ещё раз:
+            # режимный ask человек уже ответил, а необратимое и утечки обязаны
+            # сработать и на новых данных; второй раз не спрашиваем — отказ.
+            hard = self.guard.hard_block(tool_name, new_args)
+            if hard is not None:
+                return ("deny", hard.by, "Правленые аргументы не прошли Предохранитель: " +
+                        hard.reason, args)
             return ("allow", "human", "Человек отредактировал и разрешил", new_args)
         if choice == "stop":
             return ("deny", "human-stop", "Человек отменил весь ход", args)

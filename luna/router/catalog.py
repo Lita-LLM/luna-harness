@@ -15,6 +15,7 @@ PROVIDER_PRESETS = [
     ("lmstudio", "LM Studio (локально)", "openai", "http://localhost:1234/v1"),
     ("omniroute", "OmniRoute (свой)", "openai", ""),
     ("custom", "Свой OpenAI-совместимый", "openai", ""),
+    ("fake", "Фальшивая модель (тесты, без сети)", "fake", "fake://"),
 ]
 
 

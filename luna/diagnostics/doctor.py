@@ -20,6 +20,32 @@ from ..core.stdio import ensure_utf8_stdio
 _OK, _WARN, _BAD = "✓", "!", "✗"
 
 
+def launcher_path() -> Path:
+    """Куда установщики кладут команду luna (install.sh / install.ps1)."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+        return root / "Luna" / "bin" / "luna.cmd"
+    prefix = os.environ.get("PREFIX", "")
+    if os.environ.get("TERMUX_VERSION") or "com.termux" in prefix:
+        return Path(prefix or "/data/data/com.termux/files/usr") / "bin" / "luna"
+    return Path.home() / ".local" / "bin" / "luna"
+
+
+def _dir_in_path(directory: Path) -> bool:
+    fold = sys.platform == "win32"  # в Windows регистр путей не важен
+    target = str(directory).rstrip("\\/")
+    if fold:
+        target = target.casefold()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = entry.rstrip("\\/")
+        if fold:
+            candidate = candidate.casefold()
+        if candidate and candidate == target:
+            return True
+    return False
+
+
 def _writable(path: Path) -> tuple[bool, str]:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -52,6 +78,18 @@ def run_doctor() -> int:
         + ("" if v >= (3, 10) else " — нужен 3.10 и новее"), hard=True)
     add(_OK, "ОС", f"{platform.platform()} · {sys.platform}")
     add(_OK, "Лунапарк", f"версия {__version__}")
+    launcher = launcher_path()
+    if launcher.exists():
+        if _dir_in_path(launcher.parent):
+            add(_OK, "Команда luna", f"установлена: {launcher}")
+        else:
+            add(_WARN, "Команда luna",
+                f"установлена: {launcher} — но папка не в PATH: "
+                "запускай полным путём или добавь папку в PATH")
+    else:
+        add(_WARN, "Команда luna",
+            "не установлена — запусти install.sh (Linux, macOS, Termux) "
+            "или install.bat (Windows) из папки программы")
 
     if caps.is_tty:
         term_name = caps.term or "—"

@@ -19,6 +19,16 @@ class WidthTest(unittest.TestCase):
         self.assertEqual(width.str_width("a你🌕b"), 6)
         self.assertEqual(width.str_width("кот"), 3)
 
+    def test_known_glyph_widths(self):
+        # Свои глифы зафиксированы таблицей, а не общими диапазонами:
+        # фазы луны — 2, брайлевский спиннер — 1 (урок РЕВЬЮ-01, п. 1).
+        for glyph in moon.EMOJI_PHASES:
+            self.assertEqual(width.char_width(glyph), 2, glyph)
+        self.assertEqual(width.char_width("🌙"), 2)
+        for glyph in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏":
+            self.assertEqual(width.char_width(glyph), 1, glyph)
+        self.assertEqual(width.str_width("⠸ Медитирует"), 12)
+
 
 class ColorTest(unittest.TestCase):
     def test_gradient_endpoints(self):
@@ -144,6 +154,31 @@ class ScreenTest(unittest.TestCase):
         buf.set(1, 0, "🌕")  # а целиком — перерисовывается одним куском
         frame = screen.present(buf)
         self.assertIn("🌕", frame)
+
+    def test_anchor_after_wide_char(self):
+        # После широкого символа следующий глиф предваряется абсолютной
+        # координатой: чужая модель ширины (ConPTY) не накапливает сдвиг.
+        screen, _ = self.make()
+        buf = Buffer(8, 2)
+        buf.text(0, 0, "a🌕b")  # луна на ячейках 1-2, b — на 3
+        frame = screen.present(buf)
+        self.assertIn("🌕\x1b[1;4Hb", frame)
+
+    def test_update_at_col0_starts_with_absolute(self):
+        # Ревью просило: после строки с эмодзи обновление в колонке 0 той же
+        # и соседней строки начинается с абсолютной координаты.
+        screen, _ = self.make()
+        buf = Buffer(10, 2)
+        buf.text(0, 0, "🌕 кот")
+        buf.text(0, 1, "строка")
+        screen.present(buf)
+        buf.set(0, 0, "🌑")
+        buf.set(0, 1, "С")
+        frame = screen.present(buf)
+        self.assertTrue(frame.startswith("\x1b[1;1H"), repr(frame))
+        self.assertIn("\x1b[2;1H", frame)
+        self.assertIn("🌑", frame)
+        self.assertIn("С", frame)
 
     def test_single_write_per_frame(self):
         screen, frames = self.make()

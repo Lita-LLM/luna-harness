@@ -43,7 +43,8 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna set <ключ> <значение>  изменить настройку (например: luna set ui.splash off)
   luna try render           витрина рендерера: палитра, градиенты, фазы луны
   luna try splash           заставка ещё раз
-  luna try snapshot <экран> снимок экрана в HTML: splash | render | main
+  luna try chat             чат-экран с фальшивым агентом (сценарии событий)
+  luna try snapshot <экран> снимок экрана в HTML: splash | render | main | chat
   luna try measure [--json] замеры: старт, память и ЦП в простое
   luna --version            версия
 """
@@ -133,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_set(rest)
         if cmd == "try":
             if not rest:
-                raise HumanError("usage", "Нужно: luna try render | splash | measure", "")
+                raise HumanError("usage", "Нужно: luna try render | splash | chat | measure | snapshot", "")
             what = rest[0]
             if what == "render":
                 from .ui.render_try import run_render_demo
@@ -143,6 +144,10 @@ def main(argv: list[str] | None = None) -> int:
                 from .ui.splash import run_splash_demo
 
                 return run_splash_demo(started_at=_T0)
+            if what == "chat":
+                from .ui.chat import run_chat
+
+                return run_chat(started_at=_T0)
             if what == "measure":
                 from .devtools.measure import run_measure
 
@@ -152,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 return run_snapshot(rest[1:])
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, measure, snapshot.")
+                             "Есть: render, splash, chat, measure, snapshot.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

@@ -146,12 +146,13 @@ class ChatApp:
     """Состояние чат-экрана и реакции на ввод и события источника."""
 
     def __init__(self, bus=None, settings=None, scheduler=None,
-                 glyph_mode="emoji", source=None, cwd=None):
+                 glyph_mode="emoji", source=None, cwd=None, trap=None):
         self.bus = bus or EventBus()
         self.settings = settings or Settings()
         self.scheduler = scheduler or Scheduler()
         self.glyph_mode = _moon.normalize_mode(glyph_mode)
         self.cwd = cwd or os.getcwd()
+        self.trap = trap  # ErrorTrap полноэкранного сеанса: ошибки потоков — в ленту
         self.source = source if source is not None else create_source(self.settings)
         self.editor = TextEditor()
         self.entries: list = []
@@ -192,10 +193,13 @@ class ChatApp:
         self.poll_source()
 
     def poll_source(self) -> list:
+        events = []
+        if self.trap is not None:
+            # Ошибки фоновых потоков приходят событиями error — как от источника.
+            events.extend(self.trap.drain())
         poll = getattr(self.source, "poll", None)
-        if not callable(poll):
-            return []
-        events = poll()
+        if callable(poll):
+            events.extend(poll())
         for ev in events:
             self.on_agent_event(ev)
         return events
@@ -211,6 +215,8 @@ class ChatApp:
     def needs_frame(self, now: float) -> bool:
         """Кадры нужны, пока идёт ход, есть события или что-то затухает."""
         if self.busy:
+            return True
+        if self.trap is not None and self.trap.pending:
             return True
         pending = getattr(self.source, "has_pending", None)
         if callable(pending) and pending():
@@ -1018,8 +1024,10 @@ class ChatApp:
         return buf, cursor
 
 
-def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True) -> int:
+def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
+             continue_last: bool = False) -> int:
     """Полноэкранный чат: терминал, цикл ввода, источник событий."""
+    from .errtrap import ErrorTrap
     from .splash import play_splash
 
     settings = Settings()
@@ -1030,31 +1038,38 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
         return 0
     data = DataDir()
     data.ensure()
+    # Пока экран наш, ошибки потоков и stderr уходят в лог, а не поверх
+    # ленты (ЗАДАЧА-06, п. 2): лог — LUNA_HOME/logs/chat-<время>.log.
+    trap = ErrorTrap(data.logs / ("chat-" + time.strftime("%Y%m%d-%H%M%S") + ".log"))
     with RunLock(data.root):
         with term:
-            cols, rows = term.size()
-            screen = Screen(term.write, term.caps.color_level, cols, rows)
-            if splash_first and play_splash(term, screen, settings, bus, started_at) == "exit":
-                return 0
-            app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
-                          source=create_source(settings, fake=fake))
-            app.start_source()
-            while not app.done:
-                events = term.read_events(timeout=app.next_timeout())
-                size = term.size()
-                if size != (screen.cols, screen.rows):
-                    screen.resize(*size)
-                for ev in events:
-                    if isinstance(ev, Key):
-                        app.handle_key(ev)
-                    elif isinstance(ev, Mouse):
-                        app.handle_mouse(ev)
-                    elif isinstance(ev, Paste):
-                        app.handle_paste(ev)
-                    elif isinstance(ev, Resize):
-                        screen.resize(ev.cols, ev.rows)
-                app.poll_source()
-                buf, cursor = app.draw(size[0], size[1], time.monotonic())
-                screen.present(buf, cursor=cursor)
+            trap.install()
+            try:
+                cols, rows = term.size()
+                screen = Screen(term.write, term.caps.color_level, cols, rows)
+                if splash_first and play_splash(term, screen, settings, bus, started_at) == "exit":
+                    return 0
+                app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
+                              source=create_source(settings, fake=fake), trap=trap)
+                app.start_source()
+                while not app.done:
+                    events = term.read_events(timeout=app.next_timeout())
+                    size = term.size()
+                    if size != (screen.cols, screen.rows):
+                        screen.resize(*size)
+                    for ev in events:
+                        if isinstance(ev, Key):
+                            app.handle_key(ev)
+                        elif isinstance(ev, Mouse):
+                            app.handle_mouse(ev)
+                        elif isinstance(ev, Paste):
+                            app.handle_paste(ev)
+                        elif isinstance(ev, Resize):
+                            screen.resize(ev.cols, ev.rows)
+                    app.poll_source()
+                    buf, cursor = app.draw(size[0], size[1], time.monotonic())
+                    screen.present(buf, cursor=cursor)
+            finally:
+                trap.uninstall()
     print(phrases.event_phrase("end") or "Орёл сел.")
     return 0

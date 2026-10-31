@@ -45,6 +45,10 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try splash           заставка ещё раз
   luna try snapshot <экран> снимок экрана в HTML: splash | render | main
   luna try measure [--json] замеры: старт, память и ЦП в простое
+  luna try brain            мозг на фальшивой модели: ход с тулом, без сети
+  luna setup                настройка провайдера и моделей (ключ — скрытым вводом)
+  luna models               что из моделей настроено и живо ли
+  luna -p "задача"          headless: один ход; --json — события JSONL, --mode, --model
   luna --version            версия
 """
 
@@ -123,6 +127,48 @@ def main(argv: list[str] | None = None) -> int:
         if cmd in ("--help", "-h", "help"):
             print(USAGE)
             return 0
+        if cmd in ("-p", "--prompt"):
+            from .headless import run_headless
+
+            prompt_parts = []
+            json_mode = False
+            mode = ""
+            model_ref = ""
+            idx = 0
+            while idx < len(rest):
+                item = rest[idx]
+                if item == "--json":
+                    json_mode = True
+                elif item == "--mode" and idx + 1 < len(rest):
+                    idx += 1
+                    mode = rest[idx]
+                elif item == "--model" and idx + 1 < len(rest):
+                    idx += 1
+                    model_ref = rest[idx]
+                else:
+                    prompt_parts.append(item)
+                idx += 1
+            if not prompt_parts:
+                raise HumanError("usage", "Нужно: luna -p \"задача\" [--json] [--mode РЕЖИМ] [--model МОДЕЛЬ]", "")
+            return run_headless(" ".join(prompt_parts), json_mode=json_mode,
+                                mode=mode, model_ref=model_ref)
+        if cmd == "setup":
+            from .core.paths import DataDir
+            from .core.secrets import Secrets
+            from .core.settings import Settings
+            from .setup import run_setup
+
+            data = DataDir()
+            data.ensure()
+            return run_setup(settings=Settings(), secrets=Secrets(data.secrets))
+        if cmd == "models":
+            from .core.paths import DataDir
+            from .core.secrets import Secrets
+            from .core.settings import Settings
+            from .setup import run_models
+
+            data = DataDir()
+            return run_models(settings=Settings(), secrets=Secrets(data.secrets))
         if cmd == "doctor":
             from .diagnostics.doctor import run_doctor
 
@@ -151,8 +197,12 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.snapshot import run_snapshot
 
                 return run_snapshot(rest[1:])
+            if what == "brain":
+                from .devtools.brain import run_brain_try
+
+                return run_brain_try()
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, measure, snapshot.")
+                             "Есть: render, splash, measure, snapshot, brain.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

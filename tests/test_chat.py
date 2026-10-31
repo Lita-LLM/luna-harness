@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 import unittest
 from datetime import datetime, timezone
 
@@ -478,6 +480,148 @@ class AstroTest(unittest.TestCase):
         self.assertFalse(north.mirror)
         self.assertTrue(south.mirror)
         self.assertEqual(north.illumination, south.illumination)
+
+
+class TerminalModel:
+    """Модель настоящего терминала (Windows Terminal): применяет поток
+    Screen.present к собственной сетке ячеек.
+
+    Ширина глифов — СВОЯ таблица модели, а не luna.ui.width: дингбаты и
+    текстовые символы — 1 ячейка, эмодзи с представлением и CJK — 2.
+    Если модель ширины Луны разойдётся с терминалом, якорь курсора в
+    present перепрыгнет живую ячейку и в сетке останется «хвост»
+    прошлого кадра — сравнение сетки с буфером это ловит.
+    """
+
+    WIDE2 = set("⚠✨☀❤➕⬛⬜⭐⭕🌑🌒🌓🌔🌕🌖🌗🌘🌙🚀")
+
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        self.cells = [[(" ", None) for _x in range(cols)] for _y in range(rows)]
+        self.x = self.y = 0
+        self.bg = None
+
+    @classmethod
+    def term_width(cls, ch):
+        if not ch or unicodedata.combining(ch):
+            return 0
+        if ch in cls.WIDE2 or ord(ch) >= 0x1F000:
+            return 2
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            return 2
+        return 1
+
+    def feed(self, frame: str) -> None:
+        i = 0
+        while i < len(frame):
+            if frame[i] == "\x1b":
+                m = re.match(r"\x1b\[([0-9;?]*)([A-Za-z])", frame[i:])
+                self.assert_match = m
+                if m is None:
+                    raise AssertionError("непонятная последовательность: "
+                                         + repr(frame[i:i + 16]))
+                params, final = m.group(1), m.group(2)
+                i += m.end()
+                if final == "H":
+                    parts = params.split(";")
+                    self.y = int(parts[0]) - 1
+                    self.x = int(parts[1]) - 1 if len(parts) > 1 and parts[1] else 0
+                elif final == "m":
+                    self._sgr(params)
+                continue
+            self._put(frame[i])
+            i += 1
+
+    def _sgr(self, params: str) -> None:
+        nums = [int(p) if p else 0 for p in params.split(";")] if params else [0]
+        j = 0
+        while j < len(nums):
+            n = nums[j]
+            if n == 0:
+                self.bg = None
+            elif n == 48 and j + 1 < len(nums) and nums[j + 1] == 2:
+                self.bg = (nums[j + 2], nums[j + 3], nums[j + 4])
+                j += 4
+            elif n == 48 and j + 1 < len(nums) and nums[j + 1] == 5:
+                from luna.ui import color
+
+                self.bg = color.rgb_of_256(nums[j + 2])
+                j += 2
+            j += 1
+
+    def _put(self, ch: str) -> None:
+        w = self.term_width(ch)
+        if w == 0 or not (0 <= self.y < self.rows):
+            return
+        x, y = self.x, self.y
+        if w == 2 and x + 1 >= self.cols:
+            return
+        # Запись поверх половины широкого символа зачищает и вторую половину.
+        if self.cells[y][x][0] == "" and x > 0:
+            self.cells[y][x - 1] = (" ", self.bg)
+        elif (self.term_width(self.cells[y][x][0]) == 2 and x + 1 < self.cols
+                and self.cells[y][x + 1][0] == ""):
+            self.cells[y][x + 1] = (" ", self.bg)
+        if w == 2:
+            self.cells[y][x] = (ch, self.bg)
+            self.cells[y][x + 1] = ("", self.bg)
+            self.x = x + 2
+        else:
+            self.cells[y][x] = (ch, self.bg)
+            self.x = x + 1
+
+    def assert_matches(self, tc, buf) -> None:
+        for y in range(buf.rows):
+            model_text = "".join(c[0] for c in self.cells[y])
+            buf_text = "".join(c[0] for c in buf.cells[y])
+            tc.assertEqual(model_text, buf_text, "текст строки " + str(y))
+            for x in range(buf.cols):
+                tc.assertEqual(self.cells[y][x][1], buf.cells[y][x][2],
+                               "фон ячейки " + str(x) + "," + str(y))
+
+
+class NoTailsTest(unittest.TestCase):
+    """ЗАДАЧА-06, п. 1: после сворачивания/разворачивания блока и сдвига
+    ленты в терминале не остаётся хвостов прошлого кадра."""
+
+    def step(self, app, screen, model, frames, tc):
+        buf, cursor = app.draw(60, 16, 100.0)
+        screen.present(buf, cursor=cursor)
+        model.feed(frames[-1])
+        model.assert_matches(tc, buf)
+
+    def test_collapse_expand_and_block_shift(self):
+        from luna.ui.screen import Screen
+
+        app = make_app()
+        frames = []
+        screen = Screen(frames.append, "truecolor", 60, 16)
+        model = TerminalModel(60, 16)
+        app.on_agent_event({"type": "session.start", "model": "m", "mode": "normal",
+                            "cwd": "/tmp"})
+        app.submit_text("подтверди чистку")
+        app.on_agent_event({"type": "turn.start", "turn": 1})
+        app.on_agent_event({"type": "tool.call", "id": "t1", "name": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки"})
+        self.step(app, screen, model, frames, self)          # строка тула, идёт ход
+        app.on_agent_event({"type": "guard.ask", "id": "g1", "tool": "bash",
+                            "args": {"command": "rm -rf build/"},
+                            "intent": "Чищу каталог сборки", "risk": "high",
+                            "reason": "необратимое удаление", "choices": []})
+        self.step(app, screen, model, frames, self)          # блок подтверждения
+        app.handle_key(Key("enter"))                  # человек сказал «да»
+        app.on_agent_event({"type": "tool.result", "id": "t1", "ok": True,
+                            "summary": "Код выхода: 0",
+                            "output": "первая строка\nвторая строка\n"})
+        self.step(app, screen, model, frames, self)          # решение + результат
+        app.handle_key(Key("o", mods=frozenset({"ctrl"})))
+        self.step(app, screen, model, frames, self)          # вывод развёрнут
+        app.handle_key(Key("o", mods=frozenset({"ctrl"})))
+        self.step(app, screen, model, frames, self)          # вывод свёрнут обратно
+        app.on_agent_event({"type": "agent.text", "text": "Готово, чисто."})
+        app.on_agent_event({"type": "turn.done", "turn": 1, "reason": "end"})
+        self.step(app, screen, model, frames, self)          # лента сдвинулась
 
 
 class ChatSnapshotTest(unittest.TestCase):

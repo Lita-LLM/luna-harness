@@ -69,8 +69,9 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
     """Кадр заставки при прогрессе t 0..1 в готовый буфер.
 
     Режим глифов (emoji | narrow | ascii) приходит из Caps.glyph_mode:
-    декоративные звёзды ✦ шириной 2 в узком режиме заменяются на •,
-    в ASCII — весь набор схлопывается в точки и звёздочки.
+    в ASCII набор звёзд схлопывается в точки и звёздочки. Звезда ✦ —
+    текстовый символ шириной 1 (ЗАДАЧА-06, п. 1), поэтому в узком режиме
+    рисуется как есть, заменять её на • больше не нужно.
 
     sky — настоящая фаза луны (ui.astro.MoonSky): если задана, диск
     показывает её освещённость и сторону терминатора, а t отвечает только
@@ -84,8 +85,6 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
     for x, y, phase, glyph, speed in stars:
         if mode == "ascii" and glyph not in (".", "*", "+"):
             glyph = "."
-        elif mode == "narrow" and glyph == "✦":
-            glyph = "•"
         bright = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(now * speed + phase))
         fg = _color.lerp((70, 78, 105), (230, 238, 255), bright)
         buf.set(x, y, glyph, fg=fg, bg=buf.cell(x, y)[2])

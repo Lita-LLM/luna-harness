@@ -31,6 +31,46 @@ class WidthTest(unittest.TestCase):
             self.assertEqual(width.char_width(glyph), 1, glyph)
         self.assertEqual(width.str_width("⠸ Медитирует"), 12)
 
+    def test_text_symbols_are_narrow(self):
+        # ЗАДАЧА-06, п. 1: дингбаты и символы без эмодзи-представления
+        # терминал рисует в одну ячейку. Раньше диапазоны 2600–26FF и
+        # 2700–27BF целиком считались широкими — в Windows Terminal после
+        # ⚙, ✓ и ✦ оставались хвосты прошлого кадра («√b Код выхода: 0»).
+        for glyph in "⚙✓✗✦☑★☾✔✚⬅⬆":
+            self.assertEqual(width.char_width(glyph), 1, glyph)
+        # А у этих эмодзи-представление есть — честные две ячейки.
+        for glyph in "⚠✨☀❤➕⬛⬜⭐⭕✈✌❌❗":
+            self.assertEqual(width.char_width(glyph), 2, glyph)
+
+    def test_interface_glyph_table(self):
+        # Весь набор глифов интерфейса — с осознанной шириной из таблицы.
+        for glyph, expected in width.INTERFACE_GLYPHS.items():
+            self.assertEqual(width.char_width(glyph), expected, glyph)
+
+    def test_all_frame_glyphs_covered(self):
+        # Полнота: любой не-ASCII символ, который интерфейс реально рисует
+        # (кадры всех экранов, справка, фразы), обязан быть в таблице ширин.
+        from luna.devtools import snapshot
+        from luna.ui import phrases
+        from luna.ui.chat import HELP_TEXT
+
+        texts = [HELP_TEXT] + phrases.spinner_phrases() + phrases.splash_phrases()
+        for name in ("splash", "render", "main", "chat"):
+            for _label, buf in snapshot.render_frames(name, 100, 28, [0.0, 0.6, 1.2]):
+                texts.extend("".join(cell[0] for cell in row) for row in buf.cells)
+        seen = set()
+        for text in texts:
+            for ch in text:
+                code = ord(ch)
+                if code < 128 or 0x400 <= code <= 0x4FF:
+                    continue  # ASCII и кириллица — шириной 1 по построению
+                if 0x3400 <= code <= 0x9FFF or unicodedata.combining(ch):
+                    continue  # CJK — east_asian_width W, ноль у комбинирующихся
+                seen.add(ch)
+        for ch in sorted(seen):
+            self.assertIn(ch, width.INTERFACE_GLYPHS,
+                          "глиф интерфейса без осознанной ширины: " + repr(ch))
+
 
 class ColorTest(unittest.TestCase):
     def test_gradient_endpoints(self):

@@ -16,7 +16,7 @@ from ..core.settings import Settings
 from . import color as _color
 from . import moon as _moon
 from . import phrases
-from .anim import Scheduler, Spinner
+from .anim import Scheduler, Spinner, ease_in_out
 from .keys import Key, Mouse, Paste, Resize
 from .screen import Buffer, Screen
 from .splash import play_splash
@@ -42,6 +42,7 @@ class MiniApp:
         self.scroll = 0
         self._spinner: Spinner | None = None
         self._spin_phrase = ""
+        self._spin_from = 0.0
         self._spin_until = 0.0
         bus.listen(self._on_event)
 
@@ -105,7 +106,8 @@ class MiniApp:
         if self.settings.get("ui.animations"):
             self._spinner = Spinner(self.glyph_mode)
             self._spin_phrase = phrases.random_spinner()
-            self._spin_until = time.monotonic() + SPIN_SECONDS
+            self._spin_from = time.monotonic()
+            self._spin_until = self._spin_from + SPIN_SECONDS
             self.scheduler.add(self._spin_tick)
         else:
             self._note()
@@ -159,7 +161,11 @@ class MiniApp:
         if self._spinner is not None:
             mid = f"{self._spinner.glyph(now)} {self._spin_phrase}…"
             mx = max(0, (cols - str_width(mid)) // 2)
-            buf.text(mx, sy, mid, fg=_color.AMBER, bg=(0x16, 0x1B, 0x30))
+            # строка думания появляется и уходит затуханием, а не прыжком
+            alpha = min(ease_in_out((now - self._spin_from) / 0.3),
+                        ease_in_out((self._spin_until - now) / 0.3))
+            spin_fg = _color.lerp((0x16, 0x1B, 0x30), _color.AMBER, alpha)
+            buf.text(mx, sy, mid, fg=spin_fg, bg=(0x16, 0x1B, 0x30))
         clock = time.strftime("%H:%M:%S")
         buf.text(cols - len(clock) - 1, sy, clock, fg=_color.SILVER,
                  bg=(0x16, 0x1B, 0x30), attrs=_color.DIM)

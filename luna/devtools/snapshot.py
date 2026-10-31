@@ -98,6 +98,7 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
 
         demo = _Demo(caps.glyph_mode)
         demo.spinner.started = _FAKE_NOW
+        demo.wheel.started = _FAKE_NOW
         demo._fps_at = _FAKE_NOW
     frames = []
     for at in times:

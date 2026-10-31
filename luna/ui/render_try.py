@@ -15,7 +15,7 @@ from ..core.settings import Settings
 from . import color as _color
 from . import moon as _moon
 from . import phrases
-from .anim import Scheduler, Spinner
+from .anim import PhraseWheel, Scheduler, Spinner
 from .keys import Key, Mouse, Paste, Resize
 from .screen import Buffer, Screen
 from .term import Terminal
@@ -32,7 +32,8 @@ class _Demo:
         self._fps_count = 0
         self.last_event = "—"
         self.spinner = Spinner(self.glyph_mode)
-        self.phrase = phrases.random_spinner()
+        # фразы крутятся колесом и сменяются затуханием, а не прыжком
+        self.wheel = PhraseWheel(phrases.spinner_phrases())
 
     def on_key(self, ev) -> None:
         self.last_event = repr(ev)
@@ -58,9 +59,10 @@ class _Demo:
                      bg=_color.SPACE_BG, attrs=_color.DIM)
             x += 22
         y += 3
-        # градиенты
+        # градиенты; неоновая полоса растворяется в фон по краям (виньетка)
         bar_w = max(10, cols - 2)
-        buf.gradient_rect(0, y, bar_w, 1, _color.NEON_STOPS)
+        soft_stops = (_color.SPACE_BG,) + _color.NEON_STOPS + (_color.SPACE_BG,)
+        buf.gradient_rect(0, y, bar_w, 1, soft_stops)
         buf.gradient_rect(0, y + 1, bar_w, 1, (_color.SILVER, _color.AMBER))
         buf.gradient_rect(0, y + 2, bar_w, 1, (_color.CYAN, _color.SILVER))
         y += 4
@@ -108,8 +110,10 @@ class _Demo:
         if now - self._fps_at >= 1.0:
             self.fps = round(self._fps_count / (now - self._fps_at))
             self._fps_at, self._fps_count = now, 0
-        spin = f"{self.spinner.glyph(now)} {self.phrase}…"
-        buf.text(0, y, spin, fg=_color.AMBER, bg=_color.SPACE_BG)
+        phrase, alpha = self.wheel.text_alpha(now)
+        spin = f"{self.spinner.glyph(now)} {phrase}…"
+        spin_fg = _color.lerp(_color.SPACE_BG, _color.AMBER, alpha)
+        buf.text(0, y, spin, fg=spin_fg, bg=_color.SPACE_BG)
         buf.text(0, y + 1, f"кадр {self.frames} · {self.fps} кадр/с · последнее событие: {self.last_event}",
                  fg=_color.SILVER, bg=_color.SPACE_BG)
         if rows - 1 > y + 2:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,6 +81,29 @@ class RunSnapshotTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             page = out.read_text(encoding="utf-8")
             self.assertEqual(page.count('class="scr"'), 3)
+
+    def test_cp1252_stdout_survives_in_process_call(self):
+        # Регрессия CI Windows по zadacha-03: run_snapshot зовут прямо
+        # в процессе, в обход main(), а stdout — пайп с системной
+        # кодировкой cp1252 и strict: «Снимок» не влезает в charmap.
+        # Печатающий вход обязан сам переконфигурировать поток в UTF-8.
+        raw = io.BytesIO()
+        fake = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+        real_stdout = sys.stdout
+        sys.stdout = fake
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "main.html"
+                rc = snapshot.run_snapshot(["main", "--size", "30x8", "-o", str(out)])
+                wrote_file = out.exists()
+        finally:
+            sys.stdout = real_stdout
+        self.assertEqual(rc, 0)
+        self.assertTrue(wrote_file)
+        fake.flush()
+        printed = raw.getvalue().decode("utf-8")
+        fake.detach()
+        self.assertIn("Снимок", printed)
 
 
 if __name__ == "__main__":

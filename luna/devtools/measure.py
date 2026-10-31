@@ -30,6 +30,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from ..core.stdio import ensure_utf8_stdio
+
 PROGRAM_DIR = Path(__file__).resolve().parents[2]
 IS_WINDOWS = sys.platform == "win32"
 START_RUNS = 7
@@ -355,6 +357,7 @@ GOALS = [
 
 
 def run_measure(as_json: bool = False) -> int:
+    ensure_utf8_stdio()  # печатаем сами (✓/✗, русский) — кодировка наша забота
     res = measure()
     if as_json:
         print(json.dumps(res, ensure_ascii=False, indent=1))

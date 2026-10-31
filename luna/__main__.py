@@ -14,6 +14,7 @@ import time
 _T0 = time.monotonic()
 
 from . import __version__  # noqa: E402 — лёгкий импорт, только строка версии
+from .core.stdio import ensure_utf8_stdio  # noqa: E402 — лёгкий: внутри только sys
 
 
 def _note_start_marker() -> None:
@@ -105,23 +106,8 @@ def settings_value_type(key: str) -> str:
     return field.type if field else "str"
 
 
-def _force_utf8_stdio() -> None:
-    """Все потоки вывода — UTF-8 с заменой, а не системной кодировкой.
-
-    Простые команды (doctor/settings/measure) часто пишут в пайп или файл,
-    где Windows даёт cp1251 и ✓/✗ роняют вывод UnicodeEncodeError-ом.
-    Terminal.reconfigure спасает только полноэкранный режим, поэтому точка
-    входа настраивает потоки сама — для всех команд (РЕВЬЮ-01, раунд 2).
-    """
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001 — заменённый поток без reconfigure не повод падать
-            pass
-
-
 def main(argv: list[str] | None = None) -> int:
-    _force_utf8_stdio()
+    ensure_utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     from .core.errors import HumanError
 

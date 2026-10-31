@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from ..core.errors import HumanError
+from ..core.stdio import ensure_utf8_stdio
 from ..ui import color as _color
 from ..ui import phrases
 from ..ui.screen import Buffer
@@ -237,6 +238,9 @@ def parse_args(argv: list) -> dict:
 
 
 def run_snapshot(argv: list) -> int:
+    # Печатаем сами — сами и обеспечиваем кодировку: run_snapshot зовут
+    # и в обход main() (тесты), а cp1252 пайпа роняет «Снимок» (CI zadacha-03).
+    ensure_utf8_stdio()
     opts = parse_args(argv)
     times = [opts["at"] + i * opts["every"] for i in range(opts["frames"])]
     frames = render_frames(opts["name"], opts["cols"], opts["rows"], times)

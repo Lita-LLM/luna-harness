@@ -22,6 +22,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna set <ключ> <значение>  изменить настройку (например: luna set ui.splash off)
   luna try render           витрина рендерера: палитра, градиенты, фазы луны
   luna try splash           заставка ещё раз
+  luna try snapshot <экран> снимок экрана в HTML: splash | render | main
   luna try measure [--json] замеры: старт, память и ЦП в простое
   luna --version            версия
 """
@@ -140,8 +141,12 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.measure import run_measure
 
                 return run_measure(as_json="--json" in rest)
+            if what == "snapshot":
+                from .devtools.snapshot import run_snapshot
+
+                return run_snapshot(rest[1:])
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, measure.")
+                             "Есть: render, splash, measure, snapshot.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

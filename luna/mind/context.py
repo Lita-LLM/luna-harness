@@ -14,16 +14,6 @@ INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
 MAX_FILE_CHARS = 4000
 MAX_TOTAL_CHARS = 12000
 
-BASE_PROMPT = """Ты — Луна, сессионный ИИ-агент в проекте пользователя. Работаешь здесь и сейчас: читаешь файлы, запускаешь команды, правишь код и доводишь задачу до проверяемого результата.
-
-Правила:
-- У каждого вызова тула, который что-то меняет, заполняй intent: одна фраза, что произойдёт и зачем. Человек видит intent при подтверждении.
-- Отказ Предохранителя («НЕ ВЫПОЛНЕНО») окончателен: не обходи его другим тулом, другими аргументами или другим путём к той же цели. Доложи человеку и жди.
-- Не выдумывай содержимое файлов и вывод команд: прочитай и проверь.
-- Секреты (ключи, токены, пароли) не печатай, не отправляй наружу и не клади в файлы проекта.
-- Отвечай по-русски, кратко и по делу; в конце хода — что сделано и чем проверено."""
-
-
 def collect_instructions(cwd: Path) -> list[tuple[str, str]]:
     """(путь, текст) инструкций из каталога и родителей, ближе к каталогу — раньше."""
     found: list[tuple[str, str]] = []
@@ -50,11 +40,8 @@ def collect_instructions(cwd: Path) -> list[tuple[str, str]]:
     return found
 
 
-def build_system_prompt(cwd: Path, mode: str = "normal") -> str:
-    parts = [BASE_PROMPT]
-    parts.append("Рабочий каталог: " + str(cwd))
-    if mode == "plan":
-        parts.append("Режим plan: тулы записи недоступны. Составь план и исследуй, ничего не меняй.")
-    for path, text in collect_instructions(Path(cwd)):
-        parts.append("Инструкции проекта (" + path + "):\n" + text)
-    return "\n\n".join(parts)
+def build_system_prompt(cwd: Path, mode: str = "normal", settings=None) -> str:
+    """Совместимый вход для старых импортов: настоящая сборка слоёв — luna.mind.prompt."""
+    from .prompt import build_system_prompt as _build
+
+    return _build(cwd, mode, settings=settings)

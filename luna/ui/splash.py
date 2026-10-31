@@ -82,10 +82,11 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok: bool, phrase: str,
         y0 = min(rows - 3, cy + ry + 2)
         if 0 <= y0 < rows:
             for i, ch in enumerate(title):
-                if ch == " ":
+                if ch == " " or x0 + i >= cols:
                     continue
-                c = _color.lerp(buf.cell(x0 + i, y0)[2] or (0, 0, 0), grad[i], fade)
-                buf.set(x0 + i, y0, ch, fg=c, bg=buf.cell(x0 + i, y0)[2], attrs=_color.BOLD)
+                bg_here = buf.cell(x0 + i, y0)[2]
+                c = _color.lerp(bg_here or (0, 0, 0), grad[i], fade)
+                buf.set(x0 + i, y0, ch, fg=c, bg=bg_here, attrs=_color.BOLD)
             if t > 0.55 and phrase:
                 px = max(0, (cols - len(phrase)) // 2)
                 if y0 + 2 < rows:

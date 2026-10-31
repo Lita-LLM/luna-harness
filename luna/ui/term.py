@@ -385,7 +385,7 @@ def _windows_read(timeout, parser) -> list:
                 continue
             ch = kev.UnicodeChar
             if ch and ch != "\x00":
-                events.extend(parser.feed(ch.encode("utf-8")) * 1)
+                events.extend(parser.feed(ch.encode("utf-8")))
             else:
                 name = _VK.get(kev.wVirtualKeyCode)
                 if name:

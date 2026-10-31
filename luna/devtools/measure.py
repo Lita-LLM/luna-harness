@@ -26,6 +26,14 @@ IDLE_SECONDS = 10.0
 
 def _spawn_luna(home: str):
     """Запустить Луну под pty 80x24; вернуть (процесс, fd чтения, момент запуска)."""
+    if IS_WINDOWS:
+        from ..core.errors import HumanError
+
+        raise HumanError(
+            "measure_unsupported",
+            "Замеры запуском под псевдотерминалом на Windows пока не сделаны",
+            "Нужен ConPTY (CreatePseudoConsole) — отдельная работа следующей вехи; "
+            "метрики памяти и ЦП через ctypes ниже уже написаны.")
     import fcntl
     import pty
     import struct

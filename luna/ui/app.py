@@ -182,4 +182,4 @@ def run_fullscreen(started_at: float) -> int:
     """
     from .chat import run_chat
 
-    return run_chat(started_at=started_at, splash_first=True)
+    return run_chat(started_at=started_at, splash_first=True, fake=False)

@@ -1,0 +1,135 @@
+"""Настоящий агент как источник событий для чата (тот же интерфейс, что у FakeAgent).
+
+Ход агента синхронный и блокирующий, а экран живёт в своём цикле кадров,
+поэтому ход идёт в фоновом потоке, события копятся в очереди, а чат забирает
+их в poll(). Подтверждения и вопросы агент ждёт на Event — пока человек не
+ответит командой guard.answer / user.answer или не прервёт ход.
+"""
+
+from __future__ import annotations
+
+import queue
+import threading
+import time
+from pathlib import Path
+
+
+class AgentSource:
+    def __init__(self, *, settings=None, cwd: str = "", agent=None):
+        self._settings = settings
+        self._cwd = cwd or str(Path.cwd())
+        self._agent = agent
+        self._events: queue.Queue = queue.Queue()
+        self._worker: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._waits: dict[str, tuple[threading.Event, list]] = {}
+
+    # --- интерфейс источника ------------------------------------------------
+
+    def start(self) -> None:
+        if self._agent is None:
+            self._agent = self._build_agent()
+        self._agent.listen(self._events.put)
+        model = getattr(self._agent, "_model_label", lambda: "")()
+        if not model:
+            self._events.put({"type": "notice", "level": "warn", "ts": time.time(),
+                              "text": "Модель не настроена — запусти luna setup в обычном терминале."})
+
+    def has_pending(self) -> bool:
+        return not self._events.empty() or self._busy()
+
+    def poll(self, now: float | None = None) -> list:  # noqa: ARG002 — интерфейс как у FakeAgent
+        out = []
+        while True:
+            try:
+                out.append(self._events.get_nowait())
+            except queue.Empty:
+                return out
+
+    def handle_command(self, cmd: dict) -> None:
+        kind = cmd.get("type")
+        if kind in ("guard.answer", "user.answer"):
+            self._answer(cmd.get("id", ""), cmd)
+            return
+        if kind == "interrupt":
+            self._agent.interrupt()
+            self._release_all({"decision": "stop", "text": ""})
+            return
+        if kind == "mode.set":
+            self._agent.handle_command(cmd)
+            return
+        if kind in ("user.message", "shell"):
+            if kind == "user.message" and self._busy():
+                self._agent.handle_command(cmd)  # во время хода — в очередь агента
+                return
+            self._run_in_worker(cmd)
+
+    # --- внутреннее ---------------------------------------------------------
+
+    def _busy(self) -> bool:
+        return self._worker is not None and self._worker.is_alive()
+
+    def _run_in_worker(self, cmd: dict) -> None:
+        def work() -> None:
+            try:
+                self._agent.handle_command(cmd)
+            except Exception as exc:  # noqa: BLE001 — падение хода не роняет экран
+                self._events.put({"type": "error", "ts": time.time(),
+                                  "message": "Ход упал: " + str(exc), "detail": repr(exc)})
+                self._events.put({"type": "turn.done", "ts": time.time(), "reason": "error"})
+
+        if self._busy():
+            self._worker.join(timeout=0.1)
+        self._worker = threading.Thread(target=work, name="luna-agent-turn", daemon=True)
+        self._worker.start()
+
+    def _wait_answer(self, wait_id: str) -> dict | None:
+        ev = threading.Event()
+        box: list = []
+        with self._lock:
+            self._waits[wait_id] = (ev, box)
+        ev.wait()
+        with self._lock:
+            self._waits.pop(wait_id, None)
+        return box[0] if box else None
+
+    def _answer(self, wait_id: str, cmd: dict) -> None:
+        with self._lock:
+            pair = self._waits.get(wait_id)
+        if pair is None:
+            return
+        ev, box = pair
+        box.append(cmd)
+        ev.set()
+
+    def _release_all(self, answer: dict) -> None:
+        with self._lock:
+            pairs = list(self._waits.values())
+        for ev, box in pairs:
+            if not box:
+                box.append(answer)
+            ev.set()
+
+    def _ask_guard(self, event: dict):
+        return self._wait_answer(event.get("id", ""))
+
+    def _ask_user(self, qid: str, question: str, options):  # noqa: ARG002
+        ans = self._wait_answer(qid)
+        if not ans or ans.get("decision") == "stop":
+            return None
+        return ans.get("text")
+
+    def _build_agent(self):
+        from ..core.paths import DataDir
+        from ..core.secrets import Secrets
+        from ..core.settings import Settings
+        from ..router.core import Router
+        from .loop import Agent
+
+        data = DataDir()
+        data.ensure()
+        settings = self._settings or Settings()
+        secrets = Secrets(data.secrets)
+        router = Router(settings, secrets)
+        return Agent(settings=settings, secrets=secrets, router=router, cwd=Path(self._cwd),
+                     ask_guard_fn=self._ask_guard, ask_user_fn=self._ask_user)

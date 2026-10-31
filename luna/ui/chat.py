@@ -74,12 +74,16 @@ F6 — фокус в панели; в панелях: ↑↓ фокус, ←→ 
 PgUp / PgDn и колесо мыши — прокрутка ленты"""
 
 
-def create_source(settings=None):  # noqa: ARG001 — интерфейс подмены для тимлида
+def create_source(settings=None, *, fake: bool = True):
     """Единственное место, где экран получает источник событий.
 
-    Сейчас — фальшивый агент для разработки и снимков. Подключение
-    настоящего агента (ЗАДАЧА-04) — замена тела этой функции.
+    fake=True — фальшивый агент (luna try chat, снимки, тесты);
+    fake=False — настоящий агент в фоновом потоке (luna без аргументов).
     """
+    if not fake:
+        from ..mind.source import AgentSource
+
+        return AgentSource(settings=settings, cwd=os.getcwd())
     from ..devtools.fake_agent import FakeAgent
 
     return FakeAgent(cwd=os.getcwd())
@@ -975,7 +979,7 @@ class ChatApp:
         return buf, cursor
 
 
-def run_chat(started_at: float = 0.0, *, splash_first: bool = False) -> int:
+def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True) -> int:
     """Полноэкранный чат: терминал, цикл ввода, источник событий."""
     from .splash import play_splash
 
@@ -993,7 +997,8 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False) -> int:
             screen = Screen(term.write, term.caps.color_level, cols, rows)
             if splash_first and play_splash(term, screen, settings, bus, started_at) == "exit":
                 return 0
-            app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode)
+            app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
+                          source=create_source(settings, fake=fake))
             app.start_source()
             while not app.done:
                 events = term.read_events(timeout=app.next_timeout())

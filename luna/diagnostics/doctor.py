@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -32,16 +33,70 @@ def launcher_path() -> Path:
     return Path.home() / ".local" / "bin" / "luna"
 
 
-def _dir_in_path(directory: Path) -> bool:
-    fold = sys.platform == "win32"  # в Windows регистр путей не важен
-    target = str(directory).rstrip("\\/")
-    if fold:
-        target = target.casefold()
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = entry.rstrip("\\/")
-        if fold:
-            candidate = candidate.casefold()
-        if candidate and candidate == target:
+def _expand_windows_vars(value: str) -> str:
+    """Раскрыть %VAR% по текущему окружению; неизвестные оставить как есть.
+
+    Имена переменных Windows нечувствительны к регистру — ищем без учёта
+    регистра, поэтому функция честна и в тестах на POSIX.
+    """
+    env = {key.upper(): val for key, val in os.environ.items()}
+
+    def repl(match: re.Match) -> str:
+        return env.get(match.group(1).upper(), match.group(0))
+
+    return re.sub(r"%([^%]+)%", repl, value)
+
+
+def _long_path(value: str) -> str:
+    """Длинное имя пути через WinAPI: 8.3 вроде RUNNER~1 — в обычное.
+
+    Только живая Windows и существующий путь; во всех остальных случаях
+    (и при любой ошибке WinAPI) возвращаем строку как есть.
+    """
+    if sys.platform != "win32" or not os.path.exists(value):
+        return value
+    try:
+        import ctypes
+
+        get_long = ctypes.windll.kernel32.GetLongPathNameW
+        get_long.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        get_long.restype = ctypes.c_uint
+        buf = ctypes.create_unicode_buffer(32768)
+        if get_long(value, buf, len(buf)):
+            return buf.value
+    except (AttributeError, OSError):
+        pass
+    return value
+
+
+def _normalize_dir(value: str, *, windows: bool) -> str:
+    """Привести запись каталога к виду, пригодному для сравнения с PATH.
+
+    windows=True включает семантику Windows независимо от текущей ОС:
+    раскрываются %VAR%, разделители / и \\ равны, регистр не важен,
+    на живой Windows разрешаются и короткие имена 8.3.
+    """
+    out = value.strip().strip('"').strip()
+    if windows:
+        out = _long_path(_expand_windows_vars(out))
+        out = out.replace("/", "\\")
+    out = out.rstrip("\\/")
+    return out.casefold() if windows else out
+
+
+def _dir_in_path(directory: Path, *, windows: bool | None = None,
+                 path: str | None = None) -> bool:
+    """Есть ли каталог в PATH. windows/path — явные переопределения для тестов:
+    «окно» на POSIX гоняется тем же кодом, что живое на Windows."""
+    if windows is None:
+        windows = sys.platform == "win32"
+    raw = os.environ.get("PATH", "") if path is None else path
+    target = _normalize_dir(str(directory), windows=windows)
+    if not target:
+        return False
+    sep = ";" if windows else os.pathsep
+    for entry in raw.split(sep):
+        if entry.strip() and _normalize_dir(entry, windows=windows) == target:
             return True
     return False
 

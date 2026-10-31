@@ -123,8 +123,36 @@ class LauncherPathTest(unittest.TestCase):
         directory = Path("/some/where/bin")
         with mock.patch.dict(os.environ, {"PATH": "/a" + os.pathsep + "/some/where/bin"}):
             self.assertTrue(doctor._dir_in_path(directory))
+        with mock.patch.dict(os.environ, {"PATH": "/a" + os.pathsep + "/some/where/bin/"}):
+            self.assertTrue(doctor._dir_in_path(directory))
         with mock.patch.dict(os.environ, {"PATH": "/a" + os.pathsep + "/b"}):
             self.assertFalse(doctor._dir_in_path(directory))
+
+    def test_dir_in_path_windows_semantics(self):
+        # Регрессия CI (windows-latest): windows-режим форсируется явно, поэтому
+        # кейсы обязаны ловить семантику Windows на любой платформе, а не только
+        # на живой. Падавший случай — прямые слэши в PATH против обратных
+        # в str(Path) на Windows.
+        directory = Path("C:\\Users\\Test\\Luna\\bin")
+        cases = [
+            "c:\\users\\test\\luna\\bin",      # регистр букв не важен
+            "C:\\Users\\Test\\Luna\\bin\\",    # завершающий разделитель
+            "C:/Users/Test/Luna/bin",          # прямые слэши вместо обратных
+            '"C:\\Users\\Test\\Luna\\bin"',    # кавычки вокруг записи
+        ]
+        for entry in cases:
+            with self.subTest(entry=entry):
+                path = "D:\\other" + ";" + entry
+                self.assertTrue(
+                    doctor._dir_in_path(directory, windows=True, path=path))
+        self.assertFalse(doctor._dir_in_path(
+            directory, windows=True, path="C:\\Users\\Test\\Other\\bin"))
+
+    def test_dir_in_path_windows_env_var(self):
+        with mock.patch.dict(os.environ, {"LUNA_TEST_ROOT": "C:\\Luna"}):
+            self.assertTrue(doctor._dir_in_path(
+                Path("C:\\Luna\\bin"), windows=True,
+                path="%LUNA_TEST_ROOT%\\bin"))
 
 
 if __name__ == "__main__":

@@ -134,6 +134,38 @@ class Guard:
                 return True
         return False
 
+    def _swarm_risk(self, tool_name: str, args: dict) -> str | None:
+        """Рой, чьи ячейки без вопросов пишут в проект или зовут оболочку, — спросить всегда.
+
+        Флаг project_confirmed ставит сама модель, поэтому он не считается
+        подтверждением: в auto человека иначе никто бы не спросил. Профили
+        только из памяти сессии Предохранителю не видны — тоже спрашиваем.
+        """
+        if tool_name != "starfall":
+            return None
+        action = str(args.get("action", ""))
+        if action == "resume":
+            return "Докрутка потока роя: его ячейки снова будут действовать без вопросов"
+        if action not in ("run", "estimate"):  # смета — настоящий пробный прогон на 3 входах
+            return None
+        if str(args.get("write_mode", "")) == "project" or args.get("project_confirmed"):
+            return "Рой с записью прямо в проект: ячейки будут менять файлы без вопросов"
+        castes = [c.strip() for c in str(args.get("profile", "") or "").split(",") if c.strip()]
+        castes += [str(c).strip() for c in (args.get("profiles") or []) if str(c).strip()]
+        try:
+            from ..starfall.profiles import get_profile
+        except Exception:  # noqa: BLE001 — без модуля роя судить не о чем
+            return None
+        for caste in castes:
+            prof = get_profile(caste, self.settings)
+            if prof is None:
+                return "Рой с профилем «" + caste + "» из памяти сессии: его права не проверить заранее"
+            if "bash" in prof.tools:
+                return "Рой с оболочкой (профиль " + caste + "): ячейки выполнят команды без вопросов"
+            if prof.write_mode == "project":
+                return "Рой с записью прямо в проект (профиль " + caste + ")"
+        return None
+
     def _is_luna_config(self, raw: str) -> bool:
         """Файл настроек или MCP Луны — глобальный (LUNA_HOME) или проектный (.luna/)."""
         from pathlib import Path
@@ -164,6 +196,9 @@ class Guard:
         rule = self._rule(tool_name, args_text)
         if rule == "deny":
             return Decision("deny", "rules", "Запрещено правилом в настройках (guard.rules)", "medium")
+        swarm_risk = self._swarm_risk(tool_name, args)
+        if swarm_risk:
+            return Decision("ask", "rules", swarm_risk, "high")
         if tool_name == "luna" and str(args.get("action", "")) in LUNA_TOOL_CHANGING:
             return Decision("ask", "rules", "Изменение настроек Луны: подтверждает человек "
                             "в любом режиме", "high")

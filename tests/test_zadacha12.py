@@ -259,3 +259,18 @@ class LayoutStackTest(unittest.TestCase):
         self.assertEqual(tree.root.kind, "split")
         self.assertEqual([c.panel_id for c in tree.root.children], ["todo", "moon", "files", "nibbler"])
         self.assertEqual(tree.root.weights, [1.0] * 4)
+
+
+class SwarmGuardTest(unittest.TestCase):
+    def test_risky_swarms_always_ask(self):
+        g = Guard()
+        ask = lambda **a: g.decide("starfall", True, a, mode="auto").decision
+        self.assertEqual(ask(action="run", profile="cls"), "allow")
+        self.assertEqual(ask(action="run", profile="cod"), "ask")          # bash
+        self.assertEqual(ask(action="run", profiles=["rd", "tst"]), "ask")
+        self.assertEqual(ask(action="run", profile="rd", write_mode="project"), "ask")
+        self.assertEqual(ask(action="run", profile="rd", project_confirmed=True), "ask")
+        self.assertEqual(ask(action="run", profile="самодельный"), "ask")
+        self.assertEqual(ask(action="resume", swarm="leo"), "ask")
+        self.assertEqual(ask(action="estimate", profile="cod"), "ask")
+        self.assertEqual(ask(action="estimate", profile="cls"), "allow")

@@ -543,6 +543,9 @@ class HabitsTest(unittest.TestCase):
     def test_auto_title_and_rename(self):
         app = make_app(self)
         journal = SessionJournal.create(DataDir(app._root / "home"), app.cwd)
+        # На Windows открытый журнал держит файл — чистка temp упадёт
+        # с WinError 32; addCleanup идёт LIFO: закроется раньше tempdir.
+        self.addCleanup(journal.close)
         app.journal = journal
         app._send_user_message("почини сборку на windows")
         self.assertEqual(app.session_title, "почини сборку на windows")

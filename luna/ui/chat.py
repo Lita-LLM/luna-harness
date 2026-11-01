@@ -3723,7 +3723,9 @@ class ChatApp:
                 count += 1
                 if count > 3000:
                     break
-                rel = str((Path(dirpath) / name).relative_to(root))
+                # Путь — всегда через «/»: на Windows os.walk даёт «\»,
+                # а подсказка и модель живут в POSIX-записи (красный CI).
+                rel = (Path(dirpath) / name).relative_to(root).as_posix()
                 low = rel.lower()
                 pos = 0
                 first = None
@@ -3760,7 +3762,7 @@ class ChatApp:
                     pos = found + 1
                 if ok:
                     full = Path(extra) / name
-                    out.append(str(full) + ("/" if full.is_dir() else ""))
+                    out.append(full.as_posix() + ("/" if full.is_dir() else ""))
         return out
 
     def _apply_cmd_completion(self) -> None:

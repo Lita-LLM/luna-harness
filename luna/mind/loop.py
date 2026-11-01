@@ -144,6 +144,13 @@ class Agent:
         host = getattr(self, "_agents_host", None)
         if host is not None:
             host.interrupt_all()
+        # И текущий поток роя (ЗАДАЧА-15): Esc останавливает весь Звездопад.
+        run = getattr(self, "_starfall_run", None)
+        if run is not None:
+            try:
+                run.stop()
+            except Exception:  # noqa: BLE001 — прерывание не падает
+                pass
 
     @property
     def _turn_active(self) -> bool:

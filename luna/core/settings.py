@@ -143,6 +143,17 @@ _f("ui.show_thinking", "bool", True, "Показывать записи расс
 _f("ui.vim_mode", "bool", False,
    "Vim-режим поля ввода: Esc — нормальный режим (h l 0 $ w b — движение, x — стереть символ, dd — строку, i/a/A — обратно в ввод)")
 
+# Звездопад (веха 5, ЗАДАЧА-15): потолки одного роя ячеек. Мать решает в
+# их пределах; результаты потоков лежат в starfall.output_dir (пусто —
+# LUNA_HOME/local/starfall), незаконченные докручивает starfall resume.
+_f("starfall.enabled", "bool", True, "Звездопад: тулы cells и starfall (рой ячеек)")
+_f("starfall.max_cells", "int", 100, "Потолок ячеек в одном потоке роя")
+_f("starfall.max_parallel", "int", 8, "Потолок параллельных исполнителей роя")
+_f("starfall.budget_usd", "float", 1.0, "Потолок бюджета одного потока роя, USD")
+_f("starfall.ttl_s", "int", 300, "Потолок TTL одной ячейки роя, секунд")
+_f("starfall.max_attempts", "int", 3, "Сколько раз перезапускать упавшую ячейку")
+_f("starfall.output_dir", "str", "", "Папка результатов потоков роя (пусто — local/starfall в каталоге данных)")
+
 
 def _dig(data: dict, key: str):
     """Значение по точечному ключу из вложенных словарей; None, если нет."""

@@ -103,6 +103,7 @@ COMMANDS = [
     ("todo", "панель «План»"),
     ("mcp", "MCP-серверы: выбиралка статуса и включения"),
     ("agents", "экипаж: главный агент, спутники и ассистенты"),
+    ("cells", "профили ячеек роя: выбиралка, Enter — карточка, e — правка в редакторе"),
     ("theme", "тема оформления: luna, contrast, mono"),
     ("editor", "сочинить сообщение во внешнем редакторе"),
     ("details", "детали ленты вкл/выкл: вывод тулов свёрнуто или скрыто"),
@@ -395,6 +396,20 @@ class ChatApp:
             entry.streaming = False
             if entry.kind in ("guard", "ask") and entry.status == "pending":
                 entry.status = "прервано"
+        # Незаконченный Звездопад прошлой сессии (ЗАДАЧА-15): предложить
+        # докрутить — результаты лежат на диске, рой продолжится с места.
+        try:
+            from ..starfall.engine import unfinished_from_records
+
+            unfinished = unfinished_from_records(records)
+        except Exception:  # noqa: BLE001 — пометка не роняет восстановление
+            unfinished = None
+        if unfinished:
+            self._add(Entry("notice", text="Поток роя " +
+                            str(unfinished.get("swarm")) + " не закончен " +
+                            "(результаты — " + str(unfinished.get("dir")) + "). " +
+                            "Докрутить: попроси агента «докрути поток» " +
+                            "(starfall, action=resume)."))
 
     def _cut_feed_after_turn(self, turn: int) -> None:
         """Лента после отката разговора: ходы после turn убираются — и вживую,
@@ -688,6 +703,29 @@ class ChatApp:
         self._open_picker("agents", "Агенты", items,
                           hint="Enter — панель «Экипаж» · Esc — закрыть", preview_lines=0)
 
+    def _cells_items(self) -> list:
+        """Профили ячеек роя для /cells (встроенные и свои; сессионные — у агента)."""
+        from ..starfall import profiles as cell_profiles
+
+        items = []
+        for prof in cell_profiles.library(self.settings):
+            detail = ("модель " + prof.model + " · тулы: " +
+                      (", ".join(prof.tools) if prof.tools else "нет") +
+                      " · запись " + prof.write_mode)
+            preview = (prof.description + "\n\n" + prof.prompt).strip()
+            items.append(PickerItem(key=prof.caste, title=prof.caste + " — " + prof.name,
+                                    detail=detail, preview=preview, payload=prof))
+        if not items:
+            items.append(PickerItem(key="", title="Профилей ячеек нет"))
+        return items
+
+    def open_cells_picker(self) -> None:
+        """/cells: профили ячеек роя выбиралкой; e — правка в редакторе."""
+        self._open_picker("cells", "Профили ячеек роя", self._cells_items(),
+                          hint="Enter — карточка профиля · e — открыть в "
+                               "редакторе (своя копия) · Esc — закрыть",
+                          extra={"e": "edit"}, preview_lines=5)
+
     def open_theme_picker(self) -> None:
         """/theme: тема оформления выбиралкой (настройка ui.theme)."""
         current = str(self.settings.get("ui.theme") or "luna")
@@ -761,6 +799,14 @@ class ChatApp:
                 self.picker = None
                 if item.key != "main" and "crew" not in self.layout:
                     self.toggle_panel("crew")
+            elif kind == "cells":
+                self.picker = None
+                if item.key:
+                    prof = item.payload
+                    text = item.title + "\n" + item.detail
+                    if prof is not None and getattr(prof, "prompt", ""):
+                        text += "\n\n" + prof.prompt
+                    self._add(Entry("notice", text=text))
             elif kind == "theme":
                 self.picker = None
                 self.settings.set("ui.theme", item.key)
@@ -778,6 +824,19 @@ class ChatApp:
             item = action[2]
             if item is not None and item.key:
                 self._mcp_toggle(item)
+            return
+        if action[0] == "action" and kind == "cells" and action[1] == "edit":
+            item = action[2]
+            if item is not None and item.key:
+                from ..starfall import profiles as cell_profiles
+
+                try:
+                    path = cell_profiles.editable_path(item.key, self.settings)
+                except ValueError as exc:
+                    self._add(Entry("notice", text=str(exc)))
+                    return
+                self._edit_kind = "cells"
+                self.edit_request = str(path)  # run_chat поставит терминал на паузу
             return
         if action[0] == "input":
             text, ctx = action[1], action[2]
@@ -869,7 +928,7 @@ class ChatApp:
         elif self._picker_kind == "manners":
             self._manners_picker_action(action)
         elif self._picker_kind in ("panels", "help", "models", "mcp", "agents",
-                                   "theme", "history", "rewind", "adddir"):
+                                   "theme", "history", "rewind", "adddir", "cells"):
             self._extra_picker_action(action)
 
     def _sessions_picker_action(self, action) -> None:
@@ -933,6 +992,14 @@ class ChatApp:
     def after_edit(self, path) -> None:
         """run_chat вернулся из внешнего редактора: подхватить правки."""
         kind, self._edit_kind = self._edit_kind, ""
+        if kind == "cells":
+            # /cells: профиль перечитается библиотекой при следующем открытии.
+            if self.picker is not None and self._picker_kind == "cells":
+                self.picker.set_items(self._cells_items())
+            self._add(Entry("notice", text="Профиль ячеек обновлён из редактора: "
+                                           + str(path)))
+            self._last_change = self._clock()
+            return
         if kind == "compose":
             # /editor: текст файла — черновик сообщения в поле ввода.
             try:
@@ -1247,6 +1314,8 @@ class ChatApp:
                 self.open_mcp_picker()
         elif cmd == "/agents":
             self.open_agents_picker()
+        elif cmd == "/cells":
+            self.open_cells_picker()
         elif cmd == "/theme":
             self.open_theme_picker()
         elif cmd == "/editor":

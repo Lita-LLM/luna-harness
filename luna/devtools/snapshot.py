@@ -23,7 +23,7 @@ from ..ui import phrases
 from ..ui.screen import Buffer
 
 SCREENS = ("splash", "render", "main", "chat", "sessions", "panels",
-           "help", "tiles")
+           "help", "tiles", "constellation")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -322,6 +322,41 @@ def _render_tiles(cols: int, rows: int, caps, settings) -> Buffer:
     return buf
 
 
+def _render_constellation(cols: int, rows: int, caps, settings) -> Buffer:
+    """Панель «Созвездие» (ЗАДАЧА-15): рой событиями swarm.*, часы — _FAKE_NOW."""
+    from ..core.bus import EventBus
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # мерцание — от вымышленного «сейчас»
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Запусти звездопад: классифицируй все отзывы")
+    app.on_agent_event({"type": "swarm.start", "swarm": "leo-snap", "stream": "leo",
+                        "total": 48, "links": 6, "profiles": ["cls"],
+                        "budget_usd": 1.0, "mail": "tree", "host": "leo/0"})
+    cells = []
+    states = (["run"] * 10 + ["wait"] * 14 + ["done"] * 18 + ["failed"] * 2 +
+              ["skipped"] * 4)
+    for i, state in enumerate(states):
+        link, idx = divmod(i, 8)
+        cells.append(["leo/cls." + str(link) + "." + str(idx), state])
+    app.on_agent_event({"type": "swarm.cells", "swarm": "leo-snap",
+                        "cells": cells, "links": False})
+    app.on_agent_event({"type": "swarm.progress", "swarm": "leo-snap", "done": 18,
+                        "failed": 2, "skipped": 0, "total": 48,
+                        "spent_usd": 0.0123, "eta_sec": 42.0})
+    app.on_agent_event({"type": "agent.message", "agent_id": "leo/cls.2.0",
+                        "parent_id": "leo/cls.2.3", "kind": "cell",
+                        "name": "leo/cls.2.0", "from": "leo/cls.2.3",
+                        "to": "leo/cls.2.0", "from_id": "leo/cls.2.3",
+                        "to_id": "leo/cls.2.0", "text": "разметил, сдаю"})
+    app.layout.open("constellation")
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
+    return buf
+
+
 def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -> list:
     """Список (подпись, буфер) для экрана name в моменты times (секунды от старта)."""
     from ..core.settings import Settings
@@ -350,6 +385,8 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
     if name == "tiles":
         return [("тайлы: контекст, mcp, процессы, диагностика",
                  _render_tiles(cols, rows, caps, settings))]
+    if name == "constellation":
+        return [("созвездие роя", _render_constellation(cols, rows, caps, settings))]
     frames = []
     for at in times:
         if name == "splash":

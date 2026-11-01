@@ -20,7 +20,12 @@ class CrewPanel(PanelContent):
     def lines(self, app, width: int) -> list:
         from . import panel_data  # лениво: panel_data приезжает из builtin
 
-        return panel_data(app).crew.lines(width)
+        data = panel_data(app)
+        out = data.crew.lines(width)
+        swarm = data.swarm.line()  # строка текущего потока роя (ЗАДАЧА-15)
+        if swarm:
+            out = out + ["", swarm[:width]]
+        return out
 
 
 register_panel("crew", "Экипаж", CrewPanel, aliases=("экипаж", "команда", "crew"))

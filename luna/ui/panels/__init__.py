@@ -189,6 +189,15 @@ class LayoutTree:
                 return Node("split", direction=direction,
                             children=[node, leaf], weights=[1.0, 1.0])
             return node
+        # Сплит того же направления, где якорь — прямой ребёнок: новая панель
+        # встаёт соседом, а не делит якорь пополам. Иначе каждая следующая
+        # панель получала половину предыдущей («лесенка»). Место делим поровну.
+        if node.direction == direction:
+            for i, child in enumerate(node.children):
+                if child.kind == "leaf" and child.panel_id == anchor:
+                    node.children.insert(i + 1, leaf)
+                    node.weights = [1.0] * len(node.children)
+                    return node
         node.children = [self._split_at(c, anchor, leaf, direction)
                          for c in node.children]
         return node

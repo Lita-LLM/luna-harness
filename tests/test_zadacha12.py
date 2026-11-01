@@ -247,3 +247,15 @@ class MannerAudienceTest(unittest.TestCase):
             with self.assertRaises(HumanError):
                 manners.resolve(settings, "nibbler", tmp)
             self.assertIn("nibbler", [m["id"] for m in manners.library(settings, tmp, audience=None)])
+
+
+class LayoutStackTest(unittest.TestCase):
+    def test_new_panels_share_space_equally(self):
+        from luna.ui.panels import LayoutTree
+
+        tree = LayoutTree()
+        for pid in ("todo", "moon", "files", "nibbler"):
+            tree.open(pid)
+        self.assertEqual(tree.root.kind, "split")
+        self.assertEqual([c.panel_id for c in tree.root.children], ["todo", "moon", "files", "nibbler"])
+        self.assertEqual(tree.root.weights, [1.0] * 4)

@@ -1,4 +1,4 @@
-"""Снимки экранов в HTML: `luna try snapshot <splash|render|main>`.
+"""Снимки экранов в HTML: `luna try snapshot <splash|render|main|chat|panels>`.
 
 Экраны рисуются без живого терминала: часы подменяются вымышленным
 временем, готовый буфер превращается в HTML-страницу — моноширинный
@@ -22,7 +22,7 @@ from ..ui import color as _color
 from ..ui import phrases
 from ..ui.screen import Buffer
 
-SCREENS = ("splash", "render", "main", "chat")
+SCREENS = ("splash", "render", "main", "chat", "panels")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -144,6 +144,61 @@ def _render_chat_state(state: str, cols: int, rows: int, caps, settings) -> Buff
     return buf
 
 
+def _render_panels(cols: int, rows: int, caps, settings) -> Buffer:
+    """Экран чата с открытыми панелями (ЗАДАЧА-14): данные — событиями."""
+    from ..core.bus import EventBus
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Почини сборку и поправь обработчик")
+    app.on_agent_event({"type": "turn.start", "turn": 1})
+    app.on_agent_event({"type": "todo", "items": [
+        {"text": "Понять задачу", "status": "done"},
+        {"text": "Выполнить работу", "status": "active"},
+        {"text": "Проверить результат", "status": "pending"}]})
+    app.on_agent_event({"type": "agent.thinking",
+                        "text": "Сверяюсь со звёздами и смотрю, что уже есть под рукой. "})
+    app.on_agent_event({"type": "tool.call", "id": "t1", "name": "read",
+                        "args": {"path": "app.py"}, "intent": "Читаю обработчик"})
+    app.on_agent_event({"type": "tool.result", "id": "t1", "ok": True,
+                        "summary": "120 строк", "output": "def handle(): ...\n"})
+    app.on_agent_event({"type": "tool.call", "id": "t2", "name": "edit",
+                        "args": {"path": "app.py"}, "intent": "Правлю обработчик"})
+    app.on_agent_event({"type": "tool.result", "id": "t2", "ok": True,
+                        "summary": "app.py: +12 −3",
+                        "output": "+ добавлен стрим\n- старый вызов\n"})
+    app.on_agent_event({"type": "tool.call", "id": "t3", "name": "bash",
+                        "args": {"command": "python -m unittest -q"},
+                        "intent": "Прогоняю тесты"})
+    app.on_agent_event({"type": "tool.output", "id": "t3", "text": "Ran 246 tests\n"})
+    app.on_agent_event({"type": "tool.result", "id": "t3", "ok": True,
+                        "summary": "зелёные", "output": "OK\n"})
+    app.on_agent_event({"type": "guard.verdict", "id": "t3", "decision": "allow",
+                        "by": "rules", "reason": "тесты — безопасная команда"})
+    app.on_agent_event({"type": "error", "message": "Хьюстон, у нас проблема",
+                        "detail": "фальшивая ошибка для обратной стороны"})
+    app.on_agent_event({"type": "usage", "model": "fake-agent", "input": 4200,
+                        "output": 860, "cost": 0.0061, "context_pct": 62})
+    app.on_agent_event({"type": "agent.text", "text": "Готово, сборка зелёная."})
+    app.on_agent_event({"type": "agent.text.done"})
+    app.on_agent_event({"type": "nibbler.say", "severity": "minor", "to": "human",
+                        "text": "Тесты гоняет сам, без напоминаний. Редкость."})
+    app.on_agent_event({"type": "nibbler.say", "severity": "serious", "to": "agent",
+                        "text": "app.py правится уже третий раз за сессию — пахнет петлёй."})
+    app.on_agent_event({"type": "turn.done", "turn": 1, "reason": "end"})
+    app.layout.open("moon")
+    app.layout.open("files")
+    app.layout.open("backside")
+    # Снимок живёт в вымышленном времени (_FAKE_NOW), а срок строки Ниблера
+    # приложение ставит по своим часам — для кадра продлеваем её жизнь.
+    app._nibbler_until = _FAKE_NOW + 60.0
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
+    return buf
+
+
 def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -> list:
     """Список (подпись, буфер) для экрана name в моменты times (секунды от старта)."""
     from ..core.settings import Settings
@@ -163,6 +218,8 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
         # У чата кадры — не моменты времени, а именованные состояния ленты.
         return [(state, _render_chat_state(state, cols, rows, caps, settings))
                 for state in _CHAT_STATES]
+    if name == "panels":
+        return [("панели открыты", _render_panels(cols, rows, caps, settings))]
     frames = []
     for at in times:
         if name == "splash":

@@ -23,16 +23,20 @@ from ..core.settings import Settings
 from . import color as _color
 from . import moon as _moon
 from . import phrases
-from .anim import PhraseWheel, Scheduler, Spinner, ease_in_out
+from .anim import PhraseWheel, Scheduler, Spinner, ease_in_out, ease_out
 from .editor import TextEditor
 from .keys import Key, Mouse, Paste, Resize
 from .markdown import Span, render_markdown, wrap_spans, wrap_text
-from .panels import LayoutTree, create_panel
+from .panels import LayoutTree, PanelData, create_panel, find_panel, registered_panels
 from .screen import Buffer, Screen
 from .term import Terminal
 from .width import char_width, str_width
 
 MODES = ("normal", "plan", "review", "auto", "yolo")
+_PANEL_KEYS = {"alt+m": "moon", "alt+l": "limits", "alt+b": "backside",
+               "alt+f": "files", "alt+n": "nibbler"}
+_PANEL_ANIM_SEC = 0.22   # мягкое появление/закрытие колонки панелей
+_NIBBLER_SHOW_SEC = 9.0  # сколько живёт строка Ниблера над вводом
 STATUS_BG = (0x16, 0x1B, 0x30)
 PANEL_BG = (0x10, 0x13, 0x24)
 GUARD_BG = (0x24, 0x1B, 0x10)
@@ -68,7 +72,9 @@ HELP_TEXT = """Команды и клавиши Луны
 /sessions — сессии этого каталога на диске (LUNA_HOME/sessions)
 Выделение мышью: протяжка по ленте копирует текст, двойной клик — слово
 Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
-/panels или Ctrl+T — панель плана (todo) · /layout save|load|list <имя> — раскладки
+/panels — меню панелей · /panel <имя> — панель по имени (Луна, Лимиты, Обратная сторона, Файлы, Ниблер)
+/layout save|load|list <имя> — раскладки · Ctrl+T — план · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер
+Ниблер — компаньон над полем ввода: изредка комментирует работу агента; серьёзное уходит агенту пометкой (настройки nibbler.*)
 !команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить путь)
 Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор
 Печатать можно во время работы: сообщение встанет в очередь
@@ -193,6 +199,17 @@ class ChatApp:
         self.layout = LayoutTree()
         self.panel_focus = False
         self._panel_cache: dict = {}
+        # Панели с наполнением и Ниблер (ЗАДАЧА-14): PanelData собирает
+        # состояние из событий, Ниблер наблюдает тот же поток.
+        self.panel_data = PanelData()
+        self._panel_menu: list | None = None
+        self._panel_anim: tuple | None = None  # (ширина-от, ширина-до, старт)
+        self._panel_anchor: tuple | None = None  # (ширина, момент) — старт анимации
+        self._panel_shown_w = 0.0              # ширина колонки на прошлом кадре
+        self._panel_ghost = None               # дерево закрывающейся колонки
+        self._nibbler_line: tuple | None = None  # (текст, серьёзность)
+        self._nibbler_until = 0.0
+        self.nibbler = self._make_nibbler()
         self.guard_editing = False
         self.completions: list = []
         self.completion_index = 0
@@ -213,6 +230,42 @@ class ChatApp:
         self._page = 10
         self.spinner = Spinner(self.glyph_mode)
         self.wheel = PhraseWheel(phrases.spinner_phrases())
+
+    def _make_nibbler(self):
+        """Ниблер для этого экрана; фальшивый источник — только эвристики,
+        настоящий — ещё и мозг роли fast. Не вышло — чат живёт без него."""
+        try:
+            if not self.settings.get("nibbler.enabled"):
+                return None
+            from ..mind.nibbler import Nibbler, make_router_brain
+
+            brain = None
+            try:
+                from ..devtools.fake_agent import FakeAgent
+
+                if not isinstance(self.source, FakeAgent):
+                    brain = make_router_brain(self.settings)
+            except Exception:  # noqa: BLE001 — мозг не обязателен
+                brain = None
+            return Nibbler(self.settings, emit=self._nibbler_say, brain=brain,
+                           clock=time.monotonic)
+        except Exception:  # noqa: BLE001 — компаньон не роняет экран
+            return None
+
+    def _nibbler_say(self, ev: dict) -> None:
+        self.on_agent_event(ev)
+
+    def _observe_panels(self, ev: dict, kind) -> None:
+        """Точка подключения ЗАДАЧИ-14: каждое событие видят данные панелей
+        и Ниблер; его реплики (nibbler.say) ставят строку над вводом."""
+        self.panel_data.observe(ev)
+        if kind == "nibbler.say":
+            self._nibbler_line = (str(ev.get("text", "")),
+                                   str(ev.get("severity", "minor")))
+            self._nibbler_until = self._clock() + _NIBBLER_SHOW_SEC
+            return
+        if self.nibbler is not None and not self._restoring:
+            self.nibbler.observe(ev)
 
     # --- источник событий ------------------------------------------------------
 
@@ -292,6 +345,10 @@ class ChatApp:
         """Кадры нужны, пока идёт ход, есть события или что-то затухает."""
         if self.busy:
             return True
+        if self._panel_anim is not None:
+            return True
+        if self._nibbler_line and now < self._nibbler_until + 0.3:
+            return True
         if self.trap is not None and self.trap.pending:
             return True
         pending = getattr(self.source, "has_pending", None)
@@ -329,6 +386,7 @@ class ChatApp:
         if self.journal is not None and not self._restoring:
             self.journal.append_event(ev)
         kind = ev.get("type")
+        self._observe_panels(ev, kind)
         self._last_change = self._clock()
         if kind == "session.start":
             self.model = str(ev.get("model") or self.model)
@@ -430,7 +488,15 @@ class ChatApp:
         attachments = [tok[1:] for tok in text.split()
                        if tok.startswith("@") and len(tok) > 1]
         self._add(Entry("user", text=text))
-        self.send_command({"type": "user.message", "text": text,
+        out_text = text
+        if self.nibbler is not None:
+            # Серьёзные замечания Ниблера уходят агенту пометкой в этот ход;
+            # в ленте виден только текст человека, пометка — в команде.
+            notes = self.nibbler.take_notes()
+            if notes:
+                marks = "\n".join("[Ниблер: " + note + "]" for note in notes)
+                out_text = marks + "\n\n" + text
+        self.send_command({"type": "user.message", "text": out_text,
                            "attachments": attachments})
 
     def cycle_mode(self, step: int = 1) -> None:
@@ -479,12 +545,38 @@ class ChatApp:
             self._copy_command(parts[1:])
         elif cmd == "/sessions":
             self._sessions_command()
-        elif cmd in ("/panels", "/todo"):
+        elif cmd == "/todo":
             self.toggle_panel("todo")
+        elif cmd == "/panel":
+            self._panel_command(parts[1:])
+        elif cmd == "/panels":
+            self._panels_menu()
         elif cmd == "/layout":
             self._layout_command(parts[1:])
         else:
             self._add(Entry("notice", text="Не знаю команду " + cmd + " — /help подскажет."))
+
+    def _panel_command(self, args: list) -> None:
+        """/panel <имя> — панель по id, названию или алиасу; без имени — меню."""
+        if not args:
+            self._panels_menu()
+            return
+        spec = find_panel(" ".join(args))
+        if spec is None:
+            self._add(Entry("notice", text="Нет панели «" + " ".join(args)
+                                           + "» — /panels покажет все."))
+            return
+        self.toggle_panel(spec.panel_id)
+
+    def _panels_menu(self) -> None:
+        """Простое меню панелей: список в ленту; дальше — цифра или /panel <имя>."""
+        specs = list(registered_panels().values())
+        self._panel_menu = [spec.panel_id for spec in specs]
+        lines = ["Панели (цифра — открыть/закрыть · /panel <имя> — по имени):"]
+        for i, spec in enumerate(specs, 1):
+            mark = "открыта" if spec.panel_id in self.layout else "закрыта"
+            lines.append(str(i) + " · " + spec.title + " — " + mark)
+        self._add(Entry("help", text="\n".join(lines)))
 
     def _layout_command(self, args: list) -> None:
         if not args:
@@ -497,6 +589,7 @@ class ChatApp:
             self.layout.save_layout(name)
             self._add(Entry("notice", text="Раскладка сохранена: " + name))
         elif action == "load":
+            self._panel_anchor = (self._panel_shown_w, self._clock())
             ok = self.layout.load_layout(name)
             note = "Раскладка загружена: " + name if ok else "Нет раскладки " + name
             self._add(Entry("notice", text=note))
@@ -547,6 +640,7 @@ class ChatApp:
         if not self.settings.get("ui.panels"):
             self._add(Entry("notice", text="Панели выключены настройкой ui.panels."))
             return
+        self._panel_anchor = (self._panel_shown_w, self._clock())
         opened = self.layout.toggle(panel_id)
         if not opened:
             self.panel_focus = False
@@ -655,6 +749,16 @@ class ChatApp:
             return
         if self.panel_focus:
             self._panel_key(key)
+            return
+        if self._panel_menu is not None:
+            menu, self._panel_menu = self._panel_menu, None
+            if key.char and key.char.isdigit() and not self.editor.text:
+                idx = int(key.char) - 1
+                if 0 <= idx < len(menu):
+                    self.toggle_panel(menu[idx])
+                return
+        if key.label in _PANEL_KEYS:
+            self.toggle_panel(_PANEL_KEYS[key.label])
             return
         if key.name == "f6":
             if self.layout.leaves():
@@ -769,7 +873,13 @@ class ChatApp:
         focused = self.layout.focused
         if key.name == "esc":
             self.panel_focus = False
-        elif key.name == "up":
+            return
+        if focused:
+            # Свои клавиши панели (прокрутка, выбор, дифф) — первыми.
+            content = self._panel_content(focused)
+            if content is not None and content.handle_key(self, key):
+                return
+        if key.name == "up":
             self.layout.focus_next(-1)
         elif key.name == "down":
             self.layout.focus_next(1)
@@ -1153,19 +1263,22 @@ class ChatApp:
             self._panel_cache[panel_id] = content
         return self._panel_cache[panel_id]
 
-    def _draw_panels(self, buf: Buffer, x: int, y: int, w: int, h: int, now: float) -> None:
-        rects = self.layout.rects(x, y, w, h)
+    def _draw_panels(self, buf: Buffer, x: int, y: int, w: int, h: int, now: float,
+                     tree=None) -> None:
+        tree = tree if tree is not None else self.layout
+        rects = tree.rects(x, y, w, h)
         for panel_id, (px, py, pw, ph) in rects.items():
             if pw <= 0 or ph <= 0:
                 continue
             buf.fill_rect(px, py, pw, ph, " ", bg=PANEL_BG)
             content = self._panel_content(panel_id)
             title = content.title if content is not None else panel_id
-            if self.panel_focus and self.layout.focused == panel_id:
+            if self.panel_focus and tree.focused == panel_id:
                 title = "▸ " + title
             buf.text(px + 1, py, title, fg=_color.AMBER, bg=PANEL_BG, attrs=_color.BOLD)
             if content is None:
                 continue
+            content.height_hint = max(0, ph - 1)
             lines = content.lines(self, max(1, pw - 2))
             row = py + 1
             for line in lines:
@@ -1198,11 +1311,47 @@ class ChatApp:
         if rx < cols:
             buf.text(rx, y, right, fg=DIM_FG, bg=STATUS_BG, attrs=_color.DIM)
 
+    def _panel_width(self, cols: int, now: float) -> int:
+        """Ширина колонки панелей; появление и закрытие — мягко (ui.animations).
+
+        Анимация стартует от момента переключения (якорь ставит
+        toggle_panel), а не от первого кадра: разовый рендер без истории
+        кадров (тест, снимок, чужие часы) показывает сразу конечную ширину.
+        Закрывающуюся колонку рисуем по «призраку» — снимку дерева до
+        закрытия: само дерево уже пусто, а ширина ещё едет к нулю.
+        """
+        target = max(24, cols // 3) if self.layout.leaves() and cols >= 48 else 0
+        if self.layout.leaves():
+            self._panel_ghost = self.layout.clone()
+        if not self.settings.get("ui.animations"):
+            self._panel_anim = None
+            self._panel_shown_w = float(target)
+            return target
+        if self._panel_anchor is not None:
+            from_w, t0 = self._panel_anchor
+            self._panel_anchor = None
+            if float(target) != from_w:
+                self._panel_anim = (from_w, float(target), t0)
+        if self._panel_anim is None:
+            self._panel_shown_w = float(target)
+            return target
+        from_w, to_w, t0 = self._panel_anim
+        raw = (now - t0) / _PANEL_ANIM_SEC
+        if raw < -0.05 or raw >= 1.0:
+            self._panel_anim = None
+            if to_w == 0:
+                self._panel_ghost = None
+            self._panel_shown_w = to_w
+            return int(to_w)
+        value = from_w + (to_w - from_w) * ease_out(max(0.0, raw))
+        self._panel_shown_w = value
+        return int(round(value))
+
     def draw(self, cols: int, rows: int, now: float):
         buf = Buffer(cols, rows)
         buf.clear(bg=_color.SPACE_BG)
-        panels_on = bool(self.layout.leaves())
-        panel_w = max(24, cols // 3) if panels_on and cols >= 48 else 0
+        panel_w = self._panel_width(cols, now)
+        nib_h = 1 if (self._nibbler_line and now < self._nibbler_until) else 0
         chat_w = cols - panel_w
         guard = self.pending_guard
         ask = self.pending_ask
@@ -1221,7 +1370,7 @@ class ChatApp:
             cursor_pos = (max(0, min(input_h - 1, full_cursor[0] - offset)),
                           full_cursor[1])
         completion_h = min(5, len(self.completions)) if self.completions else 0
-        feed_h = max(1, rows - 1 - input_h - completion_h)
+        feed_h = max(1, rows - 1 - input_h - completion_h - nib_h)
         self._page = feed_h
         lines = self._feed_lines(chat_w, now)
         max_scroll = max(0, len(lines) - feed_h)
@@ -1242,13 +1391,25 @@ class ChatApp:
                 x += buf.text(x, row, text, fg=fg, bg=bg or _color.SPACE_BG, attrs=attrs)
         self._draw_selection(buf, start, feed_h)
         if panel_w:
-            self._draw_panels(buf, chat_w, 0, panel_w, feed_h + input_h + completion_h, now)
+            tree = self.layout if self.layout.leaves() else (self._panel_ghost or self.layout)
+            self._draw_panels(buf, chat_w, 0, panel_w,
+                              feed_h + input_h + completion_h + nib_h, now, tree=tree)
         cy = feed_h
         for i, candidate in enumerate(self.completions[:completion_h]):
             style_fg = _color.CYAN if i == self.completion_index else DIM_FG
             attrs = _color.BOLD if i == self.completion_index else _color.DIM
             buf.text(2, cy + i, "@" + candidate, fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
-        iy = feed_h + completion_h
+        if nib_h:
+            # Строка Ниблера — между лентой и вводом; в конце жизни затухает.
+            text, severity = self._nibbler_line
+            fg = _color.ERR if severity == "serious" else _color.VIOLET
+            left = self._nibbler_until - now
+            if left < 1.5:
+                fg = _color.lerp(_color.SPACE_BG, fg, max(0.0, left / 1.5))
+            label = "🐾 Ниблер: " if self.glyph_mode == "emoji" else "Ниблер: "
+            buf.text(2, feed_h + completion_h, label + text, fg=fg,
+                     bg=_color.SPACE_BG, attrs=_color.ITALIC)
+        iy = feed_h + completion_h + nib_h
         for i, line in enumerate(input_lines):
             prefix = "› " if i == 0 else "  "
             fg = _color.AMBER if guard is not None else _color.CYAN

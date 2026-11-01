@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import socket
 import threading
 import time
@@ -56,10 +57,16 @@ def _force_close(resp) -> None:
             sock.shutdown(socket.SHUT_RDWR)
         except Exception:  # noqa: BLE001 — закрытие не должно падать
             pass
-    try:
-        resp.close()
-    except Exception:  # noqa: BLE001
-        pass
+
+    def close() -> None:
+        try:
+            resp.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # close() ждёт блокировку буфера, которую держит поток чтения в
+    # readline() — прерывание не должно стоять в этой очереди (было 30 с).
+    threading.Thread(target=close, name="luna-stream-close", daemon=True).start()
 
 from ..core.errors import HumanError
 
@@ -164,37 +171,53 @@ class HttpClient:
         with self._lock:
             gen = self._cancel_gen
             self._active.add(resp)
-        # Чтение — опросом: сокету короткий таймаут, readline просыпается
-        # по TimeoutError и проверяет отмену и срок молчания. Подключение
-        # при этом шло с полным таймаутом (TLS не страдает), короткий —
-        # только на чтение уже открытого ответа.
-        sock = _find_socket(resp)
-        if sock is not None:
+        # Сокет читает отдельный поток обычным блокирующим чтением, а здесь
+        # ждём строки из очереди и между ними проверяем отмену. Короткий
+        # таймаут сокета (как было) ломал ответ: после первого же
+        # socket.timeout чтение из http.client падает навсегда, и стрим
+        # закрывался, пока модель думала до первого токена (499 у роутера).
+        lines: queue.Queue = queue.Queue(maxsize=256)
+        done = object()
+
+        def pump() -> None:
             try:
-                sock.settimeout(STREAM_POLL_SEC)
-            except Exception:  # noqa: BLE001 — не вышло: останемся на shutdown
-                sock = None
+                while True:
+                    raw = resp.readline()
+                    if not raw:
+                        break
+                    lines.put(raw)
+            except BaseException as exc:  # noqa: BLE001 — передаём наверх
+                lines.put(exc)
+            finally:
+                lines.put(done)
+
+        reader = threading.Thread(target=pump, name="luna-stream-read", daemon=True)
+        reader.start()
         last_data = time.monotonic()
         try:
             while True:
                 with self._lock:
                     if self._cancel_gen != gen:
-                        break  # отмена пришла, пока стрим шёл или спал
+                        break  # отмена: ответ закроем ниже, поток чтения умрёт сам
                 try:
-                    raw = resp.readline()
-                except TimeoutError:
+                    item = lines.get(timeout=STREAM_POLL_SEC)
+                except queue.Empty:
                     if time.monotonic() - last_data > read_timeout:
-                        raise  # молчание дольше таймаута — как было раньше
-                    continue  # просто очередной шаг опроса
-                except Exception:  # noqa: BLE001 — ответ закрыли из cancel_active
+                        raise TimeoutError("провайдер молчит дольше " + str(int(read_timeout)) + " с")
+                    continue
+                if item is done:
                     break
-                if not raw:
-                    break
+                if isinstance(item, BaseException):
+                    with self._lock:
+                        cancelled = self._cancel_gen != gen
+                    if cancelled:
+                        break  # ответ закрыли из cancel_active
+                    raise item
                 last_data = time.monotonic()
-                if isinstance(raw, bytes):
-                    yield raw.decode("utf-8", errors="replace")
+                if isinstance(item, bytes):
+                    yield item.decode("utf-8", errors="replace")
                 else:
-                    yield str(raw)
+                    yield str(item)
         finally:
             with self._lock:
                 self._active.discard(resp)

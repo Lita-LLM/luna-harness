@@ -89,6 +89,7 @@ def _render_main(cols: int, rows: int, at: float, caps, settings) -> Buffer:
     from ..ui.chat import ChatApp
 
     app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # проявление ленты — от вымышленного «сейчас», не от аптайма машины
     app.start_source()
     buf, _cursor = app.draw(cols, rows, _FAKE_NOW + at)
     return buf
@@ -104,6 +105,7 @@ def _render_chat_state(state: str, cols: int, rows: int, caps, settings) -> Buff
     from ..ui.chat import ChatApp
 
     app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # проявление ленты — от вымышленного «сейчас», не от аптайма машины
     app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
                         "model": "fake-agent", "mode": "normal"})
     app.submit_text("Почини сборку и поставь зависимости")
@@ -154,6 +156,7 @@ def _render_sessions(cols: int, rows: int, caps, settings) -> Buffer:
     from ..ui.picker import Picker, session_items
 
     app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # проявление ленты — от вымышленного «сейчас», не от аптайма машины
     app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
                         "model": "fake-agent", "mode": "normal"})
     app.submit_text("Почини сборку и поставь зависимости")
@@ -184,6 +187,7 @@ def _render_panels(cols: int, rows: int, caps, settings) -> Buffer:
     from ..ui.chat import ChatApp
 
     app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # проявление ленты — от вымышленного «сейчас», не от аптайма машины
     app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
                         "model": "fake-agent", "mode": "normal"})
     app.submit_text("Почини сборку и поправь обработчик")

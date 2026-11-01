@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -172,6 +173,157 @@ def find_by_prefix(data, prefix: str):
         if session["id"] == prefix or session["id"].startswith(prefix):
             return session
     return None
+
+
+# --- уборка сессий: переименование, корзина, пустые (ЗАДАЧА-17) -------------
+
+
+def session_is_empty(records: list) -> bool:
+    """Пустая сессия: ни одной реплики человека за всю жизнь журнала."""
+    for rec in records:
+        if rec.get("kind") == "command":
+            data = rec.get("data") or {}
+            if data.get("type") == "user.message":
+                return False
+    return True
+
+
+def set_session_title(path, title: str) -> bool:
+    """Имя сессии записью в её журнал (как /rename, но для чужой сессии)."""
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"kind": "title", "title": title,
+                                "ts": time.time()}, ensure_ascii=False) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def _checkpoints_dir(data, session_id: str) -> Path:
+    return Path(data.root) / "checkpoints" / str(session_id)
+
+
+def _session_id_of(path) -> str:
+    records = load_records(path)
+    meta = next((r for r in records if r.get("kind") == "meta"), {})
+    return str(meta.get("session") or Path(path).stem)
+
+
+def trash_dir(data) -> Path:
+    return Path(data.sessions) / ".trash"
+
+
+def trash_session(data, path):
+    """Сессию — в корзину sessions/.trash/ вместе с её чекпоинтами.
+
+    Возвращает путь в корзине или None, если файла уже нет. Чекпоинты
+    (checkpoints/<сессия>) переезжают рядом с именем <файл>.checkpoints —
+    отмена удаления вернёт и их.
+    """
+    src = Path(path)
+    if not src.exists():
+        return None
+    trash = trash_dir(data)
+    try:
+        trash.mkdir(parents=True, exist_ok=True)
+        target = trash / src.name
+        n = 1
+        while target.exists():
+            target = trash / (src.stem + "-" + str(n) + src.suffix)
+            n += 1
+        session_id = _session_id_of(src)
+        src.rename(target)
+    except OSError:
+        return None
+    cp = _checkpoints_dir(data, session_id)
+    if cp.is_dir():
+        try:
+            cp.rename(trash / (target.stem + ".checkpoints"))
+        except OSError:
+            pass
+    return target
+
+
+def trash_sessions(data, paths) -> list:
+    """Пачка сессий — в корзину; возвращает список путей в корзине."""
+    out = []
+    for path in paths:
+        moved = trash_session(data, path)
+        if moved is not None:
+            out.append(moved)
+    return out
+
+
+def undo_trash(data):
+    """Отменить последнее удаление: свежайшую сессию корзины — обратно.
+
+    Возвращает восстановленный путь или None, если корзина пуста.
+    """
+    trash = trash_dir(data)
+    if not trash.is_dir():
+        return None
+    files = [p for p in trash.glob("*.jsonl") if p.is_file()]
+    if not files:
+        return None
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
+    src = files[-1]
+    target = Path(data.sessions) / src.name
+    try:
+        if target.exists():
+            return None
+        session_id = _session_id_of(src)
+        src.rename(target)
+    except OSError:
+        return None
+    packed = trash / (src.stem + ".checkpoints")
+    if packed.is_dir():
+        try:
+            packed.rename(_checkpoints_dir(data, session_id))
+        except OSError:
+            pass
+    return target
+
+
+def purge_trash(data, days: int, now: float | None = None) -> int:
+    """Самоочистка корзины: записи старше days дней удаляются совсем."""
+    trash = trash_dir(data)
+    if not trash.is_dir() or days < 0:
+        return 0
+    now = time.time() if now is None else now
+    limit = now - days * 86400.0
+    removed = 0
+    for entry in trash.iterdir():
+        try:
+            if entry.stat().st_mtime >= limit:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def drop_empty_sessions(data, keep_path=None) -> list:
+    """Пустые сессии — в корзину (автоуборка при старте и выходе чата).
+
+    keep_path — текущая сессия: её не трогаем никогда, даже пустую.
+    Возвращает список убранных путей.
+    """
+    root = Path(data.sessions)
+    if not root.exists():
+        return []
+    keep = str(keep_path) if keep_path is not None else None
+    dropped = []
+    for path in sorted(root.glob("*.jsonl")):
+        if keep is not None and str(path) == keep:
+            continue
+        if session_is_empty(load_records(path)):
+            if trash_session(data, path) is not None:
+                dropped.append(path)
+    return dropped
 
 
 # --- память модели из журнала ------------------------------------------------

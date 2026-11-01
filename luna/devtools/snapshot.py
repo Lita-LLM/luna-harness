@@ -174,7 +174,9 @@ def _render_sessions(cols: int, rows: int, caps, settings) -> Buffer:
          "first": "Напиши скрипт бэкапа", "turns": 1},
     ]
     app.picker = Picker("Сессии", session_items(fake, "/home/user/project"),
-                        hint="Enter — переключиться · Esc — закрыть",
+                        hint="Enter — переключиться · r — переименовать · "
+                             "d — удалить · пробел — отметить · D — отмеченные · "
+                             "u — вернуть из корзины · Esc — закрыть",
                         preview_lines=0, now=_FAKE_NOW)
     app._picker_kind = "sessions"
     buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
@@ -252,6 +254,10 @@ def _render_panels(cols: int, rows: int, caps, settings) -> Buffer:
     app.layout.open("files")
     app.layout.open("backside")
     app.layout.open("crew")
+    app.layout.open("nibbler")
+    # Режим панелей: фокус подсвечен, внизу колонки — подсказка клавиш.
+    app.panel_focus = True
+    app.layout.focused = "moon"
     # Снимок живёт в вымышленном времени (_FAKE_NOW), а срок строки Ниблера
     # приложение ставит по своим часам — для кадра продлеваем её жизнь.
     app._nibbler_until = _FAKE_NOW + 60.0

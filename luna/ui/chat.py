@@ -24,6 +24,7 @@ from ..core.paths import DataDir
 from ..core.run_lock import RunLock
 from ..core.settings import Settings
 from . import color as _color
+from . import layout as _layout
 from . import moon as _moon
 from . import phrases
 from .anim import PhraseWheel, Scheduler, Spinner, ease_in_out, ease_out
@@ -118,6 +119,71 @@ COMMAND_DESCR = dict(COMMANDS)
 # в поле ввода заготовкой «/команда ».
 _NEEDS_ARG = {"rename", "panel", "layout", "add-dir", "btw", "copy",
               "mode", "compact", "review"}
+# Русские имена команд (ЗАДАЧА-17): /панель = /panel, /сессии = /sessions.
+# Один список рядом с реестром: русское имя → каноническое латинское.
+COMMAND_RU = {
+    "помощь": "help", "справка": "help",
+    "режим": "mode",
+    "модель": "model", "модели": "model",
+    "стоимость": "cost", "расход": "usage",
+    "контекст": "context",
+    "статус": "status",
+    "доктор": "doctor", "диагностика": "doctor",
+    "инит": "init",
+    "память": "memory",
+    "ревью": "review",
+    "экспорт": "export",
+    "копировать": "copy",
+    "сессии": "sessions",
+    "новая": "new",
+    "переименовать": "rename",
+    "манеры": "manners",
+    "откатить": "undo",
+    "откат": "rewind",
+    "вернуть": "redo",
+    "сжать": "compact",
+    "очистить": "clear",
+    "панели": "panels",
+    "панель": "panel",
+    "раскладка": "layout",
+    "план": "todo",
+    "серверы": "mcp",
+    "агенты": "agents",
+    "тема": "theme",
+    "редактор": "editor",
+    "детали": "details",
+    "рассуждения": "thinking",
+    "мимо": "btw",
+    "ошибка": "bug",
+    "дифф": "diff",
+    "каталог": "add-dir",
+    "выход": "exit",
+}
+_RU_BY_LATIN: dict = {}
+for _ru, _lat in COMMAND_RU.items():
+    _RU_BY_LATIN.setdefault(_lat, _ru)
+
+
+def resolve_command(word: str):
+    """Имя команды как набрали → каноническое латинское или None.
+
+    Понимает латинские имена, русские имена и любое из них, набранное
+    не в той раскладке (зфтуд → panel, gfytkm → панель → panel).
+    """
+    w = (word or "").strip().lower()
+    if not w:
+        return None
+    if w in COMMAND_DESCR:
+        return w
+    if w in COMMAND_RU:
+        return COMMAND_RU[w]
+    for cand in _layout.variants(w):
+        c = cand.lower()
+        if c in COMMAND_DESCR:
+            return c
+        if c in COMMAND_RU:
+            return COMMAND_RU[c]
+    return None
 # Темы оформления (/theme, настройка ui.theme): акценты ленты поверх палитры.
 _THEMES = (("luna", "Луна", "родная палитра"),
            ("contrast", "Контраст", "приглушённый текст ярче — для слабых терминалов"),
@@ -127,11 +193,13 @@ HELP_TEXT = """Команды и клавиши Луны
 """ + "\n".join("/" + name + " — " + desc for name, desc in COMMANDS) + """
 Выбиралки: печатать — поиск · ↑↓ — выбор · Enter — действие · Esc — закрыть
 /panels — все тайлы выбиралкой · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер · Alt+C/G/P/T — Контекст, Git, Процессы, Дерево
+Команды не зависят от раскладки (ui.layout_fix): /панель = /panel, а .зфтуд в ЙЦУКЕН — тоже /panel; аргументы и Ctrl/Alt-клавиши понимаются в любой раскладке
 Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера)
 Esc Esc на пустом вводе — откат к ходу выбиралкой · Esc Esc во время хода — прервать ход
 !команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить; Tab после / — дополнить команду)
 Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор · Tab / Shift+Tab — режим по кругу
-Ctrl+O — раскрыть/свернуть детали записи · F6 — фокус в панели; в панелях: ↑↓ фокус, ←→ размер, Enter — развернуть, Esc — назад
+Ctrl+O — раскрыть/свернуть детали записи · F6 — в режим панелей (панели открыты) или открыть «План»
+В режиме панелей: ↑↓ — фокус, ←→ — размер, Tab / Shift+Tab — переставить, Enter — развернуть, x — закрыть, Esc — назад к вводу; мышь: клик по заголовку — фокус, тянуть разделитель — размер, колесо — прокрутка
 PgUp / PgDn и колесо мыши — прокрутка ленты · выделение мышью: протяжка копирует текст, двойной клик — слово
 Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
 Ниблер — компаньон над полем ввода: изредка комментирует работу агента; серьёзное уходит агенту пометкой (настройки nibbler.*)"""
@@ -274,6 +342,11 @@ class ChatApp:
         self.layout = LayoutTree()
         self.panel_focus = False
         self._panel_cache: dict = {}
+        # ЗАДАЧА-17: геометрия панелей последнего кадра (для мыши) и
+        # перетаскивание разделителя; отметки в выбиралке сессий.
+        self._panel_rects: dict = {}
+        self._panel_drag = None  # (panel_id, последний y мыши)
+        self._sessions_marks: set = set()
         # Панели с наполнением и Ниблер (ЗАДАЧА-14): PanelData собирает
         # состояние из событий, Ниблер наблюдает тот же поток.
         self.panel_data = PanelData()
@@ -565,21 +638,46 @@ class ChatApp:
 
     # --- выбиралка: сессии и манеры (ЗАДАЧА-10) --------------------------------
 
-    def open_sessions_picker(self) -> None:
-        """/sessions и luna --resume: выбиралка сессий поверх ленты."""
+    def _sessions_scope(self) -> list:
+        """Сессии для выбиралки с учётом настройки chat.sessions_scope."""
         from ..core.sessions import list_sessions
 
         scope = str(self.settings.get("chat.sessions_scope", "all") or "all")
         sessions = list_sessions(self._data_dir())
         if scope == "cwd":
             sessions = [s for s in sessions if s["cwd"] == self.cwd]
+        return sessions
+
+    def _session_items(self) -> list:
+        """Пункты выбиралки сессий: текущая — «→», отмеченные — «✓»."""
         current = str(self.journal.path) if self.journal is not None else None
-        hint = ("Enter — переключиться · Esc — закрыть · каталог: "
-                + str(self._data_dir().sessions))
-        self.picker = Picker("Сессии", session_items(sessions, self.cwd, current),
-                             hint=hint, preview_lines=0, now=self._clock())
+        items = session_items(self._sessions_scope(), self.cwd, current)
+        for item in items:
+            if item.key in self._sessions_marks:
+                item.mark = "✓"
+        return items
+
+    def open_sessions_picker(self) -> None:
+        """/sessions и luna --resume: выбиралка сессий поверх ленты.
+
+        Уборка (ЗАДАЧА-17): r — переименовать, d/Del — в корзину,
+        пробел — отметить несколько, D — отмеченные в корзину одним
+        подтверждением, u — вернуть последнее удаление из корзины.
+        """
+        self._sessions_marks = set()
+        hint = ("Enter — переключиться · r — переименовать · d — удалить · "
+                "пробел — отметить · D — отмеченные · u — вернуть из корзины · "
+                "Esc — закрыть")
+        self.picker = Picker("Сессии", self._session_items(),
+                             hint=hint, preview_lines=0, now=self._clock(),
+                             extra={"r": "rename", "d": "delete",
+                                    "D": "delete_marked", "u": "undo"})
         self._picker_kind = "sessions"
         self._last_change = self._clock()
+
+    def _refresh_sessions_picker(self) -> None:
+        if self.picker is not None and self._picker_kind == "sessions":
+            self.picker.set_items(self._session_items())
 
     def open_manners_picker(self) -> None:
         """/manners: выбиралка манер с превью, новая и редактор — клавишами."""
@@ -615,12 +713,21 @@ class ChatApp:
                           preview_lines=0)
 
     def open_help_picker(self) -> None:
-        """/help: команды выбиралкой с поиском, не простынёй текста."""
+        """/help: команды выбиралкой с поиском, не простынёй текста.
+
+        Русские имена — отдельными пунктами с тем же ключом команды:
+        поиск находит оба языка, Enter выполняет каноническую команду.
+        В режим панелей — F6 (панели открыты) или Alt+буква панели.
+        """
         items = [PickerItem(key=name, title="/" + name, detail=desc)
                  for name, desc in COMMANDS]
+        items += [PickerItem(key=lat, title="/" + ru,
+                             detail=COMMAND_DESCR[lat] + " — то же, что /" + lat)
+                  for ru, lat in COMMAND_RU.items()]
         self._open_picker("help", "Команды Луны", items,
                           hint="печатайте — поиск · Enter — выполнить "
-                               "или вставить заготовку · Esc — закрыть",
+                               "или вставить заготовку · Esc — закрыть · "
+                               "панели: F6 или Alt+M",
                           preview_lines=0)
 
     def open_models_picker(self) -> None:
@@ -851,6 +958,17 @@ class ChatApp:
         if picker is None:
             return
         self._last_change = self._clock()
+        if self._picker_kind == "sessions" and picker.mode == "list" \
+                and not picker.filter:
+            # Пробел и Del выбиралка сама не знает — это уборка сессий.
+            if key.name in ("space", " ") or key.char == " ":
+                self._sessions_picker_action(
+                    ("action", "toggle_mark", picker.current()))
+                return
+            if key.name == "delete":
+                self._sessions_picker_action(
+                    ("action", "delete", picker.current()))
+                return
         action = picker.handle_key(key)
         if action is None:
             return
@@ -872,12 +990,26 @@ class ChatApp:
                                    "theme", "history", "rewind", "adddir"):
             self._extra_picker_action(action)
 
+    def _is_current_session(self, item) -> bool:
+        return self.journal is not None and item is not None \
+            and str(item.payload.get("path")) == str(self.journal.path)
+
     def _sessions_picker_action(self, action) -> None:
         if action[0] == "confirmed":
             inner = action[1]
             if inner and inner[0] == "pick":
                 self.picker = None
                 self.switch_session(inner[1].payload["path"])
+            elif inner and inner[0] == "trash":
+                self._trash_session_items(inner[1])
+            return
+        if action[0] == "input":
+            text, ctx = action[1], action[2]
+            if ctx is not None and ctx[0] == "rename" and text:
+                self._rename_session_item(ctx[1], text)
+            return
+        if action[0] == "action":
+            self._sessions_housekeeping(action[1], action[2])
             return
         if action[0] != "pick" or action[1] is None:
             return
@@ -889,6 +1021,84 @@ class ChatApp:
             return
         self.picker = None
         self.switch_session(item.payload["path"])
+
+    def _sessions_housekeeping(self, name: str, item) -> None:
+        """Клавиши уборки в выбиралке сессий: r, d, D, u, пробел."""
+        picker = self.picker
+        if picker is None:
+            return
+        if name == "undo":
+            from ..core.sessions import undo_trash
+
+            restored = undo_trash(self._data_dir())
+            self._refresh_sessions_picker()
+            note = ("Сессия возвращена из корзины." if restored is not None
+                    else "Корзина пуста — возвращать нечего.")
+            self._add(Entry("notice", text=note))
+            return
+        if item is None:
+            return
+        if name == "toggle_mark":
+            if self._is_current_session(item):
+                self._add(Entry("notice", text="Текущую сессию не трогаю."))
+                return
+            if item.key in self._sessions_marks:
+                self._sessions_marks.discard(item.key)
+            else:
+                self._sessions_marks.add(item.key)
+            self._refresh_sessions_picker()
+            return
+        if name == "rename":
+            picker.ask_input("Новое имя сессии: ", ("rename", item),
+                             initial=item.title)
+            return
+        if name == "delete":
+            if self._is_current_session(item):
+                self._add(Entry("notice", text="Текущую сессию не трогаю."))
+                return
+            picker.ask_confirm(
+                "Удалить сессию «" + item.title + "» в корзину?",
+                ("trash", [item]))
+            return
+        if name == "delete_marked":
+            marked = [it for it in picker.items
+                      if it.key in self._sessions_marks
+                      and not self._is_current_session(it)]
+            if not marked:
+                self._add(Entry("notice", text="Отмеченных сессий нет: "
+                                               "пробел отмечает выбранную."))
+                return
+            picker.ask_confirm(
+                "Удалить " + str(len(marked)) + " отмеченных сессий в корзину?",
+                ("trash", marked))
+            return
+
+    def _trash_session_items(self, items: list) -> None:
+        """Выбранные сессии — в корзину вместе с чекпоинтами."""
+        from ..core.sessions import trash_sessions
+
+        safe = [it for it in items if not self._is_current_session(it)]
+        moved = trash_sessions(self._data_dir(),
+                               [it.payload["path"] for it in safe])
+        for it in items:
+            self._sessions_marks.discard(it.key)
+        self._refresh_sessions_picker()
+        self._add(Entry("notice", text="В корзину убрано сессий: "
+                                       + str(len(moved))
+                                       + " (u в /sessions — вернуть последнюю)."))
+
+    def _rename_session_item(self, item, title: str) -> None:
+        """Переименование из выбиралки: текущей — через журнал, чужой —
+        записью в её файл; список сразу перечитывается."""
+        from ..core.sessions import set_session_title
+
+        if self._is_current_session(item):
+            self.journal.set_title(title)
+        elif not set_session_title(item.payload["path"], title):
+            self._add(Entry("notice", text="Не вышло переименовать сессию."))
+            return
+        self._refresh_sessions_picker()
+        self._add(Entry("notice", text="Сессия переименована: «" + title + "»."))
 
     def _manners_picker_action(self, action) -> None:
         from ..core.errors import HumanError
@@ -1170,12 +1380,50 @@ class ChatApp:
         idx = MODES.index(self.mode) if self.mode in MODES else 0
         self.send_command({"type": "mode.set", "mode": MODES[(idx + step) % len(MODES)]})
 
+    def _match_arg(self, query: str, names: dict):
+        """Аргумент команды по id/названию/названию в чужой раскладке.
+
+        names: {значение: (имена…)}. Без ui.layout_fix — только точные
+        совпадения, с ним — ещё и переводы раскладкой (kbvbns → лимиты).
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return None
+        for value, aliases in names.items():
+            if q in tuple(str(a).lower() for a in aliases):
+                return value
+        if self.settings.get("ui.layout_fix"):
+            return _layout.match_name(query, names)
+        return None
+
+    def _fix_dot_command(self, text: str):
+        """Ввод с точки в ЙЦУКЕН — команда, если перевод даёт известную.
+
+        «.зфтуд Лимиты» — это «/panel Лимиты»: клавиша / в русской
+        раскладке печатает точку. Обычное сообщение с точки не трогаем:
+        переводим, только если первое слово стало известной командой.
+        """
+        stripped = text.lstrip()
+        if not stripped.startswith(".") or stripped.startswith(".."):
+            return None
+        parts = stripped[1:].split(None, 1)
+        if not parts:
+            return None
+        name = resolve_command(parts[0])
+        if name is None:
+            return None
+        return "/" + name + ((" " + parts[1]) if len(parts) > 1 else "")
+
     def submit_text(self, text: str | None = None) -> None:
         if text is None:
             text = self.editor.submit()
         text = text.strip("\n")
         if not text.strip():
             return
+        if text.startswith(".") and self.settings.get("ui.layout_fix"):
+            fixed = self._fix_dot_command(text)
+            if fixed is not None:
+                text = fixed
         if text.startswith("/") and not text.startswith("//"):
             self._slash(text)
             return
@@ -1193,8 +1441,13 @@ class ChatApp:
 
     def _slash(self, text: str) -> None:
         parts = text.split()
-        cmd = parts[0]
-        rest = text[len(cmd):].strip()
+        raw = parts[0]
+        cmd = raw
+        if self.settings.get("ui.layout_fix") and raw.startswith("/"):
+            canonical = resolve_command(raw[1:])
+            if canonical is not None:
+                cmd = "/" + canonical
+        rest = text[len(raw):].strip()
         if cmd in ("/exit", "/quit"):
             self.done = True
         elif cmd == "/clear":
@@ -1203,8 +1456,11 @@ class ChatApp:
         elif cmd == "/help":
             self.open_help_picker()
         elif cmd == "/mode":
-            if len(parts) > 1 and parts[1] in MODES:
-                self.send_command({"type": "mode.set", "mode": parts[1]})
+            mode = None
+            if len(parts) > 1:
+                mode = self._match_arg(parts[1], {m: (m,) for m in MODES})
+            if len(parts) > 1 and mode is not None:
+                self.send_command({"type": "mode.set", "mode": mode})
             elif len(parts) > 1:
                 self._add(Entry("notice", text="Нет режима " + parts[1]))
             else:
@@ -1264,7 +1520,7 @@ class ChatApp:
         elif cmd == "/new":
             self.start_new_session()
         elif cmd == "/rename":
-            self.rename_session(text[len("/rename"):])
+            self.rename_session(text[len(raw):])
         elif cmd == "/undo":
             self.send_command({"type": "undo"})
         elif cmd == "/rewind":
@@ -1275,7 +1531,7 @@ class ChatApp:
         elif cmd == "/redo":
             self.send_command({"type": "redo"})
         elif cmd in ("/compact", "/summarize"):
-            hint = text[len(cmd):].strip()
+            hint = text[len(raw):].strip()
             self.send_command({"type": "compact", "hint": hint})
         elif cmd == "/todo":
             self.toggle_panel("todo")
@@ -1300,12 +1556,13 @@ class ChatApp:
         """/model: выбиралка ролей; /model <ссылка> — главной; /model <роль> <ссылка>."""
         from .panels.models import ROLES
 
-        roles = {role for role, _title in ROLES}
         if not args:
             self.open_models_picker()
             return
-        if len(args) >= 2 and args[0] in roles:
-            role, ref = args[0], args[1]
+        role_arg = self._match_arg(args[0], {r: (r, t) for r, t in ROLES}) \
+            if len(args) >= 2 else None
+        if len(args) >= 2 and role_arg is not None:
+            role, ref = role_arg, args[1]
         elif len(args) == 1:
             role, ref = "main", args[0]
         else:
@@ -1532,13 +1789,23 @@ class ChatApp:
         self.send_command({"type": "btw", "text": question})
 
     def _panel_command(self, args: list) -> None:
-        """/panel <имя> — панель по id, названию или алиасу; без имени — выбиралка."""
+        """/panel <имя> — панель по id, названию или алиасу; без имени — выбиралка.
+
+        Имя понимается и в чужой раскладке (kbvbns — «Лимиты»), пока
+        включён ui.layout_fix; выключен — только точные имена.
+        """
         if not args:
             self.open_panels_picker()
             return
-        spec = find_panel(" ".join(args))
+        query = " ".join(args)
+        spec = find_panel(query)
+        if spec is not None and not self.settings.get("ui.layout_fix"):
+            q = query.strip().lower()
+            names = (spec.panel_id, spec.title.lower(), *spec.aliases)
+            if q not in names:
+                spec = None  # нашлась только переводом раскладки — а он выключен
         if spec is None:
-            self._add(Entry("notice", text="Нет панели «" + " ".join(args)
+            self._add(Entry("notice", text="Нет панели «" + query
                                            + "» — /panels покажет все."))
             return
         self.toggle_panel(spec.panel_id)
@@ -1566,14 +1833,16 @@ class ChatApp:
 
     def _rewind_command(self, args: list) -> None:
         """/rewind [N] [files|talk|both] — список ходов или откат к ходу N."""
-        scopes = {"files": "files", "talk": "talk", "both": "both",
-                  "файлы": "files", "разговор": "talk", "оба": "both"}
+        scopes = {"files": ("files", "файлы"), "talk": ("talk", "разговор"),
+                  "both": ("both", "оба", "всё")}
         command: dict = {"type": "rewind"}
         for arg in args:
             if arg.isdigit():
                 command["turn"] = int(arg)
-            elif arg in scopes:
-                command["scope"] = scopes[arg]
+            else:
+                scope = self._match_arg(arg, scopes)
+                if scope is not None:
+                    command["scope"] = scope
         self.send_command(command)
 
     def _copy_command(self, args: list) -> None:
@@ -1695,6 +1964,9 @@ class ChatApp:
     def handle_key(self, key: Key) -> None:
         if self.done:
             return
+        if self.settings.get("ui.layout_fix"):
+            # Ctrl/Alt — по физической клавише: Alt+д — это Alt+L.
+            key = _layout.physical_key(key)
         self._reload_settings()
         if key.label == "ctrl+c" or key.name == "eof":
             self.done = True
@@ -1980,6 +2252,11 @@ class ChatApp:
             self.layout.resize(focused, 0.25)
         elif key.name == "enter" and focused:
             self.layout.toggle_maximize(focused)
+        elif key.char == "x" and focused:
+            # x — закрыть сфокусированную панель, режим выключаем при пустом дереве.
+            self.layout.close(focused)
+            if not self.layout.leaves():
+                self.panel_focus = False
         elif key.name == "tab" and focused:
             # Tab в фокусе панелей — переставить панель среди соседей.
             self.layout.move(focused, -1 if "shift" in key.mods else 1)
@@ -2002,9 +2279,62 @@ class ChatApp:
         self.editor.insert(paste.text)
         self._update_completions()
 
+    def _panel_at(self, mouse: Mouse):
+        """Панель под мышью по геометрии последнего кадра или None."""
+        mx, my = mouse.x - 1, mouse.y - 1
+        for panel_id, (px, py, pw, ph) in self._panel_rects.items():
+            if px <= mx < px + pw and py <= my < py + ph:
+                return panel_id, (px, py, pw, ph), mx, my
+        return None
+
+    def _panel_mouse(self, mouse: Mouse) -> bool:
+        """Мышь по панелям (ЗАДАЧА-17): True — событие съели панели.
+
+        Клик по заголовку — фокус и режим панелей; перетаскивание
+        разделителя — размер; колесо над панелью — её прокрутка.
+        """
+        if self._panel_drag is not None:
+            panel_id, last_y = self._panel_drag
+            if mouse.kind == "move":
+                dy = (mouse.y - 1) - last_y
+                if dy:
+                    self.layout.resize(panel_id, dy * 0.25)
+                    self._panel_drag = (panel_id, mouse.y - 1)
+                return True
+            if mouse.kind == "release":
+                self._panel_drag = None
+                return True
+        found = self._panel_at(mouse)
+        if found is None:
+            return False
+        panel_id, (px, py, pw, ph), mx, my = found
+        if mouse.kind in ("wheel_up", "wheel_down"):
+            content = self._panel_content(panel_id)
+            key = Key("up" if mouse.kind == "wheel_up" else "down")
+            if content is not None:
+                content.handle_key(self, key)
+            return True
+        if mouse.kind == "press" and mouse.button == 0:
+            below = any(oy == py + ph for _id, (ox, oy, ow, oh)
+                        in self._panel_rects.items() if _id != panel_id)
+            if below and my == py + ph - 1:
+                # Взялись за разделитель — дальше move меняет размер.
+                self._panel_drag = (panel_id, my)
+                self.layout.focused = panel_id
+                return True
+            self.layout.focused = panel_id
+            if my == py:
+                self.panel_focus = True  # клик по заголовку — фокус и режим
+            return True
+        if self._sel_anchor is not None:
+            return False  # идёт выделение ленты — отпуск обработает лента
+        return mouse.kind in ("move", "release")
+
     def handle_mouse(self, mouse: Mouse) -> None:
         if self.picker is not None:
             return  # под выбиралкой лента мышью не выделяется
+        if self._panel_mouse(mouse):
+            return
         if mouse.kind == "wheel_up":
             self.scroll = min(self.scroll + 3, 100000)
         elif mouse.kind == "wheel_down":
@@ -2126,12 +2456,20 @@ class ChatApp:
 
     def _update_completions(self) -> None:
         prefix = self.editor.text[:self.editor.cursor]
-        cmd_match = re.fullmatch(r"/([a-z-]*)", prefix)
+        cmd_match = re.fullmatch(r"/([a-zа-яё-]*)", prefix, re.IGNORECASE)
         if cmd_match is not None and self.editor.cursor == len(self.editor.text):
-            # Tab после «/»: команды реестра с описаниями (ЗАДАЧА-16).
-            needle = cmd_match.group(1)
-            self.cmd_completions = [(name, desc) for name, desc in COMMANDS
-                                    if name.startswith(needle)][:8]
+            # Tab после «/»: команды реестра с описаниями (ЗАДАЧА-16) —
+            # латинские и русские имена, игла — в любой раскладке.
+            needle = cmd_match.group(1).lower()
+            needles = {needle}
+            if self.settings.get("ui.layout_fix"):
+                needles = {v.lower() for v in _layout.variants(needle)}
+            all_names = list(COMMANDS) + [
+                (ru, COMMAND_DESCR[lat] + " (/" + lat + ")")
+                for ru, lat in COMMAND_RU.items()]
+            self.cmd_completions = [
+                (name, desc) for name, desc in all_names
+                if any(name.startswith(n) for n in needles)][:8]
             self.completions = []
             self.completion_index = 0
             return
@@ -2399,22 +2737,61 @@ class ChatApp:
             self._panel_cache[panel_id] = content
         return self._panel_cache[panel_id]
 
+    # Подсказка режима панелей (ЗАДАЧА-17): видна внизу колонки, пока
+    # фокус в панелях, — как управлять, не вспоминая справку.
+    _PANEL_HINT = ("↑↓ — фокус · ←→ — размер · Tab — переставить · "
+                   "Enter — развернуть · x — закрыть · Esc — назад к вводу")
+
+    def _panel_hints(self, tree, w: int) -> dict:
+        """Желаемые высоты видимых панелей; ручной размер побеждает."""
+        hints = {}
+        for panel_id in tree.visible_leaves():
+            if panel_id in tree.manual:
+                continue
+            content = self._panel_content(panel_id)
+            if content is not None:
+                hints[panel_id] = content.height_hint_for(self, max(1, w - 2))
+        return hints
+
+    def _draw_panel_header(self, buf: Buffer, px: int, py: int, pw: int,
+                           title: str, focused: bool) -> None:
+        """Заголовок-полоса: мягкий градиент к фону, без жёсткой рамки.
+
+        В фокусе полоса теплее и заголовок — янтарём с пометкой ▸,
+        обычные — серебром по приглушённому градиенту (docs/ДИЗАЙН.md).
+        """
+        start = (0x2E, 0x2A, 0x4A) if focused else (0x1D, 0x22, 0x3D)
+        stops = [start, PANEL_BG]
+        grad = _color.gradient(stops, max(1, pw))
+        for i in range(pw):
+            buf.set(px + i, py, " ", bg=grad[i])
+        fg = _color.AMBER if focused else _color.SILVER
+        label = ("▸ " if focused else "") + title
+        col = px + 1
+        for ch in label:
+            if col >= px + pw:
+                break
+            bg = grad[col - px] if col - px < len(grad) else PANEL_BG
+            col += buf.text(col, py, ch, fg=fg, bg=bg, attrs=_color.BOLD)
+
     def _draw_panels(self, buf: Buffer, x: int, y: int, w: int, h: int, now: float,
                      tree=None) -> None:
         tree = tree if tree is not None else self.layout
-        rects = tree.rects(x, y, w, h)
+        rects = tree.rects(x, y, w, h, hints=self._panel_hints(tree, w))
+        self._panel_rects = dict(rects)
         for panel_id, (px, py, pw, ph) in rects.items():
             if pw <= 0 or ph <= 0:
                 continue
             buf.fill_rect(px, py, pw, ph, " ", bg=PANEL_BG)
             content = self._panel_content(panel_id)
             title = content.title if content is not None else panel_id
-            if self.panel_focus and tree.focused == panel_id:
-                title = "▸ " + title
-            buf.text(px + 1, py, title, fg=_color.AMBER, bg=PANEL_BG, attrs=_color.BOLD)
+            focused = bool(self.panel_focus and tree.focused == panel_id)
+            self._draw_panel_header(buf, px, py, pw, title, focused)
             if content is None:
                 continue
             content.height_hint = max(0, ph - 1)
+            if content.draw_into(buf, self, px, py + 1, pw, max(0, ph - 1)):
+                continue
             lines = content.lines(self, max(1, pw - 2))
             row = py + 1
             for line in lines:
@@ -2425,6 +2802,22 @@ class ChatApp:
                         break
                     buf.text(px + 1, row, visual, fg=_color.SILVER, bg=PANEL_BG)
                     row += 1
+        self._draw_panel_dividers(buf, rects)
+
+    def _draw_panel_dividers(self, buf: Buffer, rects: dict) -> None:
+        """Тонкие разделители на стыках панелей: ─ по горизонтали, │ по вертикали."""
+        items = list(rects.items())
+        for panel_id, (px, py, pw, ph) in items:
+            below = any(oy == py + ph and ox < px + pw and px < ox + ow
+                        for _id, (ox, oy, ow, oh) in items if _id != panel_id)
+            if below and ph >= 2:
+                for i in range(pw):
+                    buf.set(px + i, py + ph - 1, "─", fg=DIM_FG, bg=PANEL_BG)
+            right = any(ox == px + pw and oy < py + ph and py < oy + oh
+                        for _id, (ox, oy, ow, oh) in items if _id != panel_id)
+            if right and pw >= 2:
+                for j in range(ph):
+                    buf.set(px + pw - 1, py + j, "│", fg=DIM_FG, bg=PANEL_BG)
 
     _PICKER_STYLES = {"title": "bold", "text": "text", "dim": "dim",
                       "accent": "cyan", "mark": "amber", "hint": "dim"}
@@ -2463,6 +2856,8 @@ class ChatApp:
                 buf.text(rx, y, right, fg=DIM_FG, bg=STATUS_BG, attrs=_color.DIM)
             return
         left = " " + phase + " контекст " + pct + "% · " + self.mode + " · " + self.model
+        if self.layout.leaves() and not self.panel_focus:
+            left += " · F6 — панели"
         if self.settings.get("ui.vim_mode"):
             left += " · vim:" + ("normal" if self._vim_normal else "insert")
         buf.text(0, y, left, fg=_color.SILVER, bg=STATUS_BG)
@@ -2566,8 +2961,18 @@ class ChatApp:
         self._draw_selection(buf, start, feed_h)
         if panel_w:
             tree = self.layout if self.layout.leaves() else (self._panel_ghost or self.layout)
+            total_h = feed_h + input_h + completion_h + nib_h
+            hint_lines: list = []
+            if self.panel_focus and self.layout.leaves():
+                # В режиме панелей внизу колонки — подсказка управления.
+                hint_lines = wrap_text(self._PANEL_HINT, max(4, panel_w - 2))[:4]
             self._draw_panels(buf, chat_w, 0, panel_w,
-                              feed_h + input_h + completion_h + nib_h, now, tree=tree)
+                              total_h - len(hint_lines), now, tree=tree)
+            for i, line in enumerate(hint_lines):
+                buf.text(chat_w + 1, total_h - len(hint_lines) + i, line,
+                         fg=DIM_FG, bg=PANEL_BG, attrs=_color.DIM)
+        else:
+            self._panel_rects = {}
         cy = feed_h
         if self.cmd_completions:
             for i, (name, desc) in enumerate(self.cmd_completions[:completion_h]):
@@ -2697,6 +3102,17 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
         return 0
     data = DataDir()
     data.ensure()
+    # Уборка сессий (ЗАДАЧА-17): корзина самоочищается по сроку, пустые
+    # сессии (ни одной реплики человека) уходят сами — при старте все,
+    # при выходе ещё и текущая проверка не нужна: текущую не трогаем.
+    try:
+        from ..core.sessions import drop_empty_sessions, purge_trash
+
+        purge_trash(data, int(settings.get("chat.sessions_trash_days") or 7))
+        if settings.get("chat.sessions_drop_empty"):
+            drop_empty_sessions(data)
+    except Exception:  # noqa: BLE001 — уборка не имеет права ронять старт
+        pass
     # Пока экран наш, ошибки потоков и stderr уходят в лог, а не поверх
     # ленты (ЗАДАЧА-06, п. 2): лог — LUNA_HOME/logs/chat-<время>.log.
     trap = ErrorTrap(data.logs / ("chat-" + time.strftime("%Y%m%d-%H%M%S") + ".log"))
@@ -2758,6 +3174,16 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                 current = app.journal if app is not None else journal
                 if current is not None:
                     current.close()
+                # При выходе пустые сессии уходят сами; текущую (только
+                # что закрытую) не трогаем: keep — её путь.
+                try:
+                    if settings.get("chat.sessions_drop_empty"):
+                        from ..core.sessions import drop_empty_sessions
+
+                        keep = str(current.path) if current is not None else None
+                        drop_empty_sessions(data, keep_path=keep)
+                except Exception:  # noqa: BLE001 — выход важнее уборки
+                    pass
     print(phrases.event_phrase("end") or "Орёл сел.")
     return 0
 

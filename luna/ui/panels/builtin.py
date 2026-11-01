@@ -331,17 +331,23 @@ def _cell_char(top, bottom) -> str:
 
 
 class MoonPanel(PanelContent):
-    """«Луна»: фаза по контексту, токены, стоимость, модель."""
+    """«Луна»: фаза по контексту, токены, стоимость, модель.
+
+    Диск — настоящий, из ui/disc.py (полублоки, сглаживание, терминатор):
+    рисуется прямо в буфер экрана через draw_into, потому что строковый
+    moon_art терял цвета подпикселей и на широкой плоской панели давал
+    серые прямоугольники вместо луны (живая проверка автора, ЗАДАЧА-17).
+    Узкой панели — текстовый запасной вид без всякого «арта».
+    """
+
+    min_height = 5
 
     def __init__(self):
         super().__init__("Луна")
 
-    def lines(self, app, width: int) -> list:
+    def _stats(self, app) -> list:
         data = panel_data(app)
-        mode = getattr(app, "glyph_mode", "emoji")
-        out = moon_art(data.context_pct, width, mode)
-        out.append("")
-        out.append("контекст: " + str(data.context_pct) + "%")
+        out = ["контекст: " + str(data.context_pct) + "%"]
         if data.model:
             out.append("модель: " + data.model)
         tokens = "токены: вход " + _fmt_int(data.tokens_in) + " · выход " + _fmt_int(data.tokens_out)
@@ -353,6 +359,45 @@ class MoonPanel(PanelContent):
         if budget:
             out.append(budget)
         return out
+
+    def _disc_rows(self, width: int, avail: int) -> int:
+        """Строк под диск: из ширины (клетка вдвое выше) и доступной высоты."""
+        return max(3, min(8, avail, max(3, width // 4)))
+
+    def height_hint_for(self, app, width: int):
+        stats = len(self._stats(app))
+        if width < 14:
+            return (self.min_height, stats + 2)
+        disc = self._disc_rows(width, 8)
+        return (self.min_height, disc + stats + 2)
+
+    def draw_into(self, buf, app, x: int, y: int, w: int, h: int) -> bool:
+        if w < 14 or h < 6:
+            return False  # узко или низко — текстовый запасной вид
+        from .. import color as _c
+        from ..disc import draw_disc
+
+        data = panel_data(app)
+        stats = self._stats(app)
+        disc_rows = self._disc_rows(w, max(3, h - len(stats) - 1))
+        r = max(2.0, min(w / 2.0 - 1.0, disc_rows * 0.72))
+        draw_disc(buf, x + w / 2.0, y + disc_rows / 2.0, r,
+                  max(0.0, min(1.0, data.context_pct / 100.0)),
+                  mode=getattr(app, "glyph_mode", "emoji"))
+        row = y + disc_rows + 1
+        for line in stats:
+            if row >= y + h:
+                break
+            buf.text(x + 1, row, line, fg=_c.SILVER, bg=(0x10, 0x13, 0x24))
+            row += 1
+        return True
+
+    def lines(self, app, width: int) -> list:
+        # Текстовый вид: запасной для узкой панели (draw_into там
+        # отказывается) и для тестов/снимков строками.
+        data = panel_data(app)
+        mode = getattr(app, "glyph_mode", "emoji")
+        return moon_art(data.context_pct, width, mode) + [""] + self._stats(app)
 
 
 class LimitsPanel(PanelContent):

@@ -173,7 +173,7 @@ class NibblerTest(unittest.TestCase):
         self.assertIn("долгий ход", calls[-1])
 
     def test_default_manner_is_nibbler_character(self):
-        entry = manners.get(isolated_settings(self), "nibbler")
+        entry = manners.get(isolated_settings(self), "nibbler", audience="nibbler")
         self.assertIsNotNone(entry)
         nib, _e, _c = self.make()
         prompt = nib._system_prompt()

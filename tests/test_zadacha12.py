@@ -274,3 +274,48 @@ class SwarmGuardTest(unittest.TestCase):
         self.assertEqual(ask(action="resume", swarm="leo"), "ask")
         self.assertEqual(ask(action="estimate", profile="cod"), "ask")
         self.assertEqual(ask(action="estimate", profile="cls"), "allow")
+
+
+class NibblerContextTest(unittest.TestCase):
+    def test_brain_sees_request_answer_tools_and_error(self):
+        from luna.mind.nibbler import Nibbler
+
+        seen = []
+        nib = Nibbler(None, brain=lambda system, digest: seen.append(digest) or "",
+                      clock=lambda: 1000.0)
+        nib._get = lambda key, default: "digest" if key == "nibbler.context" else default
+        for ev in ({"type": "user.message", "text": "Почини сборку"},
+                   {"type": "turn.start", "turn": 1},
+                   {"type": "agent.text", "text": "Смотрю логи"},
+                   {"type": "agent.text.done"},
+                   {"type": "tool.call", "id": "1", "name": "bash", "args": {"command": "make"}},
+                   {"type": "tool.result", "id": "1", "ok": False, "output": "cc: не найден"},
+                   {"type": "error", "message": "упало", "detail": "Timeout провайдера"}):
+            nib.observe(ev)
+        digest = seen[0]
+        self.assertIn("Задача человека: Почини сборку", digest)
+        self.assertIn("агент сказал: Смотрю логи", digest)
+        self.assertIn("cc: не найден", digest)
+        self.assertNotIn("Timeout", digest)  # первый повод — ошибка тула, ошибка хода ещё впереди
+
+
+class NibblerFullContextTest(unittest.TestCase):
+    def test_full_transcript_by_default(self):
+        from luna.mind.nibbler import Nibbler
+
+        seen = []
+        nib = Nibbler(None, brain=lambda system, digest: seen.append(digest) or "",
+                      clock=lambda: 1000.0)
+        long_out = "строка вывода\n" * 30
+        for ev in ({"type": "user.message", "text": "Почини сборку"},
+                   {"type": "turn.start", "turn": 1},
+                   {"type": "agent.text", "text": "Смотрю логи подробно"},
+                   {"type": "agent.text.done"},
+                   {"type": "tool.call", "id": "1", "name": "bash", "args": {"command": "make all"}},
+                   {"type": "tool.result", "id": "1", "ok": False, "output": long_out}):
+            nib.observe(ev)
+        digest = seen[0]
+        self.assertIn("ЧЕЛОВЕК: Почини сборку", digest)
+        self.assertIn("АГЕНТ: Смотрю логи подробно", digest)
+        self.assertIn('"command": "make all"', digest)
+        self.assertEqual(digest.count("строка вывода"), 30)

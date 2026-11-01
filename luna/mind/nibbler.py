@@ -31,7 +31,7 @@ CORE_PROMPT = """Ты — Ниблер, маленький наблюдател�
 - Никаких приветствий, пояснений и повторов того, что человек и так видит на экране."""
 
 MAX_TEXT = 160
-_DIGEST_LINES = 24
+_DIGEST_LINES = 40
 _EDIT_TOOLS = ("edit", "write")
 
 
@@ -76,6 +76,10 @@ class Nibbler:
         self._last_sig = ""
         self._same_sig = 0
         self._ctx_hot = False
+        self._request = ""        # последняя задача человека — без неё Ниблер слеп
+        self._full: deque = deque()  # стенограмма целиком (nibbler.context=full)
+        self._full_chars = 0
+        self._answer: list = []   # текст агента текущего шага
 
     # --- настройки ---------------------------------------------------------
 
@@ -106,8 +110,59 @@ class Nibbler:
         except Exception:  # noqa: BLE001 — наблюдатель не роняет хозяина
             pass
 
+    def _record(self, line: str) -> None:
+        """Стенограмма с потолком nibbler.context_chars: старое уходит первым."""
+        cap = int(self._get("nibbler.context_chars", 60000) or 60000)
+        self._full.append(line)
+        self._full_chars += len(line) + 1
+        while self._full_chars > cap and len(self._full) > 1:
+            self._full_chars -= len(self._full.popleft()) + 1
+
+    def _transcribe(self, ev: dict) -> None:
+        kind = ev.get("type")
+        if kind == "user.message":
+            self._record("ЧЕЛОВЕК: " + str(ev.get("text", "")))
+        elif kind == "agent.text.done":
+            pass  # текст шага пишется целиком в _observe
+        elif kind == "agent.thinking":
+            return
+        elif kind == "tool.call":
+            args = json.dumps(ev.get("args") or {}, ensure_ascii=False, default=str)
+            self._record("ВЫЗОВ " + str(ev.get("name", "")) + " " + args[:4000] +
+                         (" — " + str(ev.get("intent")) if ev.get("intent") else ""))
+        elif kind == "tool.result":
+            name = str(ev.get("name") or self._name_of(ev.get("id")) or "тул")
+            body = str(ev.get("output") or ev.get("summary") or "")
+            self._record("РЕЗУЛЬТАТ " + name + (" ok" if ev.get("ok") else " ОШИБКА") +
+                         ":\n" + body[:6000])
+        elif kind == "error":
+            self._record("ОШИБКА: " + str(ev.get("message", "")) + " " + str(ev.get("detail") or ""))
+        elif kind == "guard.verdict" and str(ev.get("decision")) == "deny":
+            self._record("ПРЕДОХРАНИТЕЛЬ ОТКАЗАЛ: " + str(ev.get("reason", "")))
+        elif kind == "turn.done":
+            self._record("— конец хода: " + str(ev.get("reason", "")) + " —")
+
     def _observe(self, ev: dict) -> None:
         kind = ev.get("type")
+        self._transcribe(ev)
+        if kind == "user.message":
+            text = " ".join(str(ev.get("text", "")).split())
+            if text:
+                self._request = text[:800]
+                self._note_line("человек: " + text[:200])
+            return
+        if kind == "agent.text":
+            self._answer.append(str(ev.get("text", "")))
+            return
+        if kind == "agent.text.done":
+            full = "".join(self._answer)
+            said = " ".join(full.split())
+            self._answer = []
+            if full.strip():
+                self._record("АГЕНТ: " + full.strip())
+            if said:
+                self._note_line("агент сказал: " + said[:300])
+            return
         if kind == "turn.start":
             self._turn += 1
             self._turn_started = self._clock()
@@ -117,11 +172,16 @@ class Nibbler:
         elif kind == "tool.result":
             name = str(ev.get("name") or self._name_of(ev.get("id")) or "тул")
             ok = bool(ev.get("ok"))
-            self._note_line("тул " + name + ": " + ("ok" if ok else "ОШИБКА"))
+            what = " ".join(str(ev.get("summary") or ev.get("output") or "").split())
+            limit = 240 if not ok else 120
+            self._note_line("тул " + name + ": " + ("ok" if ok else "ОШИБКА") +
+                            (" — " + what[:limit] if what else ""))
             if not ok:
                 self._consider("ошибка тула " + name)
         elif kind == "error":
-            self._note_line("ошибка: " + str(ev.get("message", ""))[:100])
+            detail = " ".join(str(ev.get("detail") or "").split())
+            self._note_line("ошибка: " + str(ev.get("message", ""))[:200] +
+                            (" (" + detail[:200] + ")" if detail else ""))
             self._consider("ошибка хода")
         elif kind == "usage":
             pct = float(ev.get("context_pct") or 0)
@@ -191,10 +251,17 @@ class Nibbler:
         """Значимое событие: спросить мозг, если он есть и дроссель открыт."""
         if self._brain is None or not self._gate_open():
             return
-        digest = "\n".join(self._digest)
-        if digest:
-            digest += "\n"
-        digest += "Повод высказаться: " + trigger + "."
+        parts = []
+        if str(self._get("nibbler.context", "full")) == "full" and self._full:
+            parts.append("Стенограмма сессии (что видел главный агент; старое могло срезаться):\n"
+                         + "\n".join(self._full))
+        else:
+            if self._request:
+                parts.append("Задача человека: " + self._request)
+            if self._digest:
+                parts.append("Что происходило (свежее внизу):\n" + "\n".join(self._digest))
+        parts.append("Повод высказаться: " + trigger + ".")
+        digest = "\n\n".join(parts)
         try:
             answer = self._brain(self._system_prompt(), digest)
         except Exception:  # noqa: BLE001 — мозг упал: молчим

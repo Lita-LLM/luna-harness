@@ -397,9 +397,11 @@ class ChatApp:
 
             brain = None
             try:
-                from ..devtools.fake_agent import FakeAgent
+                from ..mind.source import AgentSource
 
-                if not isinstance(self.source, FakeAgent):
+                # Мозг — только при настоящем агенте: у витрин и тестовых
+                # подмен он звал настоящую модель человека на фальшивых событиях.
+                if isinstance(self.source, AgentSource):
                     brain = make_router_brain(self.settings)
             except Exception:  # noqa: BLE001 — мозг не обязателен
                 brain = None
@@ -1434,6 +1436,7 @@ class ChatApp:
         self._add(Entry("user", text=text if display is None else display))
         out_text = text
         if self.nibbler is not None:
+            self.nibbler.observe({"type": "user.message", "text": text})
             # Серьёзные замечания Ниблера уходят агенту пометкой в этот ход;
             # в ленте виден только текст человека, пометка — в команде.
             notes = self.nibbler.take_notes()

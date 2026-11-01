@@ -100,6 +100,8 @@ _f("nibbler.to_agent", "choice", "serious", "Ниблер: какие замеч
    ("serious", "all", "never"))
 _f("nibbler.manner", "str", "nibbler", "Ниблер: его манера речи — файл манеры с «for: nibbler» в шапке; пусто — без манеры")
 _f("nibbler.long_turn_sec", "int", 90, "Ниблер: ход дольше стольких секунд считается долгим и зовёт его высказаться")
+_f("nibbler.context", "choice", "full", "Ниблер: что видит — full (стенограмма сессии целиком, до nibbler.context_chars) или digest (короткая сводка, дешевле)", ("full", "digest"))
+_f("nibbler.context_chars", "int", 60000, "Ниблер: потолок стенограммы в символах — старое срезается первым")
 _f("guard.enabled", "bool", True, "Предохранитель включён (выключение ослабляет безопасность)", human_only=True)
 _f("guard.rules", "str", "", "Правила allow/ask/deny по строкам: «шаблон=действие», шаблон — тул или тул:подстрока аргументов", human_only=True)
 _f("tools.bash_timeout", "int", 120, "Таймаут команды bash, секунд")

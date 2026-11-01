@@ -105,6 +105,7 @@ _f("guard.rules", "str", "", "Правила allow/ask/deny по строкам:
 _f("tools.bash_timeout", "int", 120, "Таймаут команды bash, секунд")
 _f("tools.output_limit", "int", 8000, "Обрезка вывода тулов, символов (полный вывод — в файл)")
 _f("web.enabled", "bool", True, "Веб-тулы (web_fetch, web_search) включены")
+_f("web.searxng_url", "str", "", "Свой поисковик SearXNG для web_search (адрес, с включённым форматом json); пусто — DuckDuckGo")
 
 # Совместимость с другими харнессами (ЗАДАЧА-12)
 _f("compat.global_instructions", "bool", True,

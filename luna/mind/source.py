@@ -24,6 +24,8 @@ class AgentSource:
         self._lock = threading.Lock()
         self._waits: dict[str, tuple[threading.Event, list]] = {}
         self._pending_history: list | None = None
+        self._pending_state: dict = {}
+        self._journal = None
 
     # --- интерфейс источника ------------------------------------------------
 
@@ -31,7 +33,7 @@ class AgentSource:
         if self._agent is None:
             self._agent = self._build_agent()
         if self._pending_history is not None:
-            self._agent.load_history(self._pending_history)
+            self._agent.load_history(self._pending_history, **self._pending_state)
             self._pending_history = None
         self._agent.listen(self._events.put)
         model = getattr(self._agent, "_model_label", lambda: "")()
@@ -62,13 +64,21 @@ class AgentSource:
         if kind == "mode.set":
             self._agent.handle_command(cmd)
             return
+        if kind in ("undo", "rewind", "redo", "compact"):
+            # Откат посреди хода агент отклонит сам (notice), сжатие отложит
+            # до конца хода; вне хода — в воркер: сводка ходит в модель.
+            if self._busy():
+                self._agent.handle_command(cmd)
+            else:
+                self._run_in_worker(cmd)
+            return
         if kind in ("user.message", "shell"):
             if kind == "user.message" and self._busy():
                 self._agent.handle_command(cmd)  # во время хода — в очередь агента
                 return
             self._run_in_worker(cmd)
 
-    def load_history(self, messages) -> None:
+    def load_history(self, messages, *, turn=None, marks=None) -> None:
         """История прошлой сессии для агента (продолжение и переключение).
 
         Агент ещё не построен — запомнить и отдать при start(). Агент жив —
@@ -77,6 +87,7 @@ class AgentSource:
         очищается: события прошлой сессии новой ленте не нужны.
         """
         self._pending_history = [dict(m) for m in messages]
+        self._pending_state = {"turn": turn, "marks": marks}
         if self._agent is None:
             return
         self._agent.interrupt()
@@ -89,9 +100,15 @@ class AgentSource:
             except queue.Empty:
                 break
         self._agent = self._build_agent()
-        self._agent.load_history(self._pending_history)
+        self._agent.load_history(self._pending_history, **self._pending_state)
         self._pending_history = None
         self._agent.listen(self._events.put)
+
+    def set_journal(self, journal) -> None:
+        """Журнал сессии для записей отката и сжатия (kind: rewind/compact)."""
+        self._journal = journal
+        if self._agent is not None:
+            self._agent.journal = journal
 
     # --- внутреннее ---------------------------------------------------------
 
@@ -160,5 +177,7 @@ class AgentSource:
         settings = self._settings or Settings()
         secrets = Secrets(data.secrets)
         router = Router(settings, secrets)
-        return Agent(settings=settings, secrets=secrets, router=router, cwd=Path(self._cwd),
-                     ask_guard_fn=self._ask_guard, ask_user_fn=self._ask_user)
+        agent = Agent(settings=settings, secrets=secrets, router=router, cwd=Path(self._cwd),
+                      ask_guard_fn=self._ask_guard, ask_user_fn=self._ask_user)
+        agent.journal = self._journal
+        return agent

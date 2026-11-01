@@ -35,9 +35,17 @@ def _read(ctx, args) -> ToolResult:
     return ToolResult(True, numbered or "(пустой файл)")
 
 
+def _checkpoint(ctx, path) -> None:
+    """Снимок прежнего содержимого для отката (ЗАДАЧА-13), если включён."""
+    store = getattr(ctx, "checkpoint", None)
+    if store is not None:
+        store.note_file(path)
+
+
 def _write(ctx, args) -> ToolResult:
     path = _resolve(ctx, args.get("path", ""))
     content = args.get("content", "")
+    _checkpoint(ctx, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     lines = content.count("\n") + (1 if content else 0)
@@ -61,6 +69,7 @@ def _edit(ctx, args) -> ToolResult:
         found = str(count)
         return ToolResult(False, "Фрагмент встречается " + found +
                           " раз; уточни контекст или поставь replace_all.")
+    _checkpoint(ctx, path)
     path.write_text(text.replace(old, new), encoding="utf-8")
     return ToolResult(True, "Заменено в " + str(path) + ": вхождений " + str(count))
 

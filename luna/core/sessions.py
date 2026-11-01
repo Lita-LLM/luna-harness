@@ -181,6 +181,11 @@ INTERRUPTED_RESULT = ("Прервано: прошлая сессия закры�
 
 
 def build_history(records: list) -> list:
+    """История сообщений агента из журнала (см. build_state)."""
+    return build_state(records)["history"]
+
+
+def build_state(records: list) -> dict:
     """История сообщений агента из записей журнала (ЗАДАЧА-10, п. 1).
 
     Собирается ровно то, что цикл агента держал в своей истории при жизни:
@@ -190,8 +195,14 @@ def build_history(records: list) -> list:
     (сессия закрылась на подтверждении или вопросе), получает результат
     «прервано» — иначе провайдер не примет историю. Системного промпта
     здесь нет: агент соберёт его сам к первому ходу.
+
+    Записи rewind/redo/compact (ЗАДАЧА-13) несут снимок памяти агента после
+    операции (data.state) — с него история продолжается. Старые записи без
+    снимка пропускаются. Возвращает {"history", "turn", "marks"}.
     """
     history: list = []
+    turn = 0
+    marks: list = []
     text_parts: list = []
     pending: dict | None = None   # сообщение ассистента текущего шага модели
     pending_in_history = False
@@ -220,6 +231,15 @@ def build_history(records: list) -> list:
     for rec in records:
         kind = rec.get("kind")
         data = rec.get("data") or {}
+        if kind in ("rewind", "redo", "compact"):
+            state = data.get("state")
+            if isinstance(state, dict) and isinstance(state.get("history"), list):
+                close_dangling()
+                text_parts.clear()
+                history[:] = [dict(m) for m in state["history"]]
+                turn = int(state.get("turn") or 0)
+                marks = [(int(t), int(i)) for t, i in state.get("marks") or []]
+            continue
         if kind == "command":
             if data.get("type") == "user.message":
                 close_dangling()
@@ -227,6 +247,8 @@ def build_history(records: list) -> list:
                     history.append({"role": "assistant",
                                     "content": "".join(text_parts)})
                     text_parts.clear()
+                turn += 1
+                marks.append((turn, len(history)))
                 history.append({"role": "user",
                                 "content": str(data.get("text") or "")})
             continue
@@ -275,4 +297,4 @@ def build_history(records: list) -> list:
     if text_parts:
         history.append({"role": "assistant", "content": "".join(text_parts)})
     close_dangling()
-    return history
+    return {"history": history, "turn": turn, "marks": marks}

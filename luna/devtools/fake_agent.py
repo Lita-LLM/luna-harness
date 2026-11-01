@@ -44,7 +44,7 @@ class FakeAgent:
 
     # --- интерфейс источника ------------------------------------------------
 
-    def load_history(self, messages) -> None:
+    def load_history(self, messages, **_state) -> None:
         """История прошлой сессии: фальшивому агенту она нужна только для
         проверок интерфейса источника (сценарии от неё не зависят)."""
         self.history = [dict(m) for m in messages]

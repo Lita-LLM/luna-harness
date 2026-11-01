@@ -69,6 +69,8 @@ HELP_TEXT = """Команды и клавиши Луны
 /sessions — выбиралка сессий на диске: Enter — переключиться на сессию
 /new — начать новую сессию · /rename <имя> — имя текущей сессии
 /manners — выбиралка манер речи: Enter — включить, n — новая, e — открыть в редакторе
+/undo — откатить последний ход · /rewind [N] [files|talk|both] — откат к ходу N · /redo — вернуть откат
+/compact [что сохранить] — сжать контекст («прилив»: старые ходы заменит сводка)
 Выделение мышью: протяжка по ленте копирует текст, двойной клик — слово
 Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
 /panels или Ctrl+T — панель плана (todo) · /layout save|load|list <имя> — раскладки
@@ -169,6 +171,18 @@ class Entry:
 class ChatApp:
     """Состояние чат-экрана и реакции на ввод и события источника."""
 
+    @property
+    def journal(self):
+        return self._journal
+
+    @journal.setter
+    def journal(self, value) -> None:
+        # агенту журнал нужен для своих записей (откат, сжатие)
+        self._journal = value
+        setter = getattr(getattr(self, "source", None), "set_journal", None)
+        if callable(setter):
+            setter(value)
+
     def __init__(self, bus=None, settings=None, scheduler=None,
                  glyph_mode="emoji", source=None, cwd=None, trap=None,
                  copy_hook=None, journal=None, data=None):
@@ -190,6 +204,7 @@ class ChatApp:
         self._want_journal = False    # журнал создать при закрытии выбиралки (--resume)
         self._restoring = False
         self.source = source if source is not None else create_source(self.settings)
+        self.journal = self._journal  # теперь источник есть — отдать журнал и ему
         self.editor = TextEditor()
         self.entries: list = []
         self.todos: list = []
@@ -273,6 +288,17 @@ class ChatApp:
             if entry.kind in ("guard", "ask") and entry.status == "pending":
                 entry.status = "прервано"
 
+    def _cut_feed_after_turn(self, turn: int) -> None:
+        """Лента после отката разговора: ходы после turn убираются — и вживую,
+        и при --continue (событие session.rewound лежит в журнале)."""
+        seen = 0
+        for idx, entry in enumerate(self.entries):
+            if entry.kind == "user":
+                seen += 1
+                if seen > turn:
+                    self.entries = self.entries[:idx]
+                    return
+
     def _restore_command(self, cmd: dict) -> None:
         kind = cmd.get("type")
         if kind == "user.message":
@@ -314,11 +340,15 @@ class ChatApp:
         ответы, вызовы и результаты тулов; источник без load_history
         (старые подмены) просто пропускается.
         """
-        from ..core.sessions import build_history
+        from ..core.sessions import build_state
 
         loader = getattr(self.source, "load_history", None)
         if callable(loader):
-            loader(build_history(records))
+            state = build_state(records)
+            try:
+                loader(state["history"], turn=state["turn"], marks=state["marks"])
+            except TypeError:  # подмена со старой сигнатурой — только история
+                loader(state["history"])
 
     def switch_session(self, path) -> bool:
         """Переключиться на сессию с диска: лента, память и журнал — её.
@@ -590,6 +620,9 @@ class ChatApp:
             self.mode = str(ev.get("mode") or self.mode)
             if ev.get("cwd"):
                 self.cwd = str(ev.get("cwd"))
+        elif kind == "session.rewound":
+            if ev.get("scope") in ("talk", "both"):
+                self._cut_feed_after_turn(int(ev.get("turn") or 0))
         elif kind == "turn.start":
             self.busy = True
         elif kind == "agent.thinking":
@@ -746,6 +779,15 @@ class ChatApp:
             self.start_new_session()
         elif cmd == "/rename":
             self.rename_session(text[len("/rename"):])
+        elif cmd == "/undo":
+            self.send_command({"type": "undo"})
+        elif cmd == "/rewind":
+            self._rewind_command(parts[1:])
+        elif cmd == "/redo":
+            self.send_command({"type": "redo"})
+        elif cmd == "/compact":
+            hint = text[len("/compact"):].strip()
+            self.send_command({"type": "compact", "hint": hint})
         elif cmd in ("/panels", "/todo"):
             self.toggle_panel("todo")
         elif cmd == "/layout":
@@ -772,6 +814,18 @@ class ChatApp:
             self._add(Entry("notice", text="Сохранённые раскладки: " + names))
         else:
             self._add(Entry("notice", text="Нужно: /layout save|load|list <имя>"))
+
+    def _rewind_command(self, args: list) -> None:
+        """/rewind [N] [files|talk|both] — список ходов или откат к ходу N."""
+        scopes = {"files": "files", "talk": "talk", "both": "both",
+                  "файлы": "files", "разговор": "talk", "оба": "both"}
+        command: dict = {"type": "rewind"}
+        for arg in args:
+            if arg.isdigit():
+                command["turn"] = int(arg)
+            elif arg in scopes:
+                command["scope"] = scopes[arg]
+        self.send_command(command)
 
     def _copy_command(self, args: list) -> None:
         """/copy — последний ответ агента; /copy err — последняя ошибка целиком."""

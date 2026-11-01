@@ -49,6 +49,8 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try snapshot <экран> снимок экрана в HTML: splash | render | main | chat | sessions
   luna try measure [--json] замеры: старт, память и ЦП в простое
   luna try brain            мозг на фальшивой модели: ход с тулом, без сети
+  luna try undo             откат на фальшивой модели: пишет → /undo → прежние → /redo
+  luna try compact          прилив на фальшивой модели: длинная беседа сжимается в сводку
   luna update [--check]     обновление git-копии программы (--check — только проверить)
   luna setup                настройка провайдера и моделей (ключ — скрытым вводом)
   luna models               что из моделей настроено и живо ли
@@ -375,8 +377,16 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.prompt_try import run_prompt_try
 
                 return run_prompt_try()
+            if what == "undo":
+                from .devtools.rewind_try import run_undo_try
+
+                return run_undo_try()
+            if what == "compact":
+                from .devtools.rewind_try import run_compact_try
+
+                return run_compact_try()
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, chat, measure, snapshot, brain, prompt.")
+                             "Есть: render, splash, chat, measure, snapshot, brain, prompt, undo, compact.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

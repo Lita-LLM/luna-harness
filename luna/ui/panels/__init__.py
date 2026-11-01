@@ -5,6 +5,11 @@
 (сериализация в dict) и реестр панелей — любой модуль регистрирует свою
 панель фабрикой и она появляется в дереве наравне со встроенными.
 По умолчанию дерево пусто: одна лента, минимализм.
+
+Встроенные панели с наполнением — в panels/builtin.py (Луна, Лимиты,
+Обратная сторона, Файлы, Ниблер): данные они берут из событий шины через
+PanelData. Новая панель — один модуль с register_panel, движок трогать
+не нужно (так позже добавится «Рой»).
 """
 
 from __future__ import annotations
@@ -17,10 +22,18 @@ class PanelSpec:
     panel_id: str
     title: str
     factory: object  # callable() -> PanelContent
+    aliases: tuple = ()
 
 
 class PanelContent:
-    """Содержимое панели: строки на ширину. База — статичный текст."""
+    """Содержимое панели: строки на ширину. База — статичный текст.
+
+    height_hint ставит экран перед lines(): сколько строк влезет в панель
+    (для панелей-журналов, показывающих хвост). handle_key — клавиши
+    панели в режиме фокуса (F6): True — клавиша съедена панелью.
+    """
+
+    height_hint: int = 0
 
     def __init__(self, title: str, lines_provider=None):
         self.title = title
@@ -31,13 +44,16 @@ class PanelContent:
             return []
         return list(self._provider(app, width))
 
+    def handle_key(self, app, key) -> bool:
+        return False
+
 
 _REGISTRY: dict = {}
 
 
-def register_panel(panel_id: str, title: str, factory) -> PanelSpec:
+def register_panel(panel_id: str, title: str, factory, aliases: tuple = ()) -> PanelSpec:
     """Зарегистрировать панель модуля: дальше она открывается как встроенная."""
-    spec = PanelSpec(panel_id, title, factory)
+    spec = PanelSpec(panel_id, title, factory, tuple(aliases))
     _REGISTRY[panel_id] = spec
     return spec
 
@@ -48,6 +64,17 @@ def panel_spec(panel_id: str):
 
 def registered_panels() -> dict:
     return dict(_REGISTRY)
+
+
+def find_panel(query: str):
+    """Панель по id, названию или алиасу (без учёта регистра) — для /panel <имя>."""
+    q = (query or "").strip().lower()
+    if not q:
+        return None
+    for spec in _REGISTRY.values():
+        if q == spec.panel_id or q == spec.title.lower() or q in spec.aliases:
+            return spec
+    return None
 
 
 def create_panel(panel_id: str):
@@ -70,7 +97,8 @@ def _todo_lines(app, width: int) -> list:
     return out
 
 
-register_panel("todo", "План", lambda: PanelContent("План", _todo_lines))
+register_panel("todo", "План", lambda: PanelContent("План", _todo_lines),
+               aliases=("план", "todo"))
 
 
 # --- дерево -----------------------------------------------------------------
@@ -116,6 +144,15 @@ class LayoutTree:
         self.focused: str | None = None
         self.maximized: str | None = None
         self.saved: dict = {}
+
+    def clone(self) -> "LayoutTree":
+        """Независимая копия дерева (для анимации закрытия колонки)."""
+        other = LayoutTree()
+        other.root = Node.from_dict(self.root.to_dict()) if self.root is not None else None
+        other.focused = self.focused
+        other.maximized = self.maximized
+        other.saved = dict(self.saved)
+        return other
 
     # --- запросы -------------------------------------------------------------
 
@@ -316,3 +353,8 @@ class LayoutTree:
                     ch = y + h - cy
                 self._place(child, x, cy, w, max(1, ch), out)
                 cy += ch
+
+
+# Встроенные панели с наполнением: регистрация — импортом модуля.
+from . import builtin as _builtin  # noqa: E402,F401
+from .builtin import PanelData, panel_data  # noqa: E402,F401

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+import gc
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -241,6 +242,9 @@ class ChatSwitchTest(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # У чата есть циклические ссылки (панели, Ниблер): без сборки мусора
+        # открытый журнал живёт дольше теста, и Windows не даёт удалить каталог.
+        self.addCleanup(gc.collect)
         self.data = DataDir(Path(self.tmp.name))
         self.data.ensure()
 

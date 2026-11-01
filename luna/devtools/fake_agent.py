@@ -58,7 +58,8 @@ class FakeAgent:
                        "model": self.model, "mode": self.mode})
         self._at(now, {"type": "notice", "level": "info",
                        "text": "Фальшивый агент: сценарии — обычное сообщение, "
-                               "«подтверди …», «вопрос …», «ошибка …», «долго …»."})
+                               "«подтверди …», «вопрос …», «ошибка …», «долго …», "
+                               "«петля …» (Ниблер заметит). Панели: /panels."})
 
     def has_pending(self) -> bool:
         return bool(self._pending) or self._waiting_guard is not None \
@@ -151,7 +152,33 @@ class FakeAgent:
         if "подтверди" in low:
             self._guard_scenario(t, turn)
             return
+        if "петля" in low:
+            self._loop_scenario(t, turn)
+            return
         self._plain_scenario(t, turn, long_output="долго" in low)
+
+    def _loop_scenario(self, t: float, turn: int) -> None:
+        """Петля правок одного файла: Ниблер такое замечает (ЗАДАЧА-14)."""
+        self._stream(t + 0.3, "agent.thinking", "Чиню обработчик, попытка за попыткой. ")
+        self._at(t + 1.4, {"type": "tool.call", "id": "loop-r", "name": "read",
+                            "args": {"path": "app.py"},
+                            "intent": "Читаю обработчик перед правками"})
+        self._at(t + 1.7, {"type": "tool.result", "id": "loop-r", "ok": True,
+                            "summary": "120 строк", "output": "def handle(): ...\n"})
+        at = t + 2.0
+        for i in range(3):
+            cid = "loop-" + str(i + 1)
+            self._at(at, {"type": "tool.call", "id": cid, "name": "edit",
+                          "args": {"path": "app.py"},
+                          "intent": "Правлю обработчик, попытка " + str(i + 1)})
+            self._at(at + 0.4, {"type": "tool.result", "id": cid, "ok": True,
+                                "summary": "app.py: +2 −1",
+                                "output": "+ новая строка " + str(i + 1) + "\n- старая строка\n"})
+            at += 0.8
+        self._stream(at, "agent.text", "Готово, обработчик поправлен.")
+        self._at(at + 1.2, {"type": "agent.text.done"})
+        self._usage_at(at + 1.3, 12, 0.006)
+        self._finish_at(at + 1.5, "end")
 
     def _finish_at(self, when: float, reason: str) -> None:
         self._at(when, {"type": "turn.done", "turn": self.turn, "reason": reason})

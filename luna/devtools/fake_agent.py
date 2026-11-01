@@ -108,6 +108,12 @@ class FakeAgent:
         elif kind == "mode.set":
             self.mode = cmd.get("mode", self.mode)
             self._at(now, {"type": "mode.changed", "mode": self.mode})
+        elif kind == "btw":
+            # Вопрос «в сторону»: отвечаем отдельным событием, ход не трогаем.
+            question = str(cmd.get("text", ""))
+            self._at(now + 0.3, {"type": "btw.answer",
+                                 "text": "В сторону, не сбивая ход: на «"
+                                         + question + "» — фальшивый ответ."})
         elif kind == "shell":
             command = cmd.get("command", "")
             self._at(now, {"type": "notice", "level": "info",

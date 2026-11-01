@@ -317,9 +317,12 @@ class ChatPanelsIntegrationTest(unittest.TestCase):
         app.submit_text("/panel луна")
         self.assertNotIn("moon", app.layout)
         app.submit_text("/panels")
-        self.assertIsNotNone(app._panel_menu)
-        idx = app._panel_menu.index("files")
-        app.handle_key(Key(str(idx + 1), char=str(idx + 1)))
+        # ЗАДАЧА-16: меню цифрами заменено общей выбиралкой.
+        self.assertIsNotNone(app.picker)
+        self.assertEqual(app._picker_kind, "panels")
+        item = next(it for it in app.picker.items if it.key == "files")
+        app.picker._sel_key = item.key
+        app.handle_key(Key("enter"))
         self.assertIn("files", app.layout)
         app.handle_key(Key("m", char="m", mods=frozenset({"alt"})))
         self.assertIn("moon", app.layout)

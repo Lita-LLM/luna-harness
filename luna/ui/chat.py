@@ -9,9 +9,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,14 +31,16 @@ from .editor import TextEditor
 from .keys import Key, Mouse, Paste, Resize
 from .markdown import Span, render_markdown, wrap_spans, wrap_text
 from .panels import LayoutTree, PanelData, create_panel, find_panel, registered_panels
-from .picker import PICKER_BG, SELECT_BG, Picker, manners_items, session_items
+from .picker import PICKER_BG, SELECT_BG, Picker, PickerItem, manners_items, session_items
 from .screen import Buffer, Screen
 from .term import Terminal
 from .width import char_width, str_width
 
 MODES = ("normal", "plan", "review", "auto", "yolo")
 _PANEL_KEYS = {"alt+m": "moon", "alt+l": "limits", "alt+b": "backside",
-               "alt+f": "files", "alt+n": "nibbler"}
+               "alt+f": "files", "alt+n": "nibbler",
+               "alt+c": "context", "alt+g": "git", "alt+p": "processes",
+               "alt+t": "tree"}
 _PANEL_ANIM_SEC = 0.22   # мягкое появление/закрытие колонки панелей
 _NIBBLER_SHOW_SEC = 9.0  # сколько живёт строка Ниблера над вводом
 STATUS_BG = (0x16, 0x1B, 0x30)
@@ -66,27 +71,70 @@ _STYLE_MAP = {
     "notice": (_color.VIOLET, _color.DIM),
 }
 
+# Реестр команд чата (ЗАДАЧА-16): один источник для диспетчера /-команд,
+# выбиралки /help, Tab-дополнения после «/» и текстовой справки HELP_TEXT.
+# Опись решений по эталонам — docs/research/КОМАНДЫ.md.
+COMMANDS = [
+    ("help", "выбиралка всех команд с поиском"),
+    ("mode", "режим: /mode [normal|plan|review|auto|yolo], без аргумента — по кругу"),
+    ("model", "модель по ролям — выбиралка, смена на лету"),
+    ("cost", "расход сессии: токены и стоимость"),
+    ("usage", "расход и лимиты провайдера — что отдали события"),
+    ("context", "панель «Контекст»: состав контекста по долям"),
+    ("status", "состояние сессии одной справкой"),
+    ("doctor", "диагностика установки и настроек — в ленту"),
+    ("init", "агент создаёт или обновляет AGENTS.md проекта"),
+    ("memory", "открыть AGENTS.md проекта во внешнем редакторе"),
+    ("review", "агент ревьюит текущий git-дифф: /review [фокус]"),
+    ("export", "сохранить сессию в markdown-файл"),
+    ("copy", "скопировать последний ответ; /copy err — последнюю ошибку"),
+    ("sessions", "выбиралка сессий на диске"),
+    ("new", "начать новую сессию"),
+    ("rename", "имя текущей сессии: /rename <имя>"),
+    ("manners", "выбиралка манер речи"),
+    ("undo", "откатить последний ход"),
+    ("rewind", "откат к ходу: /rewind [N] [files|talk|both]; без аргументов — выбиралка ходов"),
+    ("redo", "вернуть откат"),
+    ("compact", "сжать контекст: /compact [что сохранить]"),
+    ("clear", "очистить ленту"),
+    ("panels", "выбиралка панелей-тайлов"),
+    ("panel", "панель по имени: /panel <имя>"),
+    ("layout", "раскладки панелей: /layout save|load|list <имя>"),
+    ("todo", "панель «План»"),
+    ("mcp", "MCP-серверы: выбиралка статуса и включения"),
+    ("agents", "экипаж агентов (строится — ЗАДАЧА-11)"),
+    ("theme", "тема оформления: luna, contrast, mono"),
+    ("editor", "сочинить сообщение во внешнем редакторе"),
+    ("details", "детали ленты вкл/выкл: вывод тулов свёрнуто или скрыто"),
+    ("thinking", "показ рассуждений в ленте вкл/выкл"),
+    ("btw", "вопрос в сторону, не сбивая ход: /btw <вопрос>"),
+    ("bug", "отчёт об ошибке файлом: версия, окружение, ошибки (без секретов)"),
+    ("diff", "панель «Git»: ветка, изменения, дифф"),
+    ("add-dir", "добавить каталог для @-подсказок: /add-dir <путь>"),
+    ("exit", "выход (алиас /quit)"),
+]
+COMMAND_DESCR = dict(COMMANDS)
+# Команды, которым нужен аргумент: из /help они не выполняются, а встают
+# в поле ввода заготовкой «/команда ».
+_NEEDS_ARG = {"rename", "panel", "layout", "add-dir", "btw", "copy",
+              "mode", "compact", "review"}
+# Темы оформления (/theme, настройка ui.theme): акценты ленты поверх палитры.
+_THEMES = (("luna", "Луна", "родная палитра"),
+           ("contrast", "Контраст", "приглушённый текст ярче — для слабых терминалов"),
+           ("mono", "Монохром", "один серебристый цвет, без акцентов"))
+
 HELP_TEXT = """Команды и клавиши Луны
-/mode [режим] — режим по кругу или по имени (normal plan review auto yolo)
-/clear — очистить ленту · /help — эта справка · /exit — выход
-/copy — скопировать последний ответ · /copy err — последнюю ошибку целиком
-/sessions — выбиралка сессий на диске: Enter — переключиться на сессию
-/new — начать новую сессию · /rename <имя> — имя текущей сессии
-/manners — выбиралка манер речи: Enter — включить, n — новая, e — открыть в редакторе
-/undo — откатить последний ход · /rewind [N] [files|talk|both] — откат к ходу N · /redo — вернуть откат
-/compact [что сохранить] — сжать контекст («прилив»: старые ходы заменит сводка)
-Выделение мышью: протяжка по ленте копирует текст, двойной клик — слово
+""" + "\n".join("/" + name + " — " + desc for name, desc in COMMANDS) + """
+Выбиралки: печатать — поиск · ↑↓ — выбор · Enter — действие · Esc — закрыть
+/panels — все тайлы выбиралкой · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер · Alt+C/G/P/T — Контекст, Git, Процессы, Дерево
+Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера)
+Esc Esc на пустом вводе — откат к ходу выбиралкой · Esc Esc во время хода — прервать ход
+!команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить; Tab после / — дополнить команду)
+Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор · Tab / Shift+Tab — режим по кругу
+Ctrl+O — раскрыть/свернуть детали записи · F6 — фокус в панели; в панелях: ↑↓ фокус, ←→ размер, Enter — развернуть, Esc — назад
+PgUp / PgDn и колесо мыши — прокрутка ленты · выделение мышью: протяжка копирует текст, двойной клик — слово
 Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
-/panels — меню панелей · /panel <имя> — панель по имени (Луна, Лимиты, Обратная сторона, Файлы, Ниблер)
-/layout save|load|list <имя> — раскладки · Ctrl+T — план · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер
-Ниблер — компаньон над полем ввода: изредка комментирует работу агента; серьёзное уходит агенту пометкой (настройки nibbler.*)
-!команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить путь)
-Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор
-Печатать можно во время работы: сообщение встанет в очередь
-Esc Esc — прервать ход · Tab / Shift+Tab — режим по кругу
-Ctrl+O — раскрыть/свернуть детали (рассуждения, вывод тула, план)
-F6 — фокус в панели; в панелях: ↑↓ фокус, ←→ размер, Enter — развернуть, Esc — назад
-PgUp / PgDn и колесо мыши — прокрутка ленты"""
+Ниблер — компаньон над полем ввода: изредка комментирует работу агента; серьёзное уходит агенту пометкой (настройки nibbler.*)"""
 
 
 def create_source(settings=None, *, fake: bool = True):
@@ -152,7 +200,7 @@ def compact_args(name: str, args: dict) -> str:
 
 @dataclass
 class Entry:
-    kind: str  # user | agent | thinking | tool | guard | ask | todo | notice | error | help | shell
+    kind: str  # user | agent | thinking | tool | guard | ask | todo | notice | error | help | shell | btw
     text: str = ""
     name: str = ""
     intent: str = ""
@@ -229,7 +277,6 @@ class ChatApp:
         # Панели с наполнением и Ниблер (ЗАДАЧА-14): PanelData собирает
         # состояние из событий, Ниблер наблюдает тот же поток.
         self.panel_data = PanelData()
-        self._panel_menu: list | None = None
         self._panel_anim: tuple | None = None  # (ширина-от, ширина-до, старт)
         self._panel_anchor: tuple | None = None  # (ширина, момент) — старт анимации
         self._panel_shown_w = 0.0              # ширина колонки на прошлом кадре
@@ -240,6 +287,14 @@ class ChatApp:
         self.guard_editing = False
         self.completions: list = []
         self.completion_index = 0
+        # ЗАДАЧА-16: дополнение команд после «/», доп. каталоги @-подсказок,
+        # vim-режим ввода, запрос полной перерисовки (Ctrl+L), вид правки.
+        self.cmd_completions: list = []       # [(команда, описание)]
+        self.extra_dirs: list = []
+        self._vim_normal = False
+        self._vim_pending = ""
+        self._redraw = False
+        self._edit_kind = ""                  # "" (манеры) | memory | compose
         # Копирование (п. 4): хук в буфер обмена ставит run_chat; выделение —
         # пара ((строка, колонка), (строка, колонка)) визуальных линий ленты.
         self.copy_hook = copy_hook
@@ -536,6 +591,254 @@ class ChatApp:
         self._picker_kind = "manners"
         self._last_change = self._clock()
 
+    # --- выбиралки ЗАДАЧИ-16: панели, справка, модели, MCP, прочее -------------
+
+    def _open_picker(self, kind: str, title: str, items: list, *,
+                     hint: str = "", extra: dict | None = None,
+                     preview_lines: int = 5) -> None:
+        self.picker = Picker(title, items, hint=hint, extra=extra,
+                             preview_lines=preview_lines, now=self._clock())
+        self._picker_kind = kind
+        self._last_change = self._clock()
+
+    def open_panels_picker(self) -> None:
+        """/panels: все тайлы выбиралкой (бывшее меню цифрами — заменено)."""
+        items = []
+        for spec in registered_panels().values():
+            opened = spec.panel_id in self.layout
+            items.append(PickerItem(
+                key=spec.panel_id, title=spec.title,
+                detail=spec.panel_id + " · " + ("открыта" if opened else "закрыта"),
+                mark="→" if opened else ""))
+        self._open_picker("panels", "Панели", items,
+                          hint="Enter — открыть/закрыть · Esc — закрыть",
+                          preview_lines=0)
+
+    def open_help_picker(self) -> None:
+        """/help: команды выбиралкой с поиском, не простынёй текста."""
+        items = [PickerItem(key=name, title="/" + name, detail=desc)
+                 for name, desc in COMMANDS]
+        self._open_picker("help", "Команды Луны", items,
+                          hint="печатайте — поиск · Enter — выполнить "
+                               "или вставить заготовку · Esc — закрыть",
+                          preview_lines=0)
+
+    def open_models_picker(self) -> None:
+        """/model: роли выбиралкой; Enter — задать ссылку роли на лету."""
+        from .panels.models import ROLES
+
+        items = []
+        for role, title in ROLES:
+            ref = str(self.settings.get("model." + role) or "")
+            detail = ref if ref else ("не задана" if role == "main" else "как главная")
+            items.append(PickerItem(key=role, title=role + " — " + title,
+                                    detail=detail))
+        self._open_picker("models", "Модель по ролям", items,
+                          hint="Enter — задать модель роли · Esc — закрыть",
+                          preview_lines=0)
+
+    def _mcp_items(self) -> list:
+        from .panels.mcp import load_servers
+
+        try:
+            servers, problems = load_servers(self)
+        except Exception as exc:  # noqa: BLE001 — битый конфиг не роняет экран
+            return [PickerItem(key="", title="Не вышло прочитать конфиги",
+                               detail=str(exc))]
+        items = []
+        for problem in problems:
+            items.append(PickerItem(key="", title="! " + problem))
+        for name in sorted(servers):
+            cfg = servers[name]
+            detail = cfg.transport + " · " + (cfg.source or "?") + " · " \
+                + ("включён" if cfg.enabled else "выключен")
+            items.append(PickerItem(key=name, title=name, detail=detail,
+                                    mark="→" if cfg.enabled else "",
+                                    payload=cfg))
+        if not items:
+            items.append(PickerItem(key="", title="MCP-серверы не настроены",
+                                    detail="luna mcp add — добавить"))
+        return items
+
+    def open_mcp_picker(self) -> None:
+        """/mcp: серверы выбиралкой: Enter — панель, t — вкл/выкл в конфиге."""
+        self._open_picker("mcp", "MCP-серверы", self._mcp_items(),
+                          hint="Enter — панель MCP · t — включить/выключить "
+                               "(лунные конфиги) · Esc — закрыть",
+                          extra={"t": "toggle"}, preview_lines=0)
+
+    def open_agents_picker(self) -> None:
+        """/agents: заглушка под «Экипаж» ЗАДАЧИ-11."""
+        items = [
+            PickerItem(key="main", title="Главный агент — эта сессия",
+                       detail="модель: " + self.model + " · режим: " + self.mode,
+                       mark="→"),
+            PickerItem(key="crew", title="Экипаж: рой и временные агенты",
+                       detail="строится в ЗАДАЧЕ-11 — здесь будет его выбиралка "
+                              "и панель «Экипаж»"),
+        ]
+        self._open_picker("agents", "Агенты", items,
+                          hint="Esc — закрыть", preview_lines=0)
+
+    def open_theme_picker(self) -> None:
+        """/theme: тема оформления выбиралкой (настройка ui.theme)."""
+        current = str(self.settings.get("ui.theme") or "luna")
+        items = [PickerItem(key=key, title=title, detail=desc,
+                            mark="→" if key == current else "")
+                 for key, title, desc in _THEMES]
+        self._open_picker("theme", "Тема оформления", items,
+                          hint="Enter — включить · Esc — закрыть",
+                          preview_lines=0)
+
+    def open_history_picker(self) -> None:
+        """Ctrl+R: история ввода выбиралкой с поиском (фильтр печатанием)."""
+        items = []
+        for i, text in enumerate(reversed(self.editor.history)):
+            items.append(PickerItem(key=str(i), title=text.split("\n")[0][:72],
+                                    preview=text, payload=text))
+        if not items:
+            items.append(PickerItem(key="", title="История ввода пуста"))
+        self._open_picker("history", "История ввода", items,
+                          hint="печатайте — поиск · Enter — в поле ввода · "
+                               "Esc — закрыть", preview_lines=3)
+
+    def open_rewind_picker(self) -> None:
+        """/rewind без аргументов и Esc Esc: ходы сессии выбиралкой."""
+        turns = [e for e in self.entries if e.kind == "user"]
+        if not turns:
+            self._add(Entry("notice", text="Откатывать нечего: ходов ещё не было."))
+            return
+        items = []
+        for n, entry in enumerate(turns, 1):
+            items.append(PickerItem(
+                key=str(n), title=entry.text.split("\n")[0][:64],
+                detail="ход " + str(n) + " из " + str(len(turns))))
+        items.reverse()
+        self._open_picker("rewind", "Откат к ходу", items,
+                          hint="Enter — откатить разговор и файлы к этому ходу "
+                               "· Esc — закрыть", preview_lines=0)
+
+    def open_adddir_picker(self) -> None:
+        """/add-dir без пути: спросить путь строкой в выбиралке."""
+        self._open_picker("adddir", "Добавить каталог", [],
+                          hint="", preview_lines=0)
+        if self.picker is not None:
+            self.picker.ask_input("Каталог для @-подсказок: ", ("adddir", None))
+
+    def _extra_picker_action(self, action) -> None:
+        """Действия выбиралок ЗАДАЧИ-16 по виду выбиралки."""
+        kind = self._picker_kind
+        if action[0] == "pick" and action[1] is not None:
+            item = action[1]
+            if kind == "panels":
+                self.picker = None
+                self.toggle_panel(item.key)
+            elif kind == "help":
+                self.picker = None
+                if item.key in _NEEDS_ARG:
+                    self.editor.set_text("/" + item.key + " ")
+                else:
+                    self._slash("/" + item.key)
+            elif kind == "models":
+                current = str(self.settings.get("model." + item.key) or "")
+                self.picker.ask_input(
+                    "Модель роли " + item.key + " («провайдер:модель» или "
+                    "модель; пусто — как главная): ", ("role", item.key),
+                    initial=current)
+            elif kind == "mcp":
+                self.picker = None
+                if item.key:
+                    self.toggle_panel("mcp")
+            elif kind == "agents":
+                self.picker = None
+                if item.key == "crew":
+                    self._add(Entry("notice", text="Экипаж строится в ЗАДАЧЕ-11: "
+                                                   "здесь будет выбиралка роя."))
+            elif kind == "theme":
+                self.picker = None
+                self.settings.set("ui.theme", item.key)
+                self._add(Entry("notice", text="Тема оформления: " + item.key))
+            elif kind == "history":
+                self.picker = None
+                if item.payload:
+                    self.editor.set_text(str(item.payload))
+            elif kind == "rewind":
+                self.picker = None
+                self.send_command({"type": "rewind", "turn": int(item.key),
+                                   "scope": "both"})
+            return
+        if action[0] == "action" and kind == "mcp" and action[1] == "toggle":
+            item = action[2]
+            if item is not None and item.key:
+                self._mcp_toggle(item)
+            return
+        if action[0] == "input":
+            text, ctx = action[1], action[2]
+            if kind == "models" and ctx is not None and ctx[0] == "role":
+                role = ctx[1]
+                self.settings.set("model." + role, text)
+                self.picker = None
+                label = text if text else "(как главная)"
+                self._add(Entry("notice", text="Модель роли " + role + ": "
+                                               + label + " — со следующего хода."))
+            elif kind == "adddir":
+                self.picker = None
+                if text:
+                    self._add_dir(text)
+
+    def _mcp_toggle(self, item) -> None:
+        """Вкл/выкл MCP-сервера правкой его лунного конфига (enabled).
+
+        Чужие форматы не трогаем молча: opencode.json может быть JSONC с
+        комментариями — перезапись стёрла бы их; там честно отказываем.
+        Применится при следующем подключении серверов (ядро читает конфиги
+        при старте серверов, не на каждый вызов).
+        """
+        cfg = item.payload
+        label = getattr(cfg, "source", "") or ""
+        targets = {
+            "LUNA_HOME/mcp.json": (self._data_dir().root / "mcp.json", "mcpServers"),
+            ".mcp.json": (Path(self.cwd) / ".mcp.json", "mcpServers"),
+            ".luna/mcp.json": (Path(self.cwd) / ".luna" / "mcp.json", "mcpServers"),
+        }
+        if label not in targets:
+            self._add(Entry("notice", text="Сервер из " + (label or "чужого конфига")
+                                           + " отсюда не переключаю: поправь enabled вручную."))
+            return
+        path, section = targets[label]
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entry = data[section][item.key]
+            entry["enabled"] = not bool(cfg.enabled)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._add(Entry("error", text="Не вышло переключить " + item.key
+                                          + ": " + str(exc)))
+            return
+        state = "выключен" if cfg.enabled else "включён"
+        self._add(Entry("notice", text="MCP-сервер " + item.key + " " + state
+                                       + " в " + label + " — применится при "
+                                       "следующем подключении серверов."))
+        if self.picker is not None:
+            self.picker.set_items(self._mcp_items())
+
+    def _add_dir(self, text: str) -> None:
+        """/add-dir: каталог для @-подсказок этой сессии."""
+        raw = text.strip()
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = Path(self.cwd) / path
+        if not path.is_dir():
+            self._add(Entry("notice", text="Нет такого каталога: " + raw))
+            return
+        value = str(path)
+        if value not in self.extra_dirs:
+            self.extra_dirs.append(value)
+        self._add(Entry("notice", text="Каталог для @-подсказок: " + value
+                                       + " (доступ тулов к нему — за ядром, "
+                                       "со следующей сессии агента)"))
+
     def _picker_key(self, key: Key) -> None:
         picker = self.picker
         if picker is None:
@@ -558,6 +861,9 @@ class ChatApp:
             self._sessions_picker_action(action)
         elif self._picker_kind == "manners":
             self._manners_picker_action(action)
+        elif self._picker_kind in ("panels", "help", "models", "mcp", "agents",
+                                   "theme", "history", "rewind", "adddir"):
+            self._extra_picker_action(action)
 
     def _sessions_picker_action(self, action) -> None:
         if action[0] == "confirmed":
@@ -619,6 +925,28 @@ class ChatApp:
 
     def after_edit(self, path) -> None:
         """run_chat вернулся из внешнего редактора: подхватить правки."""
+        kind, self._edit_kind = self._edit_kind, ""
+        if kind == "compose":
+            # /editor: текст файла — черновик сообщения в поле ввода.
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            self.editor.set_text(text.strip("\n"))
+            self._add(Entry("notice", text="Сообщение — из редактора; "
+                                           "Enter отправит."))
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+            self._last_change = self._clock()
+            return
+        if kind == "memory":
+            # /memory: проектные инструкции подхватит агент со следующего хода.
+            self._add(Entry("notice", text="AGENTS.md обновлён из редактора — "
+                                           "агент подхватит со следующего хода."))
+            self._last_change = self._clock()
+            return
         if self._picker_kind == "manners" and self.picker is not None:
             self.picker.set_items(manners_items(self.settings, self.cwd))
         self._add(Entry("notice", text="Файл обновлён из редактора: " + str(path)
@@ -753,6 +1081,9 @@ class ChatApp:
             self.mode = str(ev.get("mode") or self.mode)
         elif kind == "notice":
             self._add(Entry("notice", text=str(ev.get("text", ""))))
+        elif kind == "btw.answer":
+            # Ответ «в сторону»: отдельной записью, ход и история не тронуты.
+            self._add(Entry("btw", text=str(ev.get("text", ""))))
         elif kind == "error":
             text = str(ev.get("message", ""))
             detail = str(ev.get("detail", ""))
@@ -810,10 +1141,10 @@ class ChatApp:
             keys = ", ".join(c["key"] for c in changes[:6]) + (" …" if len(changes) > 6 else "")
             self._add(Entry("notice", text="Настройки обновлены из файла: " + keys))
 
-    def _send_user_message(self, text: str) -> None:
+    def _send_user_message(self, text: str, display: str | None = None) -> None:
         attachments = [tok[1:] for tok in text.split()
                        if tok.startswith("@") and len(tok) > 1]
-        self._add(Entry("user", text=text))
+        self._add(Entry("user", text=text if display is None else display))
         out_text = text
         if self.nibbler is not None:
             # Серьёзные замечания Ниблера уходят агенту пометкой в этот ход;
@@ -853,13 +1184,14 @@ class ChatApp:
     def _slash(self, text: str) -> None:
         parts = text.split()
         cmd = parts[0]
-        if cmd == "/exit":
+        rest = text[len(cmd):].strip()
+        if cmd in ("/exit", "/quit"):
             self.done = True
         elif cmd == "/clear":
             self.entries.clear()
             self._add(Entry("notice", text="Лента очищена."))
         elif cmd == "/help":
-            self._add(Entry("help", text=HELP_TEXT))
+            self.open_help_picker()
         elif cmd == "/mode":
             if len(parts) > 1 and parts[1] in MODES:
                 self.send_command({"type": "mode.set", "mode": parts[1]})
@@ -867,9 +1199,55 @@ class ChatApp:
                 self._add(Entry("notice", text="Нет режима " + parts[1]))
             else:
                 self.cycle_mode(1)
+        elif cmd in ("/model", "/models"):
+            self._model_command(parts[1:])
+        elif cmd == "/cost":
+            self._usage_command(usage=False)
+        elif cmd == "/usage":
+            self._usage_command(usage=True)
+        elif cmd == "/context":
+            self.toggle_panel("context")
+        elif cmd == "/status":
+            self._status_command()
+        elif cmd in ("/doctor", "/checkup"):
+            self._doctor_command()
+        elif cmd == "/init":
+            self._init_command()
+        elif cmd == "/memory":
+            self._memory_command()
+        elif cmd == "/review":
+            self._review_command(rest)
+        elif cmd == "/export":
+            self._export_command()
+        elif cmd == "/bug":
+            self._bug_command()
+        elif cmd == "/btw":
+            self._btw_command(rest)
+        elif cmd == "/diff":
+            self.toggle_panel("git")
+        elif cmd == "/add-dir":
+            if rest:
+                self._add_dir(rest)
+            else:
+                self.open_adddir_picker()
+        elif cmd == "/mcp":
+            if len(parts) > 1:
+                self.toggle_panel("mcp")
+            else:
+                self.open_mcp_picker()
+        elif cmd == "/agents":
+            self.open_agents_picker()
+        elif cmd == "/theme":
+            self.open_theme_picker()
+        elif cmd == "/editor":
+            self._editor_command()
+        elif cmd == "/details":
+            self._flip_setting("ui.details", "Детали ленты")
+        elif cmd == "/thinking":
+            self._flip_setting("ui.show_thinking", "Рассуждения в ленте")
         elif cmd == "/copy":
             self._copy_command(parts[1:])
-        elif cmd == "/sessions":
+        elif cmd in ("/sessions", "/resume", "/continue"):
             self.open_sessions_picker()
         elif cmd == "/manners":
             self.open_manners_picker()
@@ -880,27 +1258,273 @@ class ChatApp:
         elif cmd == "/undo":
             self.send_command({"type": "undo"})
         elif cmd == "/rewind":
-            self._rewind_command(parts[1:])
+            if len(parts) > 1:
+                self._rewind_command(parts[1:])
+            else:
+                self.open_rewind_picker()
         elif cmd == "/redo":
             self.send_command({"type": "redo"})
-        elif cmd == "/compact":
-            hint = text[len("/compact"):].strip()
+        elif cmd in ("/compact", "/summarize"):
+            hint = text[len(cmd):].strip()
             self.send_command({"type": "compact", "hint": hint})
         elif cmd == "/todo":
             self.toggle_panel("todo")
         elif cmd == "/panel":
             self._panel_command(parts[1:])
         elif cmd == "/panels":
-            self._panels_menu()
+            self.open_panels_picker()
         elif cmd == "/layout":
             self._layout_command(parts[1:])
         elif not self._compat_command(cmd, text):
             self._add(Entry("notice", text="Не знаю команду " + cmd + " — /help подскажет."))
 
-    def _panel_command(self, args: list) -> None:
-        """/panel <имя> — панель по id, названию или алиасу; без имени — меню."""
+    # --- команды ЗАДАЧИ-16 ---------------------------------------------------
+
+    def _flip_setting(self, key: str, title: str) -> None:
+        """Выключатель настройкой из чата: /details, /thinking."""
+        value = not bool(self.settings.get(key))
+        self.settings.set(key, value)
+        self._add(Entry("notice", text=title + ": " + ("вкл" if value else "выкл")))
+
+    def _model_command(self, args: list) -> None:
+        """/model: выбиралка ролей; /model <ссылка> — главной; /model <роль> <ссылка>."""
+        from .panels.models import ROLES
+
+        roles = {role for role, _title in ROLES}
         if not args:
-            self._panels_menu()
+            self.open_models_picker()
+            return
+        if len(args) >= 2 and args[0] in roles:
+            role, ref = args[0], args[1]
+        elif len(args) == 1:
+            role, ref = "main", args[0]
+        else:
+            self._add(Entry("notice", text="Нужно: /model, /model <модель> "
+                                           "или /model <роль> <модель>"))
+            return
+        self.settings.set("model." + role, ref)
+        self._add(Entry("notice", text="Модель роли " + role + ": " + ref
+                                       + " — со следующего хода."))
+
+    def _usage_command(self, *, usage: bool) -> None:
+        """/cost и /usage: расход сессии из PanelData (события usage)."""
+        data = self.panel_data
+        turns = sum(1 for e in self.entries if e.kind == "user")
+        lines = ["расход сессии",
+                 "ходов: " + str(turns),
+                 "токены: вход " + str(data.tokens_in) + " · выход "
+                 + str(data.tokens_out)]
+        if data.cache_seen:
+            lines.append("кэш: " + str(data.cache))
+        lines.append("стоимость: $" + format(data.cost, ".4f"))
+        lines.append("контекст: " + str(data.context_pct) + "%")
+        if usage:
+            if turns:
+                lines.append("средний ход: $" + format(data.cost / turns, ".4f"))
+            if data.limits:
+                lines.append("лимиты провайдера:")
+                lines.extend("  " + str(k) + ": " + str(v)
+                             for k, v in data.limits.items())
+            else:
+                lines.append("лимиты: провайдер событиями не отдал")
+        self._add(Entry("help", text="\n".join(lines)))
+
+    def _status_command(self) -> None:
+        """/status: состояние сессии одной справкой."""
+        from .. import __version__
+
+        turns = sum(1 for e in self.entries if e.kind == "user")
+        session = "без журнала"
+        if self.journal is not None:
+            session = str(getattr(self.journal, "path", "") or "журнал включён")
+        panels = ", ".join(self.layout.leaves()) or "нет"
+        lines = ["Луна " + str(__version__),
+                 "режим: " + self.mode + " · модель: " + self.model,
+                 "каталог: " + self.cwd,
+                 "сессия: " + session,
+                 "контекст: " + str(self.context_pct) + "% · стоимость: $"
+                 + format(self.cost, ".4f") + " · ходов: " + str(turns),
+                 "панели открыты: " + panels,
+                 "тема: " + str(self.settings.get("ui.theme"))
+                 + " · статус-строка: " + str(self.settings.get("ui.statusline"))]
+        if self.extra_dirs:
+            lines.append("доп. каталоги: " + ", ".join(self.extra_dirs))
+        self._add(Entry("help", text="\n".join(lines)))
+
+    def _doctor_command(self) -> None:
+        """/doctor в чате: тот же run_doctor, что у luna doctor, — в ленту."""
+        from ..diagnostics.doctor import run_doctor
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_doctor()
+        text = buf.getvalue().strip()
+        self._add(Entry("help", text=text or "doctor ничего не сказал"))
+
+    def _init_command(self) -> None:
+        """/init: агент создаёт/обновляет AGENTS.md проекта обычным ходом."""
+        prompt = ("Изучи проект в текущем каталоге и создай или обнови файл "
+                  "AGENTS.md: что за проект, стек, как собирать и тестировать, "
+                  "ключевые файлы и договорённости. Если AGENTS.md уже есть — "
+                  "дополни и поправь устаревшее, не переписывай с нуля.")
+        if self.busy:
+            self.queue.append(prompt)
+            self._add(Entry("notice", text="В очереди: /init"))
+            return
+        self._send_user_message(prompt, display="/init — AGENTS.md проекта")
+
+    def _review_command(self, focus: str) -> None:
+        """/review: агент ревьюит текущий git-дифф обычным ходом."""
+        prompt = ("Проведи ревью текущих изменений: выполни git diff и "
+                  "git diff --cached, оцени корректность, риски и стиль. "
+                  "Замечания — списком по серьёзности, правок не вноси.")
+        if focus:
+            prompt += " Фокус ревью: " + focus
+        if self.busy:
+            self.queue.append(prompt)
+            self._add(Entry("notice", text="В очереди: /review"))
+            return
+        self._send_user_message(prompt, display="/review — ревью диффа")
+
+    def _memory_command(self) -> None:
+        """/memory: AGENTS.md проекта — во внешний редактор."""
+        path = Path(self.cwd) / "AGENTS.md"
+        if not path.exists():
+            try:
+                path.write_text("# AGENTS.md\n\nИнструкции проекта для Луны.\n",
+                                encoding="utf-8")
+            except OSError as exc:
+                self._add(Entry("error", text="Не вышло создать AGENTS.md: "
+                                              + str(exc)))
+                return
+        self._edit_kind = "memory"
+        self.edit_request = str(path)
+
+    def _editor_command(self) -> None:
+        """/editor: черновик сообщения — во внешний редактор и обратно."""
+        path = Path(tempfile.gettempdir()) / "luna-compose.md"
+        try:
+            path.write_text(self.editor.text, encoding="utf-8")
+        except OSError as exc:
+            self._add(Entry("error", text="Не вышло подготовить файл: " + str(exc)))
+            return
+        self._edit_kind = "compose"
+        self.edit_request = str(path)
+
+    def _export_command(self) -> None:
+        """/export: лента сессии — в markdown-файл текущего каталога."""
+        lines = ["# Сессия Луны — "
+                 + time.strftime("%Y-%m-%d %H:%M", time.localtime()), ""]
+        count = 0
+        for entry in self.entries:
+            if entry.kind == "user":
+                lines.append("## Человек\n\n" + entry.text + "\n")
+            elif entry.kind == "agent":
+                lines.append("## Луна\n\n" + entry.text + "\n")
+            elif entry.kind == "btw":
+                lines.append("## В сторону\n\n" + entry.text + "\n")
+            elif entry.kind == "thinking":
+                lines.append("> Рассуждения: " + entry.text + "\n")
+            elif entry.kind == "tool":
+                head = "### Тул: " + (entry.name or "tool")
+                if entry.summary:
+                    head += " — " + entry.summary
+                lines.append(head + "\n")
+                if entry.output:
+                    lines.append("```\n" + entry.output.rstrip() + "\n```\n")
+            elif entry.kind == "shell":
+                lines.append("`$ " + entry.text + "`\n")
+            elif entry.kind == "error":
+                lines.append("## Ошибка\n\n" + entry.text + "\n")
+            elif entry.kind == "notice":
+                lines.append("> " + entry.text + "\n")
+            else:
+                continue
+            count += 1
+        name = "luna-session-" + time.strftime("%Y%m%d-%H%M%S") + ".md"
+        path = Path(self.cwd) / name
+        try:
+            path.write_text("\n".join(lines), encoding="utf-8")
+        except OSError as exc:
+            self._add(Entry("error", text="Не вышло записать экспорт: " + str(exc)))
+            return
+        self._add(Entry("notice", text="Сессия сохранена: " + str(path)
+                                       + " (записей: " + str(count) + ")"))
+
+    def _bug_command(self) -> None:
+        """/bug: отчёт об ошибке локальным файлом. Секретов в нём нет:
+        настройки — без ключей/токенов, секреты живут отдельным файлом
+        и сюда не читаются вовсе."""
+        import platform
+        import sys
+
+        from .. import __version__
+
+        lines = ["# Отчёт об ошибке Луны",
+                 "",
+                 "версия: " + str(__version__),
+                 "дата: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                 "платформа: " + platform.platform(),
+                 "python: " + sys.version.split()[0],
+                 "каталог: " + self.cwd,
+                 "модель: " + self.model + " · режим: " + self.mode,
+                 "",
+                 "## Настройки (без секретов)"]
+        try:
+            for item in self.settings.describe():
+                key = str(item.get("key", ""))
+                if any(word in key for word in ("secret", "token", "key", "password")):
+                    continue
+                lines.append(key + " = " + str(item.get("value", "")))
+        except Exception:  # noqa: BLE001 — отчёт важнее полноты
+            lines.append("(не вышло прочитать настройки)")
+        errors = [e for e in self.panel_data.backside if e.get("kind") == "error"]
+        lines.append("")
+        lines.append("## Последние ошибки (журнал событий)")
+        if errors:
+            for entry in errors[-5:]:
+                lines.append("### " + str(entry.get("title", "")))
+                lines.append(str(entry.get("body", "")))
+        else:
+            lines.append("ошибок в журнале нет")
+        feed_errors = [e.text for e in self.entries if e.kind == "error"]
+        if feed_errors:
+            lines.append("")
+            lines.append("## Ошибки в ленте")
+            lines.extend("- " + text.split("\n")[0] for text in feed_errors[-5:])
+        name = "bug-" + time.strftime("%Y%m%d-%H%M%S") + ".md"
+        path = self._data_dir().logs / name
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            self._add(Entry("error", text="Не вышло записать отчёт: " + str(exc)))
+            return
+        self._add(Entry("notice", text="Отчёт об ошибке: " + str(path)
+                                       + " — секретов в нём нет, приложи к обращению."))
+
+    def _btw_command(self, question: str) -> None:
+        """/btw: вопрос в сторону. Экран и фальшивый агент готовы; настоящее
+        ядро команду btw в контракте пока не знает — честно говорим об этом,
+        а не делаем вид, что вопрос ушёл."""
+        if not question:
+            self._add(Entry("notice", text="Нужно: /btw <вопрос>"))
+            return
+        from ..devtools.fake_agent import FakeAgent
+
+        if not isinstance(self.source, FakeAgent):
+            self._add(Entry("notice", text="Настоящее ядро пока не умеет /btw: "
+                                           "нужна команда btw в контракте событий "
+                                           "(записано постановщику). Задайте вопрос "
+                                           "обычным сообщением."))
+            return
+        self._add(Entry("btw", text="в сторону: " + question))
+        self.send_command({"type": "btw", "text": question})
+
+    def _panel_command(self, args: list) -> None:
+        """/panel <имя> — панель по id, названию или алиасу; без имени — выбиралка."""
+        if not args:
+            self.open_panels_picker()
             return
         spec = find_panel(" ".join(args))
         if spec is None:
@@ -908,16 +1532,6 @@ class ChatApp:
                                            + "» — /panels покажет все."))
             return
         self.toggle_panel(spec.panel_id)
-
-    def _panels_menu(self) -> None:
-        """Простое меню панелей: список в ленту; дальше — цифра или /panel <имя>."""
-        specs = list(registered_panels().values())
-        self._panel_menu = [spec.panel_id for spec in specs]
-        lines = ["Панели (цифра — открыть/закрыть · /panel <имя> — по имени):"]
-        for i, spec in enumerate(specs, 1):
-            mark = "открыта" if spec.panel_id in self.layout else "закрыта"
-            lines.append(str(i) + " · " + spec.title + " — " + mark)
-        self._add(Entry("help", text="\n".join(lines)))
 
     def _layout_command(self, args: list) -> None:
         if not args:
@@ -1091,15 +1705,17 @@ class ChatApp:
         if self.panel_focus:
             self._panel_key(key)
             return
-        if self._panel_menu is not None:
-            menu, self._panel_menu = self._panel_menu, None
-            if key.char and key.char.isdigit() and not self.editor.text:
-                idx = int(key.char) - 1
-                if 0 <= idx < len(menu):
-                    self.toggle_panel(menu[idx])
-                return
         if key.label in _PANEL_KEYS:
             self.toggle_panel(_PANEL_KEYS[key.label])
+            return
+        if key.label == "ctrl+r":
+            self.open_history_picker()
+            return
+        if key.label == "ctrl+l":
+            self._redraw = True  # run_chat перерисует кадр целиком
+            return
+        if key.label == "ctrl+v":
+            self._paste_clipboard()
             return
         if key.name == "f6":
             if self.layout.leaves():
@@ -1115,9 +1731,27 @@ class ChatApp:
             self._toggle_expand_latest()
             return
         if key.name == "esc":
+            # Vim-режим ввода: Esc в режиме ввода — переход в нормальный,
+            # а не прерывание и не откат (настройка ui.vim_mode).
+            if self.settings.get("ui.vim_mode") and not self._vim_normal:
+                if self.completions or self.cmd_completions:
+                    self.completions = []
+                    self.cmd_completions = []
+                    return
+                self._vim_normal = True
+                return
             self._esc_key()
             return
+        if self._vim_normal and self.settings.get("ui.vim_mode"):
+            self._vim_key(key)
+            return
         if key.name == "tab":
+            if self.cmd_completions:
+                if "shift" in key.mods:
+                    self.completion_index = (self.completion_index - 1) % len(self.cmd_completions)
+                else:
+                    self._apply_cmd_completion()
+                return
             if self.completions:
                 if "shift" in key.mods:
                     self.completion_index = (self.completion_index - 1) % len(self.completions)
@@ -1140,13 +1774,17 @@ class ChatApp:
                 self.submit_text()
             return
         if key.name == "up":
-            if self.completions:
+            if self.cmd_completions:
+                self.completion_index = (self.completion_index - 1) % len(self.cmd_completions)
+            elif self.completions:
                 self.completion_index = (self.completion_index - 1) % len(self.completions)
             elif not self.editor.up():
                 self.editor.history_prev()
             return
         if key.name == "down":
-            if self.completions:
+            if self.cmd_completions:
+                self.completion_index = (self.completion_index + 1) % len(self.cmd_completions)
+            elif self.completions:
                 self.completion_index = (self.completion_index + 1) % len(self.completions)
             elif not self.editor.down():
                 self.editor.history_next()
@@ -1158,8 +1796,9 @@ class ChatApp:
         now = self._clock()
         double = now - self._last_esc < 0.6
         self._last_esc = now
-        if self.completions:
+        if self.completions or self.cmd_completions:
             self.completions = []
+            self.cmd_completions = []
             return
         if double and self.busy:
             draft = self.editor.text
@@ -1167,6 +1806,107 @@ class ChatApp:
                 self._after_interrupt = draft
                 self.editor.clear()
             self.send_command({"type": "interrupt"})
+            return
+        if double and not self.editor.text.strip():
+            # Esc Esc на пустом вводе — к выбору хода для отката (как у эталонов).
+            self.open_rewind_picker()
+
+    # --- vim-режим ввода и вставка (ЗАДАЧА-16) --------------------------------
+
+    def _vim_key(self, key: Key) -> None:
+        """Нормальный режим vim-ввода: h l 0 $ w b — движение, x — символ,
+        dd — строка, i/a/A — обратно в ввод. Остальное глотаем молча."""
+        ed = self.editor
+        if self._vim_pending == "d":
+            self._vim_pending = ""
+            if key.char == "d":
+                self._vim_delete_line()
+            return
+        if key.name == "up":
+            ed.up() or ed.history_prev()
+            return
+        if key.name == "down":
+            ed.down() or ed.history_next()
+            return
+        if not key.char or key.mods:
+            return
+        ch = key.char
+        if ch == "h":
+            ed.left()
+        elif ch == "l":
+            ed.right()
+        elif ch == "0":
+            ed.line_home()
+        elif ch == "$":
+            ed.line_end()
+        elif ch == "w":
+            self._vim_word(1)
+        elif ch == "b":
+            self._vim_word(-1)
+        elif ch == "x":
+            ed.delete()
+        elif ch == "d":
+            self._vim_pending = "d"
+        elif ch == "i":
+            self._vim_normal = False
+        elif ch == "a":
+            ed.right()
+            self._vim_normal = False
+        elif ch == "A":
+            ed.line_end()
+            self._vim_normal = False
+
+    def _vim_word(self, step: int) -> None:
+        ed = self.editor
+        starts = [m.start() for m in re.finditer(r"\S+", ed.text)]
+        if step > 0:
+            target = next((s for s in starts if s > ed.cursor), None)
+            if target is not None:
+                ed.cursor = target
+            else:
+                ed.cursor = len(ed.text)
+        else:
+            target = next((s for s in reversed(starts) if s < ed.cursor), None)
+            if target is not None:
+                ed.cursor = target
+            else:
+                ed.cursor = 0
+
+    def _vim_delete_line(self) -> None:
+        ed = self.editor
+        text, cur = ed.text, ed.cursor
+        start = text.rfind("\n", 0, cur) + 1
+        end = text.find("\n", cur)
+        if end == -1:
+            ed.text = text[:start].rstrip("\n") if start else ""
+            ed.cursor = len(ed.text)
+        else:
+            ed.text = text[:start] + text[end + 1:]
+            ed.cursor = min(start, len(ed.text))
+
+    def _paste_clipboard(self) -> None:
+        """Ctrl+V: текст из буфера — в ввод; путь к файлу картинки — @вложением.
+
+        Саму картинку терминал приложению не отдаёт (вставка несёт только
+        текст), поэтому честный максимум — путь к файлу из буфера.
+        """
+        text = _clipboard_text()
+        stripped = text.strip()
+        if stripped and "\n" not in stripped:
+            path = Path(stripped.strip('"'))
+            if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif",
+                                       ".webp", ".bmp") and path.is_file():
+                self.editor.insert("@" + stripped.strip('"') + " ")
+                self._add(Entry("notice", text="Картинка из буфера вложена "
+                                               "файлом: " + str(path)))
+                return
+        if text:
+            self.editor.insert(text)
+            self._update_completions()
+            return
+        self._add(Entry("notice", text="Буфер пуст или недоступен; картинку "
+                                       "терминал напрямую не передаёт — "
+                                       "вставьте путь к файлу картинки."))
 
     def _guard_key(self, key: Key, entry: Entry) -> None:
         if self.guard_editing:
@@ -1376,6 +2116,16 @@ class ChatApp:
 
     def _update_completions(self) -> None:
         prefix = self.editor.text[:self.editor.cursor]
+        cmd_match = re.fullmatch(r"/([a-z-]*)", prefix)
+        if cmd_match is not None and self.editor.cursor == len(self.editor.text):
+            # Tab после «/»: команды реестра с описаниями (ЗАДАЧА-16).
+            needle = cmd_match.group(1)
+            self.cmd_completions = [(name, desc) for name, desc in COMMANDS
+                                    if name.startswith(needle)][:8]
+            self.completions = []
+            self.completion_index = 0
+            return
+        self.cmd_completions = []
         m = re.search(r"(?:^|\s)@([^\s@]*)$", prefix)
         if not m:
             self.completions = []
@@ -1398,8 +2148,28 @@ class ChatApp:
                 rel += "/"
             if rel.startswith(token) or name.startswith(_name):
                 out.append(rel)
+        if not base:
+            # Доп. каталоги (/add-dir): их файлы подсказываем полным путём.
+            for extra in self.extra_dirs:
+                try:
+                    extra_names = sorted(os.listdir(extra))
+                except OSError:
+                    continue
+                for name in extra_names:
+                    if name.startswith("__") or not name.startswith(token):
+                        continue
+                    full = Path(extra) / name
+                    out.append(str(full) + ("/" if full.is_dir() else ""))
         self.completions = out[:8]
         self.completion_index = 0
+
+    def _apply_cmd_completion(self) -> None:
+        """Tab по команде: «/model » в поле ввода, дальше — Enter или аргумент."""
+        if not self.cmd_completions:
+            return
+        name = self.cmd_completions[self.completion_index][0]
+        self.editor.set_text("/" + name + " ")
+        self.cmd_completions = []
 
     def _apply_completion(self) -> None:
         if not self.completions:
@@ -1425,9 +2195,16 @@ class ChatApp:
         return ease_in_out((now - entry.born) / 0.3)
 
     def _paint(self, spans, alpha: float):
+        # Тема оформления (ui.theme): mono — всё серебром, contrast —
+        # приглушённый текст ярче; luna — палитра как есть.
+        theme = str(self.settings.get("ui.theme") or "luna")
         out = []
         for text, style in spans:
             fg, attrs = _STYLE_MAP.get(style, _STYLE_MAP["text"])
+            if theme == "mono":
+                fg = _color.SILVER
+            elif theme == "contrast" and style == "dim":
+                fg = (0xB8, 0xC0, 0xD4)
             if alpha < 1.0:
                 fg = _color.lerp(_color.SPACE_BG, fg, alpha)
             out.append((text, fg, attrs))
@@ -1488,7 +2265,7 @@ class ChatApp:
                         line.append((badge, "ok" if entry.ok else "err"))
                 add(line)
                 out_lines = entry.output.rstrip("\n").split("\n") if entry.output.strip() else []
-                if out_lines:
+                if out_lines and (entry.expanded or self.settings.get("ui.details")):
                     if entry.expanded:
                         for out_line in out_lines:
                             for visual in wrap_text(out_line, w - 4):
@@ -1516,6 +2293,9 @@ class ChatApp:
         elif entry.kind == "help":
             for line in entry.text.split("\n"):
                 add([(line, "dim")])
+        elif entry.kind == "btw":
+            for line in wrap_text(entry.text, w - 2):
+                add([("· ", "dim"), (line, "comment")])
         elif entry.kind == "shell":
             add([("$ ", "cyan"), (entry.text, "text")])
         return raw
@@ -1590,10 +2370,13 @@ class ChatApp:
 
     def _feed_lines(self, width: int, now: float):
         lines: list = []
+        show_thinking = bool(self.settings.get("ui.show_thinking"))
         for entry in self.entries:
             if (entry.kind == "guard" and entry.guard_of
                     and self._find("tool", entry.guard_of) is not None):
                 continue  # рисуется внутри своего тула, между вызовом и результатом
+            if entry.kind == "thinking" and not entry.expanded and not show_thinking:
+                continue  # /thinking выключил показ рассуждений
             lines.extend(self._entry_lines(entry, width, now))
             lines.append(([], None))
         if lines:
@@ -1656,9 +2439,22 @@ class ChatApp:
 
     def _status_line(self, buf: Buffer, y: int, cols: int, now: float) -> None:
         buf.fill_rect(0, y, cols, 1, " ", bg=STATUS_BG)
+        variant = str(self.settings.get("ui.statusline") or "full")
+        if variant == "off":
+            return  # пустая строка: только фон (настройка ui.statusline)
         phase = _moon.context_phase(self.context_pct, self.glyph_mode)
         pct = str(self.context_pct)
+        if variant == "compact":
+            left = " " + phase + " контекст " + pct + "% · " + self.model
+            buf.text(0, y, left, fg=_color.SILVER, bg=STATUS_BG)
+            right = "$" + format(self.cost, ".4f")
+            rx = max(str_width(left) + 1, cols - str_width(right) - 1)
+            if rx < cols:
+                buf.text(rx, y, right, fg=DIM_FG, bg=STATUS_BG, attrs=_color.DIM)
+            return
         left = " " + phase + " контекст " + pct + "% · " + self.mode + " · " + self.model
+        if self.settings.get("ui.vim_mode"):
+            left += " · vim:" + ("normal" if self._vim_normal else "insert")
         buf.text(0, y, left, fg=_color.SILVER, bg=STATUS_BG)
         x = str_width(left)
         if self.busy:
@@ -1733,7 +2529,11 @@ class ChatApp:
             input_lines = full_lines[offset:]
             cursor_pos = (max(0, min(input_h - 1, full_cursor[0] - offset)),
                           full_cursor[1])
-        completion_h = min(5, len(self.completions)) if self.completions else 0
+        completion_h = 0
+        if self.cmd_completions:
+            completion_h = min(5, len(self.cmd_completions))
+        elif self.completions:
+            completion_h = min(5, len(self.completions))
         feed_h = max(1, rows - 1 - input_h - completion_h - nib_h)
         self._page = feed_h
         lines = self._feed_lines(chat_w, now)
@@ -1759,10 +2559,17 @@ class ChatApp:
             self._draw_panels(buf, chat_w, 0, panel_w,
                               feed_h + input_h + completion_h + nib_h, now, tree=tree)
         cy = feed_h
-        for i, candidate in enumerate(self.completions[:completion_h]):
-            style_fg = _color.CYAN if i == self.completion_index else DIM_FG
-            attrs = _color.BOLD if i == self.completion_index else _color.DIM
-            buf.text(2, cy + i, "@" + candidate, fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
+        if self.cmd_completions:
+            for i, (name, desc) in enumerate(self.cmd_completions[:completion_h]):
+                style_fg = _color.CYAN if i == self.completion_index else DIM_FG
+                attrs = _color.BOLD if i == self.completion_index else _color.DIM
+                buf.text(2, cy + i, "/" + name + " — " + desc,
+                         fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
+        else:
+            for i, candidate in enumerate(self.completions[:completion_h]):
+                style_fg = _color.CYAN if i == self.completion_index else DIM_FG
+                attrs = _color.BOLD if i == self.completion_index else _color.DIM
+                buf.text(2, cy + i, "@" + candidate, fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
         if nib_h:
             # Строка Ниблера — между лентой и вводом; в конце жизни затухает.
             text, severity = self._nibbler_line
@@ -1797,6 +2604,37 @@ def _copy_to_clipboard(text: str, term: Terminal) -> str:
     from .clipboard import copy_text
 
     return copy_text(text, write=term.write)
+
+
+def _clipboard_text() -> str:
+    """Текст системного буфера обмена, если платформа его отдаёт без библиотек.
+
+    Только по явному Ctrl+V (не опрос): Windows — PowerShell Get-Clipboard,
+    macOS — pbpaste, Linux — wl-paste/xclip, если стоят. Не вышло — "".
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    commands = []
+    if sys.platform == "win32":
+        commands.append(["powershell", "-NoProfile", "-Command",
+                         "Get-Clipboard -Raw"])
+    elif sys.platform == "darwin":
+        commands.append(["pbpaste"])
+    else:
+        for tool, args in (("wl-paste", ["-n"]), ("xclip", ["-selection",
+                                                           "clipboard", "-o"])):
+            if shutil.which(tool):
+                commands.append([tool, *args])
+    for cmd in commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout.decode("utf-8", "replace")
+    return ""
 
 
 def _open_session(settings, data, continue_last: bool, fake: bool,
@@ -1897,6 +2735,10 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                         elif isinstance(ev, Resize):
                             screen.resize(ev.cols, ev.rows)
                     app.poll_source()
+                    if app._redraw:
+                        # Ctrl+L: следующий кадр — целиком, не диффом.
+                        app._redraw = False
+                        screen.resize(*term.size())
                     if app.edit_request is not None:
                         _run_external_editor(app, term, screen, trap)
                     buf, cursor = app.draw(size[0], size[1], time.monotonic())

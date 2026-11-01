@@ -367,3 +367,12 @@ class LayoutTree:
 # Встроенные панели с наполнением: регистрация — импортом модуля.
 from . import builtin as _builtin  # noqa: E402,F401
 from .builtin import PanelData, panel_data  # noqa: E402,F401
+
+# Тайлы ЗАДАЧИ-16: каждый — свой модуль с register_panel.
+from . import context as _context_panel  # noqa: E402,F401
+from . import diag as _diag_panel  # noqa: E402,F401
+from . import git as _git_panel  # noqa: E402,F401
+from . import mcp as _mcp_panel  # noqa: E402,F401
+from . import models as _models_panel  # noqa: E402,F401
+from . import processes as _processes_panel  # noqa: E402,F401
+from . import tree as _tree_panel  # noqa: E402,F401

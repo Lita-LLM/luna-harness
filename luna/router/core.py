@@ -147,10 +147,18 @@ class Router:
             url = adapter.url(model)
         else:
             url = adapter.url()
+        gen_probe = getattr(self.http, "cancel_generation", None)
+        gen0 = gen_probe() if callable(gen_probe) else None
         lines = self.http.stream_lines(url, body, adapter.headers(cfg.api_key))
         try:
             result = adapter.parse_stream(lines, model, emit)
         except Exception:
+            # Стрим умер от ОТМЕНЫ (Esc/стоп роя), а не от ошибки: полный
+            # запрос без стрима не отменяется ничем и висит до таймаута —
+            # на Windows красный CI ЗАДАЧИ-21 поймал рой, висевший в таком
+            # fallback дольше 5 с после остановки. Честно пробрасываем.
+            if gen0 is not None and gen_probe() != gen0:
+                raise
             # Стрим мог не поддерживаться провайдером: пробуем одним ответом.
             data = self.http.post_json(url if cfg.kind != "gemini" else adapter.full_url(model),
                                        adapter.body(model, messages, tools, False,

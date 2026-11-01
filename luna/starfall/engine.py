@@ -42,6 +42,11 @@ ROLES = ("main", "fast", "guard", "vision")
 _PROGRESS_EVERY = 25
 
 
+class CellCancelled(Exception):
+    """Рой остановлен до или во время запроса ячейки: не ошибка адреса,
+    а общий стоп — попытка не должна уходить в повторы и повторы пула."""
+
+
 class SwarmError(Exception):
     """Рой нельзя запустить или продолжить: потолки, профили, папка."""
 
@@ -293,6 +298,12 @@ class RouterCellRunner:
 
     def _chat(self, profile: CellProfile, messages, specs, endpoint: str,
               endpoint_spec: dict | None = None):
+        # Стоп, пришедший ПОСЛЕ проверки попытки в движке, но ДО старта
+        # стрима: новый стрим захватил бы уже новое поколение отмены
+        # роутера и не отменился бы ничем (гонка, пойманная CI на
+        # Windows). Проверяем общий флаг ячейки прямо перед запросом.
+        if self.cancel_event.is_set():
+            raise CellCancelled("рой остановлен")
         ref = profile.model or "fast"
         if endpoint:
             # Пул: конкретный адрес одной модели — свой ProviderConfig.
@@ -568,6 +579,12 @@ class SwarmRun:
             started = time.monotonic()
             try:
                 text, tin, tout = self.runner(profile, task_text, meta)
+            except CellCancelled:
+                # Общий стоп роя: не ошибка и не повтор — выходим, внешняя
+                # уборка пометит ячейку пропущенной.
+                if pool is not None and ep is not None:
+                    pool.release(ep, ok=False)
+                return
             except Exception as exc:  # noqa: BLE001 — ячейка упала: повтор по лимиту
                 if pool is not None and ep is not None:
                     if is_auth_error(exc) or getattr(exc, "pool_disable", False):

@@ -32,52 +32,76 @@ from luna.starfall.profiles import CellProfile
 LOAD_TEST = True  # пометка: тест нагрузочный, не юнит
 
 
-class _LoadState:
-    """Состояние одного фальшивого адреса: счётчики и план отказов.
+class _PoisonPlan:
+    """Общий план отказов стенда: какие ВХОДЫ ячеек отравлены и как.
 
-    Отказ отравляет ровно пару запросов (стрим + его немедленный
-    fallback у роутера): временное окно «всё падает» с параллельными
-    воркерами сжигало ячейкам все попытки подряд — стенд обязан быть
-    злым, но честным, как настоящий узел с редкими 429.
+    План по номерам запросов адреса (было так) на параллельном рое
+    недетерминирован: повторы одной ячейки бегут быстрее соседей и
+    съедают все триггеры сами — на Windows CI одна ячейка так сожгла
+    все 3 попытки об 429 и рой сдал 59/60. План по входам честен при
+    любом переплетении: одна попытка ячейки — это ДВА запроса (стрим
+    и его fallback у роутера), поэтому жертве отравляются первые
+    четыре запроса: вход №7 получает 429, вход №23 — обрывы, обе
+    первые попытки этих ячеек умирают при любом расписании потоков,
+    третьи обязаны пройти, остальные входы не тронуты.
     """
+
+    POISON = {"7": "429", "23": "drop"}
+    PER_INPUT = 4
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.seen: dict = {}
+
+    def mode_for(self, input_id: str) -> str:
+        mode = self.POISON.get(input_id)
+        if mode is None:
+            return "ok"
+        with self.lock:
+            count = self.seen.get(input_id, 0)
+            if count >= self.PER_INPUT:
+                return "ok"
+            self.seen[input_id] = count + 1
+            return mode
+
+
+class _LoadState:
+    """Состояние одного фальшивого адреса: счётчики запросов."""
 
     def __init__(self, seed: int) -> None:
         self.lock = threading.Lock()
         self.requests = 0
         self.active = 0
         self.max_active = 0
-        self.poison_429 = 0
-        self.poison_drop = 0
         self.random = random.Random(seed)
-        # План «случайных» отказов: по номерам запросов этого адреса.
-        self.trigger_429 = {3, 30}
-        self.trigger_drop = {8}
 
-    def begin(self) -> str:
-        """Зарегистрировать запрос; вернуть режим: ok | 429 | drop."""
+    def begin(self) -> None:
         with self.lock:
             self.requests += 1
-            number = self.requests
             self.active += 1
             self.max_active = max(self.max_active, self.active)
-            if number in self.trigger_429:
-                self.poison_429 = 2
-            if number in self.trigger_drop:
-                self.poison_drop = 2
-            if self.poison_429:
-                self.poison_429 -= 1
-                return "429"
-            if self.poison_drop:
-                self.poison_drop -= 1
-                return "drop"
-            return "ok"
 
     def end(self) -> None:
         with self.lock:
             self.active -= 1
 
 
-def _make_handler(state: _LoadState, *, slow: bool = False):
+_INPUT_RE = None
+
+
+def _input_id(raw: bytes) -> str:
+    """Номер входа ячейки из тела запроса (вход — «вход N»)."""
+    global _INPUT_RE
+    if _INPUT_RE is None:
+        import re
+
+        _INPUT_RE = re.compile("вход (\\d+)".encode("utf-8"))
+    match = _INPUT_RE.search(raw or b"")
+    return match.group(1).decode("ascii") if match else ""
+
+
+def _make_handler(state: _LoadState, *, slow: bool = False,
+                  plan: _PoisonPlan | None = None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -93,10 +117,11 @@ def _make_handler(state: _LoadState, *, slow: bool = False):
                 self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802
-            mode = state.begin()
+            state.begin()
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) or b"{}"
+                mode = plan.mode_for(_input_id(raw)) if plan else "ok"
                 if mode == "drop":
                     # Обрыв: соединение умирает без ответа.
                     self.close_connection = True
@@ -127,7 +152,12 @@ def _make_handler(state: _LoadState, *, slow: bool = False):
                     # Пауза до первого токена.
                     time.sleep(30.0 if slow else 0.10)
                     if slow:
-                        return  # клиент к этому моменту уже отменён
+                        # Клиент к этому моменту уже отменён; ответ
+                        # честно заканчиваем закрытием, а не висящим
+                        # keep-alive (первый вариант стенда держал
+                        # соединение — и неотменённый читатель висел).
+                        self.close_connection = True
+                        return
                     chunks = 5
                     for i in range(chunks):
                         payload = {"choices": [{"index": 0,
@@ -158,10 +188,12 @@ def _make_handler(state: _LoadState, *, slow: bool = False):
 
 
 class _LoadServer:
-    def __init__(self, seed: int, *, slow: bool = False) -> None:
+    def __init__(self, seed: int, *, slow: bool = False,
+                 plan: _PoisonPlan | None = None) -> None:
         self.state = _LoadState(seed)
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0),
-                                         _make_handler(self.state, slow=slow))
+        self.httpd = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _make_handler(self.state, slow=slow, plan=plan))
         self.httpd.daemon_threads = True
         self.base = ("http://127.0.0.1:" +
                      str(self.httpd.server_address[1]) + "/v1")
@@ -204,7 +236,8 @@ class SwarmLoadTest(unittest.TestCase):
                                       "pool": urls, "steps": 1, "ttl": 60})
 
     def test_load_60_cells_pool_of_3(self):
-        servers = [_LoadServer(2100 + i) for i in range(3)]
+        plan = _PoisonPlan()
+        servers = [_LoadServer(2100 + i, plan=plan) for i in range(3)]
         for server in servers:
             self.addCleanup(server.close)
         urls = [s.base for s in servers]
@@ -256,8 +289,9 @@ class SwarmLoadTest(unittest.TestCase):
         self.assertEqual(summary["done"], 60, summary)
         self.assertEqual(summary["failed"], 0, summary)
         self.assertLess(seconds, 30)
-        # Пул видел 429, уполовинил параллельность и восстановил её успехами.
-        self.assertGreaterEqual(pool.rate_hits, 3)
+        # Пул видел 429 (план: два на вход №7), уполовинил параллельность
+        # адреса и восстановил её успехами.
+        self.assertGreaterEqual(pool.rate_hits, 2)
         for ep in pool.endpoints:
             self.assertGreaterEqual(ep.limit, 2)
         # Параллельность адреса не вылезла за потолок пула с запасом на гонки.

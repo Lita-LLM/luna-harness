@@ -18,21 +18,54 @@ class TextEditor:
         self.history: list = []
         self._hist_idx: int | None = None
         self._draft = ""
+        # Readline-правка (ЗАДАЧА-20): кольцо вырезанного (Ctrl+Y — вернуть)
+        # и стек отмены правок (Ctrl+_ — назад по снапшотам).
+        self.kill_ring: list = []
+        self._undo: list = []
+        self._undo_lock = False
+
+    # --- отмена правок ------------------------------------------------------
+
+    def _snapshot(self) -> None:
+        """Снапшот перед изменением; серия одного рода действий — один шаг."""
+        if self._undo_lock:
+            return
+        state = (self.text, self.cursor)
+        if self._undo and self._undo[-1] == state:
+            return
+        self._undo.append(state)
+        if len(self._undo) > 100:
+            self._undo.pop(0)
+
+    def undo_edit(self) -> bool:
+        """Откатить последнюю правку поля ввода (Ctrl+_ / Ctrl+Shift+-)."""
+        if not self._undo:
+            return False
+        self._undo_lock = True
+        try:
+            self.text, self.cursor = self._undo.pop()
+        finally:
+            self._undo_lock = False
+        self._hist_idx = None
+        return True
 
     # --- базовые операции ---------------------------------------------------
 
     def clear(self) -> None:
+        self._snapshot()
         self.text = ""
         self.cursor = 0
         self._hist_idx = None
         self._draft = ""
 
     def set_text(self, text: str) -> None:
+        self._snapshot()
         self.text = text
         self.cursor = len(text)
         self._hist_idx = None
 
     def insert(self, text: str) -> None:
+        self._snapshot()
         self._hist_idx = None
         self.text = self.text[:self.cursor] + text + self.text[self.cursor:]
         self.cursor += len(text)
@@ -42,12 +75,79 @@ class TextEditor:
 
     def backspace(self) -> None:
         if self.cursor > 0:
+            self._snapshot()
             self.text = self.text[:self.cursor - 1] + self.text[self.cursor:]
             self.cursor -= 1
 
     def delete(self) -> None:
         if self.cursor < len(self.text):
+            self._snapshot()
             self.text = self.text[:self.cursor] + self.text[self.cursor + 1:]
+
+    # --- readline: слова, вырезание, кольцо (ЗАДАЧА-20) ----------------------
+
+    def word_left(self) -> None:
+        """Курсор — на начало предыдущего слова (Alt+←)."""
+        i = self.cursor
+        while i > 0 and self.text[i - 1].isspace():
+            i -= 1
+        while i > 0 and not self.text[i - 1].isspace():
+            i -= 1
+        self.cursor = i
+
+    def word_right(self) -> None:
+        """Курсор — на начало следующего слова (Alt+→)."""
+        i = self.cursor
+        n = len(self.text)
+        while i < n and not self.text[i].isspace():
+            i += 1
+        while i < n and self.text[i].isspace():
+            i += 1
+        self.cursor = i
+
+    def _kill(self, a: int, b: int) -> None:
+        """Вырезать [a..b) в кольцо; курсор — в a."""
+        if a >= b:
+            return
+        self._snapshot()
+        self.kill_ring.append(self.text[a:b])
+        if len(self.kill_ring) > 20:
+            self.kill_ring.pop(0)
+        self.text = self.text[:a] + self.text[b:]
+        self.cursor = a
+        self._hist_idx = None
+
+    def kill_to_start(self) -> None:
+        """Ctrl+U: от курсора до начала строки — в кольцо."""
+        start = self.text.rfind("\n", 0, self.cursor) + 1
+        self._kill(start, self.cursor)
+
+    def kill_to_end(self) -> None:
+        """Ctrl+K: от курсора до конца строки — в кольцо."""
+        end = self.text.find("\n", self.cursor)
+        if end < 0:
+            end = len(self.text)
+        self._kill(self.cursor, end)
+
+    def kill_word_back(self) -> None:
+        """Ctrl+W: слово назад целиком (как в Claude Code — один путь за
+        нажатие): от курсора до начала предыдущего слова, с пробелами."""
+        if self.cursor == 0:
+            return
+        start = self.cursor
+        self.word_left()
+        j, self.cursor = self.cursor, start
+        self._kill(j, start)
+
+    def yank(self) -> None:
+        """Ctrl+Y: вставить последнее вырезанное из кольца."""
+        if self.kill_ring:
+            self.insert(self.kill_ring[-1])
+
+    def push_history(self, text: str) -> None:
+        """Положить текст в историю ввода (его достанут стрелкой вверх)."""
+        if text.strip() and (not self.history or self.history[-1] != text):
+            self.history.append(text)
 
     def left(self) -> None:
         self.cursor = max(0, self.cursor - 1)

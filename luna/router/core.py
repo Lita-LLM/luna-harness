@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from ..core.errors import HumanError
@@ -65,6 +66,7 @@ class Router:
         self.secrets = secrets
         self.http = http or HttpClient()
         self._providers = providers or {}
+        self._sleep = time.sleep  # пауза автоповтора сети; тесты подменяют
 
     def cancel_active(self) -> None:
         """Оборвать идущие стримы (прерывание хода, ЗАДАЧА-18).
@@ -176,14 +178,32 @@ class Router:
         last_exc: BaseException | None = None
         for candidate in chain:
             cfg, model = self.resolve(candidate)
-            try:
-                result = self._chat_once(cfg, model, messages, tools, emit, role=role)
-                result.model = candidate
-                return result
-            except Exception as exc:  # noqa: BLE001 — решает классификация ниже
-                last_exc = exc
-                if not is_retryable(exc):
-                    raise
+            attempts = 1
+            delay = 0
+            if self.settings is not None:
+                attempts = max(1, int(self.settings.get("net.retry_attempts", 3) or 3))
+                delay = max(0, int(self.settings.get("net.retry_delay_s", 3) or 0))
+            for attempt in range(attempts):
+                try:
+                    result = self._chat_once(cfg, model, messages, tools, emit, role=role)
+                    result.model = candidate
+                    return result
+                except Exception as exc:  # noqa: BLE001 — решает классификация ниже
+                    last_exc = exc
+                    if not is_retryable(exc):
+                        raise
+                    if attempt + 1 < attempts:
+                        # Автоповтор с обратным отсчётом вместо падения
+                        # хода (ЗАДАЧА-20): пауза видна в ленте событием
+                        # retry, сон — через self._sleep (тесты подменяют).
+                        wait = delay * (2 ** attempt)
+                        emit("retry", "Сеть или провайдер недоступны ("
+                             + str(exc)[:80] + "). Повтор через "
+                             + str(wait) + " с — попытка "
+                             + str(attempt + 2) + " из " + str(attempts) + ".")
+                        self._sleep(wait)
+                        continue
+                    break  # попытки кончились — дальше запасная модель
         if last_exc is not None:
             raise last_exc
         raise HumanError("model_not_set", "Модель не настроена", "Запусти luna setup.")

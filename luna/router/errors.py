@@ -12,6 +12,12 @@ def is_retryable(exc: BaseException) -> bool:
     """Временная ли ошибка (имеет смысл запасная модель или повтор)."""
     if isinstance(exc, HttpError):
         return exc.http_status in RETRYABLE
+    # Обрыв сети http-клиент заворачивает в HumanError с кодом network
+    # (статус 502) — это и есть «сеть оборвалась», чинится повтором.
+    if getattr(exc, "code", "") == "network":
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
     return False
 
 

@@ -23,7 +23,7 @@ from ..ui import phrases
 from ..ui.screen import Buffer
 
 SCREENS = ("splash", "render", "main", "chat", "thinking", "sessions",
-           "panels", "help", "tiles", "constellation")
+           "panels", "help", "tiles", "constellation", "stream")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -417,6 +417,43 @@ def _render_constellation(cols: int, rows: int, caps, settings) -> Buffer:
     return buf
 
 
+def _render_stream(cols: int, rows: int, at: float, caps, settings) -> Buffer:
+    """Экран стрима с проявлением (ЗАДАЧА-20): ui.stream_fade=char.
+
+    Куски ответа «пришли» в вымышленные моменты от _FAKE_NOW: первый —
+    давно (проявился), второй — недавно (полупрозрачен), третий — только
+    что (тусклый). Кадры --frames показывают, как хвост догоняет обычный
+    цвет. Часы приложения — только _FAKE_NOW, как везде в снимках.
+    """
+    import tempfile
+
+    from ..core.bus import EventBus
+    from ..core.settings import Settings
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    tmp_settings = Settings(home=Path(tempfile.mkdtemp(prefix="luna-snap-")),
+                            cwd=Path.cwd())
+    tmp_settings.set("ui.stream_fade", "char")
+    tmp_settings.set("ui.stream_fade_ms", 220)
+    app = ChatApp(EventBus(), tmp_settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW - 1.0
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Расскажи, как идёт сборка")
+    app.on_agent_event({"type": "turn.start", "turn": 1})
+    app.on_agent_event({"type": "agent.text",
+                        "text": "Сборка идёт по шагам: зависимости уже стоят, "})
+    app._clock = lambda: _FAKE_NOW - 0.12
+    app.on_agent_event({"type": "agent.text",
+                        "text": "тесты зеленеют один за другим, "})
+    app._clock = lambda: _FAKE_NOW - 0.01
+    app.on_agent_event({"type": "agent.text",
+                        "text": "остался последний модуль."})
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + at)
+    return buf
+
+
 def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -> list:
     """Список (подпись, буфер) для экрана name в моменты times (секунды от старта)."""
     from ..core.settings import Settings
@@ -451,6 +488,9 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
                  _render_tiles(cols, rows, caps, settings))]
     if name == "constellation":
         return [("созвездие роя", _render_constellation(cols, rows, caps, settings))]
+    if name == "stream":
+        return [(str(at) + " с", _render_stream(cols, rows, at, caps, settings))
+                for at in times]
     frames = []
     for at in times:
         if name == "splash":

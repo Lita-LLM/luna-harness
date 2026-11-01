@@ -142,6 +142,9 @@ class KeyParser:
             return Key("tab"), 1
         if c == "\x00":
             return Key("space", mods=frozenset({"ctrl"})), 1
+        if c == "\x1f":
+            # Ctrl+_ (он же Ctrl+Shift+-): отмена правки ввода, как в readline.
+            return Key("_", mods=frozenset({"ctrl"})), 1
         if "\x01" <= c <= "\x1a":
             letter = chr(ord("a") + ord(c) - 1)
             return Key(letter, mods=frozenset({"ctrl"})), 1

@@ -186,6 +186,26 @@ class Picker:
         idx = max(0, min(len(items) - 1, idx + step))
         self._sel_key = items[idx].key
 
+    # --- мышь (ЗАДАЧА-20) ------------------------------------------------------
+
+    # Карта строк последнего render_block: {строка блока: пункт} — хозяин
+    # строит по ней кликабельные зоны кадра, не размечая список второй раз.
+    _row_map: dict = {}
+
+    def hover_to(self, item) -> None:
+        """Наведение мыши: подсветить пункт, не выбирая."""
+        if item is not None:
+            self._sel_key = item.key
+
+    def pick_item(self, item):
+        """Клик по пункту = Enter по нему: то же действие хозяина."""
+        if item is None:
+            return None
+        self._sel_key = item.key
+        if self.mode != "list":
+            return None
+        return ("pick", item)
+
     def _fix_selection(self) -> None:
         items = self.filtered()
         if items and all(it.key != self._sel_key for it in items):
@@ -223,6 +243,7 @@ class Picker:
         budget = max(1, max_rows - len(lines) - len(preview) - 1)
         items = self.filtered()
         sel_row = None
+        self._row_map = {}
         if not items:
             lines.append([("Ничего не нашлось.", "dim")])
         else:
@@ -243,6 +264,9 @@ class Picker:
                 if item.mark:
                     row.append((item.mark + " ", "mark"))
                 row.append((item.title, "accent" if sel else "text"))
+                self._row_map[len(lines)] = item
+                if per == 2:
+                    self._row_map[len(lines) + 1] = item
                 if sel:
                     sel_row = len(lines)
                 lines.append(row)

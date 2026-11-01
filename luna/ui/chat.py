@@ -92,7 +92,7 @@ COMMANDS = [
     ("memory", "открыть AGENTS.md проекта во внешнем редакторе"),
     ("review", "агент ревьюит текущий git-дифф: /review [фокус]"),
     ("export", "сохранить сессию в markdown-файл"),
-    ("copy", "скопировать последний ответ; /copy err — последнюю ошибку"),
+    ("copy", "скопировать последний ответ; /copy code — последний блок кода из ответа; /copy err — последнюю ошибку"),
     ("sessions", "выбиралка сессий на диске"),
     ("new", "начать новую сессию"),
     ("rename", "имя текущей сессии: /rename <имя>"),
@@ -102,7 +102,8 @@ COMMANDS = [
     ("redo", "вернуть откат"),
     ("compact", "сжать контекст: /compact [что сохранить]"),
     ("clear", "очистить ленту"),
-    ("panels", "выбиралка панелей-тайлов"),
+    ("panels", "выбиралка панелей-тайлов (пробел — открыть/закрыть, не закрывая список); /panels reset — забыть запомненную раскладку"),
+    ("send", "режим отправки во время хода — выбиралка: inject/queue/interrupt (на лету — Alt+S)"),
     ("panel", "панель по имени: /panel <имя>"),
     ("layout", "раскладки панелей: /layout save|load|list <имя>"),
     ("todo", "панель «План»"),
@@ -151,6 +152,7 @@ COMMAND_RU = {
     "сжать": "compact",
     "очистить": "clear",
     "панели": "panels",
+    "отправка": "send",
     "панель": "panel",
     "раскладка": "layout",
     "план": "todo",
@@ -198,17 +200,21 @@ def resolve_command(word: str):
 
 HELP_TEXT = """Команды и клавиши Луны
 """ + "\n".join("/" + name + " — " + desc for name, desc in COMMANDS) + """
-Выбиралки: печатать — поиск · ↑↓ — выбор · Enter — действие · Esc — закрыть
-/panels — все тайлы выбиралкой · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер · Alt+C/G/P/T — Контекст, Git, Процессы, Дерево
+Выбиралки: печатать — поиск · ↑↓ — выбор · Enter — действие · Esc — закрыть · мышь: клик выбирает, колесо крутит, наведение подсвечивает
+/panels — все тайлы выбиралкой: пробел открывает/закрывает панель сразу, список не закрывается · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер · Alt+C/G/P/T — Контекст, Git, Процессы, Дерево
 Команды не зависят от раскладки (ui.layout_fix): /панель = /panel, а .зфтуд в ЙЦУКЕН — тоже /panel; аргументы и Ctrl/Alt-клавиши понимаются в любой раскладке
-Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера)
+Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера) · Ctrl+G — промпт во внешнем редакторе · ? на пустом вводе — эта справка
+Правка как в readline: Ctrl+A/E — начало/конец строки · Ctrl+U/K — вырезать до начала/конца строки · Ctrl+W — слово назад · Ctrl+Y — вернуть вырезанное · Alt+←/→ — по словам · Ctrl+_ (Ctrl+Shift+-) — отмена правки ввода · Ctrl+Z — свернуть в фон (Unix; fg — вернуться)
 Esc Esc на пустом вводе — откат к ходу выбиралкой · Esc во время хода — прервать ход одним нажатием · Ctrl+C во время хода — прервать; без хода — очистить ввод, второй подряд за секунду — выход
-Отправка во время хода (chat.send_mode): inject — вставка в ход · queue — очередь · interrupt — прервать и отправить · Ctrl+S — сменить режим · Alt+Enter — разово прервать и отправить · ↑ на пустом поле — вернуть сообщение из очереди
+Отправка во время хода (chat.send_mode, видна в строке состояния): inject — вставка в ход · queue — очередь · interrupt — прервать и отправить · Alt+S — сменить режим по кругу · /send — выбиралка · Alt+Enter — разово прервать и отправить · ↑ на пустом поле — вернуть сообщение из очереди
+Ctrl+S — спрятать промпт в заначку (как в Claude Code): на пустом поле — вернуть с курсором, на непустом — поменять местами
 Мышление: /thinking — показ рассуждений по кругу summary (шапка «думает» и пересказ быстрой роли) → hidden → full, Alt+O — тот же круг на лету; /effort — глубина рассуждений, Alt+E — уровень по кругу на лету
-!команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить; Tab после / — дополнить команду)
-Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор · Tab / Shift+Tab — режим по кругу
-Ctrl+O — раскрыть/свернуть детали записи · F6 — в режим панелей (панели открыты) или открыть «План»
-В режиме панелей: ↑↓ — фокус, ←→ — размер, Tab / Shift+Tab — переставить, Enter — развернуть, x — закрыть, Esc — назад к вводу; мышь: клик по заголовку — фокус, тянуть разделитель — размер, колесо — прокрутка
+!команда — выполнить самому, без вопросов Предохранителя: вывод — в контекст, ход модели — по настройке chat.bang_triggers · #текст — дописать в AGENTS.md проекта · @файл — вложить файл (нечёткий поиск; Tab — дополнить; Tab после / — дополнить команду)
+Enter — отправить · Alt+Enter, Shift+Enter и \\+Enter — новая строка · стрелки — история и курсор · Tab / Shift+Tab — режим по кругу
+Ctrl+O — развернуть/Свернуть ВСЕ блоки ленты (настройка ui.expand_all) · Alt+↑/↓ — курсор по блокам, Enter/пробел на пустом вводе — раскрыть блок · клик по заголовку блока (▸/▾) — только его
+Строка состояния кликабельна: режим, модель, effort, мышление, отправка и тема открывают свои выбиралки · клик по ссылке/пути в ленте — по настройке ui.click_link · мышь — ui.mouse (full/scroll/off)
+Раскладка панелей запоминается (ui.remember_layout): /panels reset — забыть · F6 — в режим панелей (панели открыты) или открыть «План»
+В режиме панелей: ↑↓ — фокус, ←→ — размер, Tab / Shift+Tab — переставить, Enter — развернуть, x — закрыть, Esc — назад к вводу; мышь: клик по заголовку — фокус, тянуть заголовок — переставить, разделитель — размер, ✕ — закрыть, колесо — прокрутка
 PgUp / PgDn и колесо мыши — прокрутка ленты · выделение мышью: протяжка копирует текст, двойной клик — слово
 Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
 Ниблер — компаньон над полем ввода: изредка комментирует работу агента; серьёзное уходит агенту пометкой (настройки nibbler.*)"""
@@ -292,6 +298,24 @@ def _cells_slice(text: str, a: int, b) -> str:
     return "".join(out)
 
 
+_LINK_RE = re.compile(
+    r"https?://\S+|(?:[\w@~.-]+/)+[\w.-]+"
+    r"|[\w.-]+\.(?:py|md|txt|json|toml|html|js|ts|sh|yaml|yml|log)\b")
+
+
+def _find_links(text: str) -> list:
+    """Ссылки и пути файлов в строке ленты: (колонка_от, колонка_до, токен)
+    в ячейках — для кликабельных зон (клик — по ui.click_link)."""
+    out = []
+    for m in _LINK_RE.finditer(text or ""):
+        token = m.group(0).rstrip(").,;»\"'")
+        if not token:
+            continue
+        start = str_width(text[:m.start()])
+        out.append((start, start + str_width(token) - 1, token))
+    return out
+
+
 def compact_args(name: str, args: dict) -> str:
     """Однострочная суть вызова тула для компактной строки ленты."""
     if not isinstance(args, dict) or not args:
@@ -333,6 +357,9 @@ class Entry:
     summary_lines: list = field(default_factory=list)
     finished_at: float = 0.0
     chunk_at: float = 0.0
+    # Стрим с проявлением (ЗАДАЧА-20): отметки кусков текста ответа —
+    # (длина текста после куска, момент прихода); fade красит хвост по ним.
+    chunk_marks: list = field(default_factory=list)
 
 
 class ChatApp:
@@ -437,11 +464,35 @@ class ChatApp:
         self._col_drag = False           # мышь тянет границу лента↔панели
         self._geom_cols = 0              # ширина экрана последнего кадра
         self._started = False
+        # ЗАДАЧА-20: мышь везде, блоки ленты, память раскладки, заначка,
+        # свёрнутые вставки, уведомления и заголовок окна.
+        self.expand_all = bool(self.settings.get("ui.expand_all"))
+        self.zones: list = []            # карта кликабельных зон последнего кадра
+        self._line_map: list = []        # визуальная строка ленты → (запись, первая?)
+        self._block_sel = None           # запись под курсором блоков (Alt+↑/↓)
+        self._stash: tuple | None = None  # (текст, курсор) заначки Ctrl+S
+        self._guard_replace = False      # Предохранитель: «нет, и вот что вместо»
+        self._pastes: dict = {}          # «[вставлено N строк]» → полный текст
+        self._send_hint_shown = False    # подсказка о режиме отправки — раз за сессию
+        self._saved_places: dict = {}    # панель → (индекс, вес) из памяти раскладки
+        self._saved_cols = 0             # ширина терминала при сохранении раскладки
+        self._panel_head_drag = None     # перетаскивание заголовка панели
+        self.session_title = ""          # тема сессии для заголовка окна
+        self._session_titled = False     # имя задано (руками или автоматом)
+        self.color_level = "truecolor"   # ставит run_chat из возможностей терминала
+        self.notify_hook = None          # run_chat: строка в терминал (звонок/OSC)
+        self.title_hook = None           # run_chat: заголовок окна (OSC 2)
+        self.open_hook = None            # run_chat: открыть ссылку/файл снаружи
+        self.suspend_hook = None         # run_chat (POSIX): Ctrl+Z — фон/fg
         self._page = 10
         self.spinner = Spinner(self.glyph_mode)
         self.wheel = PhraseWheel(phrases.spinner_phrases())
         self._applied_theme = _themes.apply_theme(
             str(self.settings.get("ui.theme") or "luna"))
+        # Память раскладки (ЗАДАЧА-20): только в настоящем сеансе (журнал
+        # или явно переданный каталог данных) — витрины и снимки не трогаем.
+        if self._journal is not None or data is not None:
+            self._restore_saved_layout()
 
     def _make_nibbler(self):
         """Ниблер для этого экрана; фальшивый источник — только эвристики,
@@ -515,6 +566,10 @@ class ChatApp:
         self._restoring = True
         try:
             for rec in records:
+                if rec.get("kind") == "title":
+                    # Имя сессии уже задано — автоназвание не перезапишет.
+                    self.session_title = str(rec.get("title") or self.session_title)
+                    self._session_titled = True
                 data = rec.get("data") or {}
                 if rec.get("kind") == "event":
                     self.on_agent_event(data)
@@ -541,6 +596,20 @@ class ChatApp:
                             "(результаты — " + str(unfinished.get("dir")) + "). " +
                             "Докрутить: попроси агента «докрути поток» " +
                             "(starfall, action=resume)."))
+
+    def _restore_prompt(self, text: str) -> None:
+        """/undo: промпт откатанного хода — обратно в поле ввода (ЗАДАЧА-20).
+
+        Если в поле уже что-то набрано, оно не затирается молча, а уходит
+        в историю ввода (стрелка вверх вернёт), как черновики у эталонов.
+        """
+        if not text:
+            return
+        if self.editor.text.strip():
+            self.editor.push_history(self.editor.text)
+        self.editor.set_text(text)
+        self._flash_hint("Промпт откатанного хода — в поле ввода "
+                         "(прежний набросок — в истории, ↑).")
 
     def _cut_feed_after_turn(self, turn: int) -> None:
         """Лента после отката разговора: ходы после turn убираются — и вживую,
@@ -764,6 +833,9 @@ class ChatApp:
             self._add(Entry("notice", text="Журнал выключен — имя сессии хранить негде."))
             return
         self.journal.set_title(title)
+        self.session_title = title
+        self._session_titled = True
+        self._update_title()
         self._add(Entry("notice", text="Сессия теперь называется «" + title + "»."))
 
     # --- выбиралка: сессии и манеры (ЗАДАЧА-10) --------------------------------
@@ -829,8 +901,7 @@ class ChatApp:
         self._picker_kind = kind
         self._last_change = self._clock()
 
-    def open_panels_picker(self) -> None:
-        """/panels: все тайлы выбиралкой (бывшее меню цифрами — заменено)."""
+    def _panels_items(self) -> list:
         items = []
         for spec in registered_panels().values():
             opened = spec.panel_id in self.layout
@@ -838,8 +909,56 @@ class ChatApp:
                 key=spec.panel_id, title=spec.title,
                 detail=spec.panel_id + " · " + ("открыта" if opened else "закрыта"),
                 mark="→" if opened else ""))
-        self._open_picker("panels", "Панели", items,
-                          hint="Enter — открыть/закрыть · Esc — закрыть",
+        return items
+
+    def open_panels_picker(self) -> None:
+        """/panels: переключатель тайлов, НЕ закрывается после действия
+        (ЗАДАЧА-20): пробел/клик открывают и закрывают панели сразу,
+        раскладка за списком перестраивается вживую."""
+        self._open_picker("panels", "Панели", self._panels_items(),
+                          hint="пробел/клик — открыть/закрыть сразу · "
+                               "↑↓/Tab — ходить · Enter/Esc — выйти",
+                          preview_lines=0)
+
+    def _toggle_panel_from_picker(self, item) -> None:
+        """Пробел или клик в /panels: панель — сразу, список остаётся."""
+        if item is None or not item.key:
+            return
+        self.toggle_panel(item.key)
+        if self.picker is not None:
+            self.picker.set_items(self._panels_items())
+
+    def open_mode_picker(self) -> None:
+        """Режим агента выбиралкой: тот же путь, что Tab и /mode —
+        команда mode.set источнику; human_only не обходится."""
+        items = [PickerItem(key=m, title=m,
+                            detail="режим Предохранителя",
+                            mark="→" if m == self.mode else "")
+                 for m in MODES]
+        self._open_picker("mode", "Режим агента", items,
+                          hint="Enter — включить · Esc — закрыть",
+                          preview_lines=0)
+
+    def open_send_picker(self) -> None:
+        """/send: режим отправки во время хода выбиралкой."""
+        current = self._send_mode()
+        items = [PickerItem(key=m, title=m + " — " + self._SEND_MODE_TITLES[m],
+                            mark="→" if m == current else "")
+                 for m in ("inject", "queue", "interrupt")]
+        self._open_picker("send", "Отправка во время хода", items,
+                          hint="Enter — включить · Esc — закрыть · "
+                               "на лету — Alt+S",
+                          preview_lines=0)
+
+    def open_thinking_picker(self) -> None:
+        """Показ рассуждений выбиралкой (клик по строке состояния)."""
+        current = self._thinking_mode()
+        items = [PickerItem(key=m, title=m,
+                            detail=self._THINKING_TITLES[m],
+                            mark="→" if m == current else "")
+                 for m in self._THINKING_ORDER]
+        self._open_picker("thinking", "Показ рассуждений", items,
+                          hint="Enter — включить · Esc — закрыть",
                           preview_lines=0)
 
     def open_help_picker(self) -> None:
@@ -1000,8 +1119,21 @@ class ChatApp:
         if action[0] == "pick" and action[1] is not None:
             item = action[1]
             if kind == "panels":
+                # Enter в /panels — тоже переключатель без закрытия (ЗАДАЧА-20).
+                self._toggle_panel_from_picker(item)
+            elif kind == "mode":
                 self.picker = None
-                self.toggle_panel(item.key)
+                self.send_command({"type": "mode.set", "mode": item.key})
+            elif kind == "send":
+                self.picker = None
+                self.settings.set("chat.send_mode", item.key)
+                self._add(Entry("notice", text="Отправка во время хода: "
+                                               + self._SEND_MODE_TITLES[item.key]))
+            elif kind == "thinking":
+                self.picker = None
+                self._set_thinking_mode(item.key)
+                self._add(Entry("notice", text="Рассуждения: "
+                                               + self._THINKING_TITLES[item.key]))
             elif kind == "help":
                 self.picker = None
                 if item.key in _NEEDS_ARG:
@@ -1156,9 +1288,22 @@ class ChatApp:
                 self._sessions_picker_action(
                     ("action", "delete", picker.current()))
                 return
+        if self._picker_kind == "panels" and picker.mode == "list" \
+                and not picker.filter:
+            # /panels-переключатель (ЗАДАЧА-20): пробел — панель сразу,
+            # Tab/Shift+Tab — ходить по списку; список не закрывается.
+            if key.name in ("space", " ") or key.char == " ":
+                self._toggle_panel_from_picker(picker.current())
+                return
+            if key.name == "tab":
+                picker._move(-1 if "shift" in key.mods else 1)
+                return
         action = picker.handle_key(key)
-        if action is None:
-            return
+        if action is not None:
+            self._route_picker_action(action)
+
+    def _route_picker_action(self, action) -> None:
+        """Действие выбиралки — общий путь для клавиш и кликов мыши."""
         kind = action[0]
         if kind == "close":
             self.picker = None
@@ -1175,7 +1320,7 @@ class ChatApp:
             self._manners_picker_action(action)
         elif self._picker_kind in ("panels", "help", "models", "mcp", "agents",
                                    "theme", "history", "rewind", "adddir", "cells",
-                                   "effort"):
+                                   "effort", "mode", "send", "thinking"):
             self._extra_picker_action(action)
 
     def _is_current_session(self, item) -> bool:
@@ -1394,6 +1539,8 @@ class ChatApp:
         """Кадры нужны, пока идёт ход, есть события или что-то затухает."""
         if self.busy:
             return True
+        if self._fade_busy(now):
+            return True
         if self._panel_anim is not None:
             return True
         if self._nibbler_line and now < self._nibbler_until + 0.3:
@@ -1444,9 +1591,20 @@ class ChatApp:
                 self.cwd = str(ev.get("cwd"))
         elif kind == "session.rewound":
             if ev.get("scope") in ("talk", "both"):
-                self._cut_feed_after_turn(int(ev.get("turn") or 0))
+                turn = int(ev.get("turn") or 0)
+                # /undo возвращает промпт откатанного хода в поле ввода
+                # (ЗАДАЧА-20): текст берём из ленты ДО её обрезки.
+                prompt = ""
+                if not self._restoring:
+                    users = [e for e in self.entries if e.kind == "user"]
+                    if len(users) > turn:
+                        prompt = users[turn].text
+                self._cut_feed_after_turn(turn)
+                if prompt:
+                    self._restore_prompt(prompt)
         elif kind == "turn.start":
             self.busy = True
+            self._update_title()
         elif kind == "agent.thinking":
             entry = self._stream_entry("thinking")
             entry.text += str(ev.get("text", ""))
@@ -1464,7 +1622,9 @@ class ChatApp:
                 target.summary_lines.append(
                     (str(ev.get("text", "")), self._clock()))
         elif kind == "agent.text":
-            self._stream_entry("agent").text += str(ev.get("text", ""))
+            entry = self._stream_entry("agent")
+            entry.text += str(ev.get("text", ""))
+            entry.chunk_marks.append((len(entry.text), self._clock()))
         elif kind == "agent.text.done":
             now_clock = self._clock()
             for entry in self.entries:
@@ -1511,6 +1671,8 @@ class ChatApp:
             if tool is not None:
                 entry.guard_of = tool.entry_id
             self._add(entry)
+            self._notify("Луна ждёт решения по действию")
+            self._update_title()
         elif kind == "guard.verdict":
             entry = self._find("guard", str(ev.get("id", "")))
             if entry is not None and entry.status == "pending":
@@ -1519,6 +1681,8 @@ class ChatApp:
             self._add(Entry("ask", text=str(ev.get("question", "")),
                             options=list(ev.get("options") or []),
                             entry_id=str(ev.get("id", "")), status="pending"))
+            self._notify("Луна задала вопрос")
+            self._update_title()
         elif kind == "todo":
             self.todos = list(ev.get("items") or [])
             entry = self._find("todo", "todo")
@@ -1548,6 +1712,8 @@ class ChatApp:
             self._add(Entry("error", text=text))
         elif kind == "turn.done":
             self.busy = False
+            self._notify("Ход Луны завершён")
+            self._update_title()
             now_clock = self._clock()
             for entry in self.entries:
                 if entry.streaming and entry.kind == "thinking":
@@ -1608,6 +1774,18 @@ class ChatApp:
         attachments = [tok[1:] for tok in text.split()
                        if tok.startswith("@") and len(tok) > 1]
         self._add(Entry("user", text=text if display is None else display))
+        # Автоназвание сессии по первому сообщению (ЗАДАЧА-20).
+        if (not self._session_titled and self.journal is not None
+                and self.settings.get("chat.auto_title")):
+            title = " ".join(text.split())[:60].strip()
+            if title:
+                self.session_title = title
+                self._session_titled = True
+                try:
+                    self.journal.set_title(title)
+                except Exception:  # noqa: BLE001 — имя не важнее хода
+                    pass
+                self._update_title()
         out_text = text
         if self.nibbler is not None:
             self.nibbler.observe({"type": "user.message", "text": text})
@@ -1667,6 +1845,11 @@ class ChatApp:
         text = text.strip("\n")
         if not text.strip():
             return
+        # Свёрнутые вставки разворачиваются обратно в полный текст.
+        for placeholder, full in list(self._pastes.items()):
+            if placeholder in text:
+                text = text.replace(placeholder, full)
+                del self._pastes[placeholder]
         if text.startswith(".") and self.settings.get("ui.layout_fix"):
             fixed = self._fix_dot_command(text)
             if fixed is not None:
@@ -1680,7 +1863,18 @@ class ChatApp:
                 self._add(Entry("shell", text=command))
                 self.send_command({"type": "shell", "command": command})
             return
+        if text.startswith("#"):
+            note = text[1:].strip()
+            if note:
+                self._memory_note(note)
+            return
         if self.busy:
+            if not self._send_hint_shown:
+                # Подсказка о режиме отправки — один раз за сессию (ЗАДАЧА-20).
+                self._send_hint_shown = True
+                self._flash_hint("Ход идёт: Enter — "
+                                 + self._SEND_MODE_TITLES[self._send_mode()]
+                                 + ". Сменить: /send или Alt+S.")
             # Режим отправки во время хода (chat.send_mode, ЗАДАЧА-18):
             # inject — сразу агенту, подмешается перед следующим вызовом
             # модели; queue — сюда, отдельным ходом после; interrupt —
@@ -1695,6 +1889,21 @@ class ChatApp:
                 self._add(Entry("notice", text="В очереди: " + text.split("\n")[0]))
             return
         self._send_user_message(text)
+
+    def _memory_note(self, note: str) -> None:
+        """#текст: дописать в память проекта — AGENTS.md (ЗАДАЧА-20)."""
+        path = Path(self.cwd) / "AGENTS.md"
+        try:
+            if not path.exists():
+                path.write_text("# AGENTS.md\n\nИнструкции проекта для Луны.\n",
+                                encoding="utf-8")
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("\n- " + note + "\n")
+        except OSError as exc:
+            self._add(Entry("error", text="Не вышло дописать в AGENTS.md: "
+                                          + str(exc)))
+            return
+        self._add(Entry("notice", text="В память проекта (AGENTS.md): " + note))
 
     def _slash(self, text: str) -> None:
         parts = text.split()
@@ -1798,10 +2007,23 @@ class ChatApp:
             self.send_command({"type": "compact", "hint": hint})
         elif cmd == "/todo":
             self.toggle_panel("todo")
+        elif cmd == "/send":
+            if len(parts) > 1 and parts[1] in self._SEND_MODE_TITLES:
+                self.settings.set("chat.send_mode", parts[1])
+                self._add(Entry("notice", text="Отправка во время хода: "
+                                               + self._SEND_MODE_TITLES[parts[1]]))
+            elif len(parts) > 1:
+                self._add(Entry("notice", text="Режимы отправки: inject, "
+                                               "queue, interrupt."))
+            else:
+                self.open_send_picker()
         elif cmd == "/panel":
             self._panel_command(parts[1:])
         elif cmd == "/panels":
-            self.open_panels_picker()
+            if len(parts) > 1 and parts[1] == "reset":
+                self._reset_saved_layout()
+            else:
+                self.open_panels_picker()
         elif cmd == "/layout":
             self._layout_command(parts[1:])
         elif not self._compat_command(cmd, text):
@@ -2204,7 +2426,28 @@ class ChatApp:
         self.send_command(command)
 
     def _copy_command(self, args: list) -> None:
-        """/copy — последний ответ агента; /copy err — последняя ошибка целиком."""
+        """/copy — последний ответ агента; /copy code — последний блок кода
+        из ответа; /copy err — последняя ошибка целиком."""
+        if args and args[0] == "code":
+            block = None
+            for entry in reversed(self.entries):
+                if entry.kind != "agent" or not entry.text:
+                    continue
+                found = re.findall(r"```[^\n]*\n(.*?)```", entry.text, re.DOTALL)
+                if found:
+                    block = found[-1].strip("\n")
+                    break
+            if block is None:
+                self._add(Entry("notice", text="Блоков кода в ответах пока нет."))
+                return
+            if self.copy_hook is None:
+                self._add(Entry("notice", text="Буфер обмена недоступен в этом режиме."))
+                return
+            self.copy_hook(block)
+            self._add(Entry("notice", text="Скопировано в буфер обмена "
+                                           "(блок кода): " + str(len(block))
+                                           + " символов."))
+            return
         if args and args[0] == "err":
             entry = next((e for e in reversed(self.entries)
                           if e.kind == "error" and e.text), None)
@@ -2229,9 +2472,174 @@ class ChatApp:
             self._add(Entry("notice", text="Панели выключены настройкой ui.panels."))
             return
         self._panel_anchor = (self._panel_shown_w, self._clock())
-        opened = self.layout.toggle(panel_id)
+        if panel_id in self.layout:
+            self.layout.close(panel_id)
+            opened = False
+        else:
+            # Повторное открытие — на запомненное место и размер (ЗАДАЧА-20).
+            place = self._saved_places.get(panel_id)
+            if place is not None:
+                opened = self.layout.open_at(panel_id, place[0], place[1])
+            else:
+                opened = self.layout.open(panel_id)
         if not opened:
             self.panel_focus = False
+        self._save_layout()
+
+    # --- память раскладки панелей (ЗАДАЧА-20) --------------------------------
+
+    def _save_layout(self) -> None:
+        """Запомнить раскладку (ручное действие человека, не каждый кадр)."""
+        if not self.settings.get("ui.remember_layout"):
+            return
+        try:
+            from . import layout_store
+
+            snapshot = self.layout.snapshot()
+            order = snapshot.get("order") or []
+            weights = snapshot.get("weights") or {}
+            # Места закрытых панелей не забываем: повторное открытие
+            # ставит панель туда, где она жила (в снимок — полем places).
+            places = dict(self._saved_places)
+            for i, pid in enumerate(order):
+                places[pid] = (i, weights.get(pid, 1.0))
+            self._saved_places = places
+            snapshot["places"] = {pid: [i, w] for pid, (i, w) in places.items()}
+            layout_store.put_layout(self._data_dir(), self.cwd, snapshot,
+                                    self._geom_cols or 80)
+            self._saved_cols = self._geom_cols or self._saved_cols
+        except Exception:  # noqa: BLE001 — память раскладки не роняет экран
+            pass
+
+    def _restore_saved_layout(self) -> None:
+        """При старте: раскладка проекта или общая — из LUNA_HOME."""
+        if not self.settings.get("ui.remember_layout"):
+            return
+        if not self.settings.get("ui.panels"):
+            return
+        try:
+            from . import layout_store
+
+            entry = layout_store.get_layout(self._data_dir(), self.cwd)
+        except Exception:  # noqa: BLE001
+            entry = None
+        if not entry:
+            return
+        snapshot = entry.get("snapshot") or {}
+        self.layout.restore(snapshot)
+        self._saved_cols = int(entry.get("cols") or 0)
+        raw_places = snapshot.get("places")
+        if isinstance(raw_places, dict) and raw_places:
+            self._saved_places = {pid: (int(v[0]), float(v[1]))
+                                  for pid, v in raw_places.items()
+                                  if isinstance(v, (list, tuple)) and len(v) == 2}
+        else:
+            order = snapshot.get("order") or []
+            weights = snapshot.get("weights") or {}
+            self._saved_places = {pid: (i, weights.get(pid, 1.0))
+                                  for i, pid in enumerate(order)}
+
+    def _reset_saved_layout(self) -> None:
+        """/panels reset: забыть сохранённую раскладку и закрыть панели."""
+        try:
+            from . import layout_store
+
+            layout_store.clear_layout(self._data_dir(), self.cwd)
+        except Exception:  # noqa: BLE001
+            pass
+        self._saved_places = {}
+        self._saved_cols = 0
+        self.layout = LayoutTree()
+        self.panel_focus = False
+        self._add(Entry("notice", text="Раскладка панелей забыта: "
+                                       "сохранённая в LUNA_HOME очищена, "
+                                       "панели закрыты."))
+
+    # --- блоки ленты: раскрыть всё / один блок (ЗАДАЧА-20) ---------------------
+
+    def _exp(self, entry: Entry) -> bool:
+        """Блок развёрнут: индивидуально или общим ui.expand_all."""
+        return bool(self.expand_all or entry.expanded)
+
+    def _expandable(self, entry: Entry) -> bool:
+        if entry.kind == "thinking":
+            return bool(entry.text)
+        if entry.kind == "tool":
+            return bool(entry.output) or bool(self._guards_for(entry))
+        if entry.kind == "todo":
+            return bool(entry.items)
+        return False
+
+    def _toggle_expand_all(self) -> None:
+        """Ctrl+O: развернуть все блоки ленты / свернуть все обратно."""
+        self.expand_all = not self.expand_all
+        self.settings.set("ui.expand_all", self.expand_all)
+        if not self.expand_all:
+            for entry in self.entries:
+                entry.expanded = False
+        self._flash_hint("Блоки ленты: " + ("все развёрнуты" if self.expand_all
+                                            else "все свёрнуты")
+                         + " (Ctrl+O)")
+
+    def _toggle_entry(self, entry: Entry) -> None:
+        """Клик по заголовку / Enter на блоке: только этот блок."""
+        if self.expand_all:
+            # Из общего «всё открыто» клик сворачивает один блок: остальным
+            # раздаём индивидуальное «открыто» и гасим общий флаг.
+            self.expand_all = False
+            self.settings.set("ui.expand_all", False)
+            for other in self.entries:
+                if self._expandable(other):
+                    other.expanded = other is not entry
+            return
+        entry.expanded = not entry.expanded
+
+    def _move_block_cursor(self, step: int) -> None:
+        """Alt+↑/↓: курсор по раскрываемым блокам ленты."""
+        blocks = [e for e in self.entries if self._expandable(e)]
+        if not blocks:
+            self._flash_hint("Раскрываемых блоков в ленте пока нет.")
+            return
+        if self._block_sel not in blocks:
+            self._block_sel = blocks[-1] if step < 0 else blocks[0]
+        else:
+            idx = blocks.index(self._block_sel)
+            self._block_sel = blocks[max(0, min(len(blocks) - 1, idx + step))]
+        self.scroll = 0
+
+    # --- уведомления и заголовок окна (ЗАДАЧА-20) ------------------------------
+
+    def _notify(self, text: str) -> None:
+        """Звонок/уведомление человеку по настройке ui.notify."""
+        mode = str(self.settings.get("ui.notify") or "off")
+        if mode == "off" or self.notify_hook is None or self._restoring:
+            return
+        seq = ""
+        if mode in ("bell", "both"):
+            seq += "\a"
+        if mode in ("osc", "both"):
+            seq += "\x1b]9;" + text + "\a"
+        if seq:
+            try:
+                self.notify_hook(seq)
+            except Exception:  # noqa: BLE001 — сигнал не роняет экран
+                pass
+
+    def _update_title(self) -> None:
+        """Заголовок окна: тема сессии и состояние (настройка ui.title)."""
+        if self.title_hook is None or not self.settings.get("ui.title"):
+            return
+        topic = self.session_title or Path(self.cwd).name or "сессия"
+        if self.pending_guard is not None or self.pending_ask is not None:
+            state = "нужен ответ"
+        elif self.busy:
+            state = "идёт ход"
+        else:
+            state = "ждёт"
+        try:
+            self.title_hook("Луна · " + topic + " · " + state)
+        except Exception:  # noqa: BLE001
+            pass
 
     # --- подтверждение и вопросы ------------------------------------------------------
 
@@ -2249,15 +2657,21 @@ class ChatApp:
                 return entry
         return None
 
-    def guard_answer(self, decision: str, args: dict | None = None) -> None:
+    def guard_answer(self, decision: str, args: dict | None = None,
+                     text: str = "") -> None:
         entry = self.pending_guard
         if entry is None:
             return
         entry.status = decision
+        if text:
+            entry.answer = text
         self.guard_editing = False
+        self._guard_replace = False
         cmd = {"type": "guard.answer", "id": entry.entry_id, "decision": decision}
         if args is not None:
             cmd["args"] = args
+        if text:
+            cmd["text"] = text
         self.send_command(cmd)
 
     def _guard_finish_edit(self) -> None:
@@ -2305,6 +2719,10 @@ class ChatApp:
             self.editor.backspace()
         elif key.name == "delete":
             self.editor.delete()
+        elif key.name == "left" and "alt" in key.mods:
+            self.editor.word_left()
+        elif key.name == "right" and "alt" in key.mods:
+            self.editor.word_right()
         elif key.name == "left":
             self.editor.left()
         elif key.name == "right":
@@ -2313,8 +2731,19 @@ class ChatApp:
             self.editor.line_home()
         elif key.name == "end":
             self.editor.line_end()
+        elif key.label == "ctrl+a":
+            self.editor.line_home()
+        elif key.label == "ctrl+e":
+            self.editor.line_end()
         elif key.label == "ctrl+u":
-            self.editor.clear()
+            # Readline: вырезать до начала строки в кольцо (Ctrl+Y вернёт).
+            self.editor.kill_to_start()
+        elif key.label == "ctrl+k":
+            self.editor.kill_to_end()
+        elif key.label == "ctrl+w":
+            self.editor.kill_word_back()
+        elif key.label == "ctrl+y":
+            self.editor.yank()
         else:
             return False
         return True
@@ -2345,14 +2774,35 @@ class ChatApp:
         if self.picker is not None:
             self._picker_key(key)
             return
+        if key.label == "ctrl+s":
+            # Ctrl+S — только заначка промпта (ЗАДАЧА-20), в том числе при
+            # фокусе панели: режим отправки переехал на Alt+S.
+            self._stash_key()
+            return
         if self.panel_focus:
             self._panel_key(key)
             return
         if key.label in _PANEL_KEYS:
             self.toggle_panel(_PANEL_KEYS[key.label])
             return
-        if key.label == "ctrl+s":
+        if key.label == "alt+s":
             self._cycle_send_mode()
+            return
+        if key.label in ("alt+up", "alt+down"):
+            self._move_block_cursor(-1 if key.label == "alt+up" else 1)
+            return
+        if key.label == "ctrl+g":
+            self._editor_command()
+            return
+        if key.label == "ctrl+_":
+            self.editor.undo_edit()
+            return
+        if key.label == "ctrl+z":
+            # Unix: свернуть в фон (fg вернёт); без хука запуска — отмена правки.
+            if self.suspend_hook is not None:
+                self.suspend_hook()
+            else:
+                self.editor.undo_edit()
             return
         if key.label == "alt+e":
             self._cycle_effort()
@@ -2380,7 +2830,7 @@ class ChatApp:
             self.toggle_panel("todo")
             return
         if key.label == "ctrl+o":
-            self._toggle_expand_latest()
+            self._toggle_expand_all()
             return
         if key.name == "esc":
             # Vim-режим ввода: Esc в режиме ввода — переход в нормальный,
@@ -2425,6 +2875,18 @@ class ChatApp:
             elif "alt" in key.mods or "shift" in key.mods:
                 self.editor.newline()
                 self._update_completions()
+            elif self._backslash_before_cursor():
+                # \ + Enter — перевод строки: слеш съедается (ЗАДАЧА-20).
+                self.editor.backspace()
+                self.editor.newline()
+                self._update_completions()
+            elif self._block_sel is not None and not self.editor.text:
+                # Курсор блоков (Alt+↑/↓): Enter на пустом вводе — блок.
+                self._toggle_entry(self._block_sel)
+            elif self.cmd_completions and self.editor.text.startswith("/") \
+                    and " " not in self.editor.text.strip():
+                # Enter по открытому списку команд — выбрать подсвеченную.
+                self._apply_cmd_completion()
             else:
                 self.submit_text()
             return
@@ -2447,8 +2909,22 @@ class ChatApp:
             elif not self.editor.down():
                 self.editor.history_next()
             return
+        if key.char == "?" and not self.editor.text \
+                and not self.completions and not self.cmd_completions:
+            # ? на пустом вводе — справка клавиш, как у эталонов.
+            self._add(Entry("help", text=HELP_TEXT))
+            return
+        if key.char == " " and not self.editor.text \
+                and self._block_sel is not None:
+            # Пробел на пустом вводе при курсоре блоков — раскрыть блок.
+            self._toggle_entry(self._block_sel)
+            return
         if self._editor_key(key):
             self._update_completions()
+
+    def _backslash_before_cursor(self) -> bool:
+        ed = self.editor
+        return ed.cursor > 0 and ed.text[ed.cursor - 1] == "\\"
 
     def _esc_key(self) -> None:
         now = self._clock()
@@ -2506,12 +2982,40 @@ class ChatApp:
                          "interrupt": "прервать и отправить сразу"}
 
     def _cycle_send_mode(self) -> None:
-        """Ctrl+S: режим отправки во время хода — по кругу, на лету."""
+        """Alt+S: режим отправки во время хода — по кругу, на лету."""
         order = ("inject", "queue", "interrupt")
         nxt = order[(order.index(self._send_mode()) + 1) % len(order)]
         self.settings.set("chat.send_mode", nxt)
         self._flash_hint("Отправка во время хода: " + self._SEND_MODE_TITLES[nxt] +
-                         " (Ctrl+S — сменить)")
+                         " (Alt+S — сменить, /send — выбиралка)")
+
+    def _stash_key(self) -> None:
+        """Ctrl+S — заначка промпта, как в Claude Code (ЗАДАЧА-20).
+
+        Поле не пусто — убрать набранное в заначку (или поменять с ней
+        местами); поле пусто и заначка есть — вернуть текст с курсором.
+        """
+        ed = self.editor
+        if ed.text:
+            current = (ed.text, ed.cursor)
+            if self._stash is not None:
+                old, self._stash = self._stash, current
+                ed.set_text(old[0])
+                ed.cursor = min(old[1], len(ed.text))
+                self._flash_hint("Заначка и поле поменяны местами (Ctrl+S).")
+            else:
+                self._stash = current
+                ed.clear()
+                self._flash_hint("Промпт — в заначке. Ctrl+S на пустом поле "
+                                 "вернёт его с курсором.")
+        elif self._stash is not None:
+            text, cursor = self._stash
+            self._stash = None
+            ed.set_text(text)
+            ed.cursor = min(cursor, len(ed.text))
+            self._update_completions()
+        else:
+            self._flash_hint("Заначка пуста: набери текст и нажми Ctrl+S.")
 
     def _interrupt_send(self, text: str) -> None:
         """Прервать текущий ход и сразу отправить текст новым (Alt+Enter
@@ -2526,10 +3030,13 @@ class ChatApp:
                                        text.split("\n")[0]))
 
     def _meta_lines(self, now: float) -> list:
-        """Строки над полем ввода: подсказка, очередь, режим отправки."""
+        """Строки над полем ввода: подсказка, заначка, очередь, режим."""
         out: list = []
         if self._hint is not None and now < self._hint[1]:
             out.append(self._hint[0])
+        if self._stash is not None:
+            first = self._stash[0].split("\n")[0]
+            out.append("в заначке: " + first + " (Ctrl+S — вернуть или обменять)")
         for text in self.queue[:3]:
             out.append("в очереди: " + str(text).split("\n")[0])
         if len(self.queue) > 3:
@@ -2537,8 +3044,8 @@ class ChatApp:
                        " (↑ на пустом поле — вернуть в редактор)")
         if self.busy:
             out.append("ход идёт · Enter: " + self._SEND_MODE_TITLES[self._send_mode()] +
-                       " · Ctrl+S — сменить · Alt+Enter — прервать и отправить")
-        return out[:4]
+                       " · Alt+S — сменить · Alt+Enter — прервать и отправить")
+        return out[:5]
 
     # --- vim-режим ввода и вставка (ЗАДАЧА-16) --------------------------------
 
@@ -2630,7 +3137,7 @@ class ChatApp:
                                                "файлом: " + str(path)))
                 return
         if text:
-            self.editor.insert(text)
+            self._insert_paste(text)
             self._update_completions()
             return
         self._add(Entry("notice", text="Буфер пуст или недоступен; картинку "
@@ -2638,6 +3145,19 @@ class ChatApp:
                                        "вставьте путь к файлу картинки."))
 
     def _guard_key(self, key: Key, entry: Entry) -> None:
+        if self._guard_replace:
+            # «Нет, и вот что вместо»: текст отказа-инструкции — в поле ввода.
+            if key.name == "enter":
+                text = self.editor.text.strip()
+                self.editor.clear()
+                self._guard_replace = False
+                self.guard_answer("no_replace", text=text)
+            elif key.name == "esc":
+                self._guard_replace = False
+                self.editor.clear()
+            else:
+                self._editor_key(key)
+            return
         if self.guard_editing:
             if key.name == "enter":
                 self._guard_finish_edit()
@@ -2659,6 +3179,13 @@ class ChatApp:
             self.editor.set_text(str(current))
         elif key.char == "a":
             self.guard_answer("always")
+        elif key.char == "p":
+            self.guard_answer("always_project")
+        elif key.char == "r":
+            self._guard_replace = True
+            self.editor.clear()
+            self._flash_hint("Что сделать вместо? Печатай и Enter — "
+                             "отказ уйдёт модели с этим текстом.")
         elif key.char == "q":
             self.guard_answer("stop")
 
@@ -2723,24 +3250,56 @@ class ChatApp:
         elif key.name == "tab" and focused:
             # Tab в фокусе панелей — переставить панель среди соседей.
             self.layout.move(focused, -1 if "shift" in key.mods else 1)
+        # Любое ручное изменение раскладки клавишами — в память (ЗАДАЧА-20).
+        if key.name in ("left", "right", "tab", "enter") or key.char == "x":
+            self._save_layout()
 
     def _toggle_expand_latest(self) -> None:
-        for entry in reversed(self.entries):
-            if entry.kind == "thinking" and entry.text:
-                entry.expanded = not entry.expanded
-                return
-            if entry.kind == "tool" and entry.output:
-                entry.expanded = not entry.expanded
-                return
-            if entry.kind == "todo" and entry.items:
-                entry.expanded = not entry.expanded
-                return
+        """Устаревший путь ЗАДАЧИ-18 — теперь это общий Ctrl+O (ЗАДАЧА-20)."""
+        self._toggle_expand_all()
 
     def handle_paste(self, paste: Paste) -> None:
         if self.pending_guard is not None and not self.guard_editing:
             return
-        self.editor.insert(paste.text)
+        self._insert_paste(paste.text)
         self._update_completions()
+
+    def _insert_paste(self, text: str) -> None:
+        """Вставка в поле ввода (ЗАДАЧА-20): перетащенный файл — @путём,
+        большая вставка — свёрнутым маркером [вставлено N строк]."""
+        stripped = text.strip().strip('"').strip("'")
+        if "\n" not in stripped and stripped:
+            candidate = stripped
+            if candidate.startswith("file://"):
+                from urllib.parse import unquote, urlparse
+
+                candidate = unquote(urlparse(candidate).path)
+            path = Path(candidate).expanduser()
+            if path.is_file():
+                self.editor.insert("@" + str(path) + " ")
+                return
+        lines = text.count("\n") + 1 if text else 0
+        threshold = int(self.settings.get("ui.paste_collapse_lines") or 0)
+        if threshold and lines > threshold:
+            placeholder = "[вставлено " + str(lines) + " строк]"
+            base = placeholder
+            n = 2
+            while placeholder in self._pastes and self._pastes[placeholder] != text:
+                placeholder = base[:-1] + " · " + str(n) + "]"
+                n += 1
+            self._pastes[placeholder] = text
+            self.editor.insert(placeholder)
+            return
+        self.editor.insert(text)
+
+    def _expand_paste_in_editor(self) -> None:
+        """Клик по свёрнутой вставке в поле ввода — развернуть обратно."""
+        for placeholder, full in list(self._pastes.items()):
+            if placeholder in self.editor.text:
+                self.editor.set_text(
+                    self.editor.text.replace(placeholder, full, 1))
+                del self._pastes[placeholder]
+                return
 
     def _panel_at(self, mouse: Mouse):
         """Панель под мышью по геометрии последнего кадра или None."""
@@ -2750,10 +3309,11 @@ class ChatApp:
                 return panel_id, (px, py, pw, ph), mx, my
         return None
 
-    def _panel_mouse(self, mouse: Mouse) -> bool:
-        """Мышь по панелям (ЗАДАЧА-17): True — событие съели панели.
+    def _panel_mouse(self, mouse: Mouse, clicks: bool = True) -> bool:
+        """Мышь по панелям (ЗАДАЧА-17, крестик и перетаскивание — ЗАДАЧА-20).
 
-        Клик по заголовку — фокус и режим панелей; перетаскивание
+        Клик по заголовку — фокус и режим панелей; заголовок можно тащить
+        для перестановки; крестик в заголовке закрывает; перетаскивание
         разделителя — размер; колесо над панелью — её прокрутка.
         """
         if self._panel_drag is not None:
@@ -2766,6 +3326,22 @@ class ChatApp:
                 return True
             if mouse.kind == "release":
                 self._panel_drag = None
+                self._save_layout()
+                return True
+        if self._panel_head_drag is not None:
+            drag_id, sx, sy, moved = self._panel_head_drag
+            if mouse.kind == "move":
+                if abs(mouse.x - sx) > 1 or abs(mouse.y - sy) > 1:
+                    moved = True
+                self._panel_head_drag = (drag_id, sx, sy, moved)
+                return True
+            if mouse.kind == "release":
+                self._panel_head_drag = None
+                if moved:
+                    found = self._panel_at(mouse)
+                    if found is not None and found[0] != drag_id:
+                        self._move_panel_towards(drag_id, found[0])
+                    self._save_layout()
                 return True
         found = self._panel_at(mouse)
         if found is None:
@@ -2777,7 +3353,14 @@ class ChatApp:
             if content is not None:
                 content.handle_key(self, key)
             return True
-        if mouse.kind == "press" and mouse.button == 0:
+        if mouse.kind == "press" and mouse.button == 0 and clicks:
+            if my == py and pw >= 6 and mx == px + pw - 1:
+                # Крестик в заголовке — закрыть панель.
+                self.layout.close(panel_id)
+                if not self.layout.leaves():
+                    self.panel_focus = False
+                self._save_layout()
+                return True
             below = any(oy == py + ph for _id, (ox, oy, ow, oh)
                         in self._panel_rects.items() if _id != panel_id)
             if below and my == py + ph - 1:
@@ -2788,14 +3371,120 @@ class ChatApp:
             self.layout.focused = panel_id
             if my == py:
                 self.panel_focus = True  # клик по заголовку — фокус и режим
+                self._panel_head_drag = (panel_id, mouse.x, mouse.y, False)
             return True
         if self._sel_anchor is not None:
             return False  # идёт выделение ленты — отпуск обработает лента
         return mouse.kind in ("move", "release")
 
+    def _move_panel_towards(self, panel_id: str, target_id: str) -> None:
+        """Переставить панель по дереву на место другой (перетаскивание)."""
+        leaves = self.layout.leaves()
+        if panel_id not in leaves or target_id not in leaves:
+            return
+        step = 1 if leaves.index(panel_id) < leaves.index(target_id) else -1
+        for _ in range(len(leaves)):
+            cur = self.layout.leaves()
+            if cur.index(panel_id) == cur.index(target_id):
+                break
+            if not self.layout.move(panel_id, step):
+                break
+
+    # --- мышь везде: карта зон кадра (ЗАДАЧА-20) ------------------------------
+
+    def _zone_at(self, mx: int, my: int):
+        """Зона последнего кадра по точке: (x0, y0, x1, y1, действие)."""
+        for zone in reversed(self.zones):
+            x0, y0, x1, y1, _action = zone
+            if x0 <= mx < x1 and y0 <= my < y1:
+                return zone
+        return None
+
+    def _click_link(self, token: str) -> None:
+        """Клик по ссылке/пути в ленте: поведение — ui.click_link."""
+        mode = str(self.settings.get("ui.click_link") or "copy")
+        if mode == "off":
+            return
+        if mode == "open" and self.open_hook is not None:
+            try:
+                self.open_hook(token)
+                self._flash_hint("Открываю: " + token)
+                return
+            except Exception:  # noqa: BLE001 — не вышло открыть: копируем
+                pass
+        if self.copy_hook is not None:
+            self.copy_hook(token)
+            self._flash_hint("Скопировано: " + token)
+
+    def _zone_action(self, action) -> None:
+        """Действие кликабельной зоны кадра."""
+        kind = action[0]
+        if kind == "status":
+            name = action[1]
+            if name == "mode":
+                self.open_mode_picker()
+            elif name == "model":
+                self.open_models_picker()
+            elif name == "effort":
+                self.open_effort_picker("model.effort")
+            elif name == "thinking":
+                self.open_thinking_picker()
+            elif name == "send":
+                self.open_send_picker()
+            elif name == "theme":
+                self.open_theme_picker()
+        elif kind == "block":
+            self.panel_focus = False
+            self._block_sel = action[1]
+            self._toggle_entry(action[1])
+        elif kind == "link":
+            self._click_link(action[1])
+        elif kind == "paste":
+            self._expand_paste_in_editor()
+
+    def _picker_mouse(self, mouse: Mouse) -> None:
+        """Мышь над выбиралкой: наведение подсвечивает, клик выбирает,
+        колесо крутит список (ЗАДАЧА-20)."""
+        picker = self.picker
+        if picker is None:
+            return
+        mx, my = mouse.x - 1, mouse.y - 1
+        if mouse.kind in ("wheel_up", "wheel_down"):
+            picker._move(-3 if mouse.kind == "wheel_up" else 3)
+            return
+        zone = self._zone_at(mx, my)
+        item = zone[4][1] if zone is not None and zone[4][0] == "picker" else None
+        if item is None:
+            return
+        if mouse.kind == "move":
+            picker.hover_to(item)
+        elif mouse.kind == "press" and mouse.button == 0:
+            if self._picker_kind == "panels":
+                picker.hover_to(item)
+                self._toggle_panel_from_picker(item)
+                return
+            action = picker.pick_item(item)
+            if action is not None:
+                self._route_picker_action(action)
+
+    def _mouse_mode(self) -> str:
+        mode = str(self.settings.get("ui.mouse") or "full")
+        return mode if mode in ("full", "scroll", "off") else "full"
+
     def handle_mouse(self, mouse: Mouse) -> None:
+        mode = self._mouse_mode()
+        if mode == "off":
+            return  # мышь не трогаем вовсе: выделение — за терминалом
+        if "shift" in mouse.mods and mouse.kind in ("press", "move", "release"):
+            return  # Shift+протяжка — обход: выделение средствами терминала
         if self.picker is not None:
+            self._picker_mouse(mouse)
             return  # под выбиралкой лента мышью не выделяется
+        if mouse.kind == "press" and mouse.button == 0 and mode == "full":
+            zone = self._zone_at(mouse.x - 1, mouse.y - 1)
+            if zone is not None and zone[4][0] in ("status", "block", "link", "paste"):
+                self._zone_action(zone[4])
+                return
         if self._col_drag:
             # Тянем границу лента↔панели: ширина колонки — от позиции мыши.
             if mouse.kind == "move":
@@ -2806,8 +3495,11 @@ class ChatApp:
                 return
             if mouse.kind == "release":
                 self._col_drag = False
+                self._save_layout()
                 return
-        if (mouse.kind == "press" and mouse.button == 0 and self.layout.leaves()
+        clicks = mode == "full"
+        if (clicks and mouse.kind == "press" and mouse.button == 0
+                and self.layout.leaves()
                 and self._feed_geom[0]
                 and (mouse.x - 1) - self._feed_geom[0] in (-1, 0)):
             # Захват — только сама граница и последняя колонка ленты:
@@ -2815,8 +3507,10 @@ class ChatApp:
             self._col_drag = True
             self.panel_focus = False
             return
-        if self._panel_mouse(mouse):
+        if self._panel_mouse(mouse, clicks=clicks):
             return
+        if not clicks and mouse.kind in ("press", "release"):
+            return  # ui.mouse=scroll: клики не наши, только колесо ниже
         if mouse.kind == "wheel_up":
             self.scroll = min(self.scroll + 3, 100000)
         elif mouse.kind == "wheel_down":
@@ -2938,22 +3632,46 @@ class ChatApp:
 
     # --- автодополнение @файл --------------------------------------------------------------
 
+    def _all_command_names(self) -> list:
+        """Все имена для списка на «/»: встроенные, русские алиасы рядом,
+        команды из файлов совместимости и скиллы (ЗАДАЧА-20, раздел 5)."""
+        names = list(COMMANDS) + [
+            (ru, COMMAND_DESCR[lat] + " (/" + lat + ")")
+            for ru, lat in COMMAND_RU.items()]
+        seen = {name for name, _desc in names}
+        try:
+            from ..mind.compat import list_commands, list_skills
+
+            for item in list_commands(Path(self.cwd), self.settings):
+                if item["name"] not in seen:
+                    seen.add(item["name"])
+                    names.append((item["name"],
+                                  (item["description"] or "команда из файлов")
+                                  + " · файл"))
+            for item in list_skills(Path(self.cwd), self.settings):
+                if item["name"] not in seen:
+                    seen.add(item["name"])
+                    names.append((item["name"],
+                                  (item["description"] or "скилл") + " · скилл"))
+        except Exception:  # noqa: BLE001 — совместимость не роняет подсказки
+            pass
+        return names
+
     def _update_completions(self) -> None:
         prefix = self.editor.text[:self.editor.cursor]
-        cmd_match = re.fullmatch(r"/([a-zа-яё-]*)", prefix, re.IGNORECASE)
+        cmd_match = re.fullmatch(r"/([a-zа-яё0-9-]*)", prefix, re.IGNORECASE)
         if cmd_match is not None and self.editor.cursor == len(self.editor.text):
-            # Tab после «/»: команды реестра с описаниями (ЗАДАЧА-16) —
-            # латинские и русские имена, игла — в любой раскладке.
+            # «/» — ПОЛНЫЙ список команд с описаниями (ЗАДАЧА-20): без
+            # обрезки по количеству; показ — окном с прокруткой в draw().
             needle = cmd_match.group(1).lower()
             needles = {needle}
             if self.settings.get("ui.layout_fix"):
-                needles = {v.lower() for v in _layout.variants(needle)}
-            all_names = list(COMMANDS) + [
-                (ru, COMMAND_DESCR[lat] + " (/" + lat + ")")
-                for ru, lat in COMMAND_RU.items()]
+                # Сама игла обязана остаться в наборе: variants("") пуст,
+                # и одиночный «/» раньше из-за этого не показывал ничего.
+                needles |= {v.lower() for v in _layout.variants(needle)}
             self.cmd_completions = [
-                (name, desc) for name, desc in all_names
-                if any(name.startswith(n) for n in needles)][:8]
+                (name, desc) for name, desc in self._all_command_names()
+                if any(name.startswith(n) for n in needles)]
             self.completions = []
             self.completion_index = 0
             return
@@ -2964,6 +3682,12 @@ class ChatApp:
             return
         token = m.group(1)
         base, _, _name = token.rpartition("/")
+        if not base and token:
+            # Нечёткий поиск по проекту (ЗАДАЧА-20): подпоследовательность
+            # символов токена в относительном пути, лучшие — первыми.
+            self.completions = self._fuzzy_files(token)[:8]
+            self.completion_index = 0
+            return
         directory = Path(self.cwd) / base if base else Path(self.cwd)
         try:
             names = sorted(os.listdir(directory))
@@ -2980,20 +3704,64 @@ class ChatApp:
                 rel += "/"
             if rel.startswith(token) or name.startswith(_name):
                 out.append(rel)
-        if not base:
-            # Доп. каталоги (/add-dir): их файлы подсказываем полным путём.
-            for extra in self.extra_dirs:
-                try:
-                    extra_names = sorted(os.listdir(extra))
-                except OSError:
-                    continue
-                for name in extra_names:
-                    if name.startswith("__") or not name.startswith(token):
-                        continue
-                    full = Path(extra) / name
-                    out.append(str(full) + ("/" if full.is_dir() else ""))
         self.completions = out[:8]
         self.completion_index = 0
+
+    def _fuzzy_files(self, token: str) -> list:
+        """Файлы проекта нечётким поиском: токен — подпоследовательность
+        пути; сортировка — короче путь и раньше совпадение лучше."""
+        if not token:
+            return []
+        needle = token.lower()
+        scored = []
+        root = Path(self.cwd)
+        count = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d != "__pycache__"]
+            for name in filenames:
+                count += 1
+                if count > 3000:
+                    break
+                rel = str((Path(dirpath) / name).relative_to(root))
+                low = rel.lower()
+                pos = 0
+                first = None
+                for ch in needle:
+                    found = low.find(ch, pos)
+                    if found < 0:
+                        break
+                    if first is None:
+                        first = found
+                    pos = found + 1
+                else:
+                    scored.append(((first or 0), len(rel), rel))
+            if count > 3000:
+                break
+        scored.sort()
+        out = [rel for _f, _l, rel in scored]
+        # Доп. каталоги (/add-dir): их файлы подсказываем полным путём.
+        for extra in self.extra_dirs:
+            try:
+                extra_names = sorted(os.listdir(extra))
+            except OSError:
+                continue
+            for name in extra_names:
+                if name.startswith("__"):
+                    continue
+                low = name.lower()
+                pos = 0
+                ok = True
+                for ch in needle:
+                    found = low.find(ch, pos)
+                    if found < 0:
+                        ok = False
+                        break
+                    pos = found + 1
+                if ok:
+                    full = Path(extra) / name
+                    out.append(str(full) + ("/" if full.is_dir() else ""))
+        return out
 
     def _apply_cmd_completion(self) -> None:
         """Tab по команде: «/model » в поле ввода, дальше — Enter или аргумент."""
@@ -3053,7 +3821,11 @@ class ChatApp:
                 add([(prefix, "amber")] + [(s.text, "user") for s in line])
         elif entry.kind == "agent":
             md_lines = render_markdown(entry.text, w)
+            faded = self._fade_last_line(entry, md_lines, now)
             for idx, line in enumerate(md_lines):
+                if faded is not None and idx == len(md_lines) - 1:
+                    raw.append((faded, None))
+                    continue
                 spans = [(s.text, s.style) for s in line]
                 if entry.streaming and idx == len(md_lines) - 1:
                     spans.append(("▌", "dim"))  # живой курсор стрима — в той же строке
@@ -3073,7 +3845,8 @@ class ChatApp:
                     now, entry.chunk_at, 2 + _think.orbit_count(effort),
                     self.glyph_mode)
             verb = "думает" if entry.streaming else "думала"
-            head = [(moon + " ", "amber"),
+            arrow = "▾ " if self._exp(entry) else "▸ "
+            head = [(arrow, "cyan"), (moon + " ", "amber"),
                     (verb + " · " + str(secs) + " с", "dim")]
             if stars:
                 head.append((stars, "cyan"))
@@ -3085,7 +3858,7 @@ class ChatApp:
                     line_alpha = alpha * _think.summary_alpha(born_at, now)
                 raw.append((self._paint(spans, line_alpha), None))
 
-            if entry.expanded or mode == "full":
+            if self._exp(entry) or mode == "full":
                 for line in wrap_text(entry.text, w - 2):
                     add([("◦ ", "dim"), (line, "comment")])
             elif mode == "summary":
@@ -3094,7 +3867,7 @@ class ChatApp:
                         add_grad([("  ↳ ", "cyan"), (visual, "text")], line_born)
                 count = len(entry.text)
                 if entry.summary_lines:
-                    label = "Ctrl+O — полный текст рассуждений"
+                    label = "Ctrl+O или клик — полный текст рассуждений"
                 elif not entry.streaming:
                     # Пересказа не случилось: быстрая роль не настроена
                     # или провайдер молчал — говорим честно.
@@ -3104,12 +3877,16 @@ class ChatApp:
                     label = ""
                 if label:
                     add([("◦ ", "dim"), (label, "dim")])
-            else:  # hidden, но запись раскрыта Ctrl+O
+            else:  # hidden, но запись раскрыта (Ctrl+O/клик)
                 for line in wrap_text(entry.text, w - 2):
                     add([("◦ ", "dim"), (line, "comment")])
         elif entry.kind == "tool":
             glyph = {"emoji": "⚙", "narrow": "•", "ascii": "+"}[self.glyph_mode]
-            head = [(glyph + " ", "tool"), (entry.name or "tool", "tool")]
+            arrow = ""
+            if entry.output or self._guards_for(entry):
+                arrow = "▾ " if self._exp(entry) else "▸ "
+            head = [(arrow, "cyan"), (glyph + " ", "tool"),
+                    (entry.name or "tool", "tool")]
             compact = compact_args(entry.name, entry.args)
             if compact:
                 head.append(("  " + compact, "text"))
@@ -3138,11 +3915,29 @@ class ChatApp:
                         line.append((badge, "ok" if entry.ok else "err"))
                 add(line)
                 out_lines = entry.output.rstrip("\n").split("\n") if entry.output.strip() else []
-                if out_lines and (entry.expanded or self.settings.get("ui.details")):
-                    if entry.expanded:
+                if out_lines and (self._exp(entry) or self.settings.get("ui.details")):
+                    if self._exp(entry):
                         for out_line in out_lines:
                             for visual in wrap_text(out_line, w - 4):
                                 add([("    " + visual, "dim")])
+                    elif entry.name in ("edit", "write"):
+                        # Дифф правки — свёрнуто до ui.diff_lines строк
+                        # (ЗАДАЧА-20); остальное — по Ctrl+O или клику.
+                        shown = 0
+                        cap = max(1, int(self.settings.get("ui.diff_lines") or 12))
+                        for out_line in out_lines:
+                            if shown >= cap:
+                                break
+                            for visual in wrap_text(out_line, w - 4):
+                                if shown >= cap:
+                                    break
+                                add([("    " + visual, "dim")])
+                                shown += 1
+                        rest = len(out_lines) - shown
+                        label = "  вывод: строк " + str(len(out_lines))
+                        if rest > 0:
+                            label += " · ещё " + str(rest)
+                        add([(label + " · Ctrl+O — весь вывод", "dim")])
                     else:
                         label = ("  вывод: строк " + str(len(out_lines))
                                  + " · Ctrl+O — раскрыть")
@@ -3175,7 +3970,10 @@ class ChatApp:
         return raw
 
     _DECISIONS = {"yes": "да", "no": "нет", "edit": "да, с правкой",
-                  "always": "да, дальше без вопросов", "stop": "стоп"}
+                  "always": "да, дальше без вопросов",
+                  "always_project": "да, в этом проекте без вопросов",
+                  "no_replace": "нет, со своей инструкцией вместо",
+                  "stop": "стоп"}
 
     def _guard_lines(self, entry: Entry, width: int, add) -> None:
         if entry.status != "pending":
@@ -3203,10 +4001,14 @@ class ChatApp:
                 add([("  " + line, "code")], GUARD_BG)
         if entry.reason:
             add([("  причина: " + entry.reason, "dim")], GUARD_BG)
-        add([("  Enter — да · n — нет · e — править · a — дальше без вопросов · q — стоп",
+        add([("  Enter — да · n — нет · e — править · a — без вопросов (сессия)",
+              "guard")], GUARD_BG)
+        add([("  p — без вопросов в этом проекте · r — нет, и вот что вместо · q — стоп",
               "guard")], GUARD_BG)
         if self.guard_editing:
             add([("  правка аргументов: Enter — отправить, Esc — отмена", "dim")], GUARD_BG)
+        if self._guard_replace:
+            add([("  что сделать вместо: печатай в поле ввода, Enter — отправить отказ с этим текстом, Esc — отмена", "dim")], GUARD_BG)
 
     def _ask_lines(self, entry: Entry, width: int, add) -> None:
         for j, line in enumerate(wrap_text(entry.text, max(4, width - 2))):
@@ -3225,18 +4027,20 @@ class ChatApp:
         items = entry.items or self.todos
         done_count = sum(1 for it in items if it.get("status") == "done")
         head = "план · сделано " + str(done_count) + " из " + str(len(items))
-        add([("☑ " if self.glyph_mode == "emoji" else "• ", "cyan"), (head, "bold")])
+        arrow = ("▾ " if self._exp(entry) else "▸ ") if items else ""
+        add([(arrow, "cyan"),
+             ("☑ " if self.glyph_mode == "emoji" else "• ", "cyan"), (head, "bold")])
         marks = {"done": "✓", "active": "◐", "pending": "○"}
-        show = items if entry.expanded else [it for it in items
-                                             if it.get("status") == "active"][:1]
-        if not entry.expanded and not show and items:
+        show = items if self._exp(entry) else [it for it in items
+                                                if it.get("status") == "active"][:1]
+        if not self._exp(entry) and not show and items:
             show = items[:1]
         for item in show:
             mark = marks.get(item.get("status", "pending"), "○")
             style = "dim" if item.get("status") == "done" else "text"
             add(_clip_line([("  " + mark + " ", "cyan"),
                             (item.get("text", ""), style)], width))
-        if not entry.expanded and len(items) > len(show):
+        if not self._exp(entry) and len(items) > len(show):
             add([("  · Ctrl+O — весь план, Ctrl+T — панель", "dim")])
 
     def _guards_for(self, tool_entry: Entry) -> list:
@@ -3256,20 +4060,94 @@ class ChatApp:
             return "hidden"
         return mode if mode in ("summary", "full") else "summary"
 
+    def _fade_last_line(self, entry: Entry, md_lines, now: float):
+        """Проявление стрима (ЗАДАЧА-20): спаны последней строки ответа,
+        где свежие символы ещё тусклые; None — проявления нет.
+
+        token — весь последний кусок проявляется разом, char — каждый
+        символ по своему возрасту из chunk_marks. Ступеней — 4, от
+        приглушённого цвета темы к обычному; даты кусков ставит
+        on_agent_event, часы здесь — только аргумент now.
+        """
+        mode = str(self.settings.get("ui.stream_fade") or "off")
+        if mode == "off" or not self.settings.get("ui.animations"):
+            return None
+        if self.color_level in ("16", "mono") or not entry.chunk_marks:
+            return None
+        if not md_lines:
+            return None
+        fade_s = max(0.05, float(self.settings.get("ui.stream_fade_ms") or 220) / 1000.0)
+        last = md_lines[-1]
+        tail_len = sum(len(s.text) for s in last)
+        if not tail_len:
+            return None
+        marks = entry.chunk_marks
+
+        def char_time(gi: int) -> float:
+            for end, t in marks:
+                if gi < end:
+                    return t
+            return marks[-1][1]
+
+        entry_alpha = self._alpha(entry, now)
+        muted = _color.palette_color("muted")
+        out = []
+        pos = len(entry.text) - tail_len
+        changed = False
+        for span in last:
+            key, attrs = _STYLE_MAP.get(span.style, _STYLE_MAP["text"])
+            fg = _color.palette_color(key)
+            for ch in span.text:
+                t = marks[-1][1] if mode == "token" else char_time(pos)
+                pos += 1
+                age = (now - t) / fade_s
+                if age >= 1.0:
+                    out.append((ch, fg, attrs))
+                    continue
+                changed = True
+                step = max(0.0, int(max(0.0, age) * 4) / 4.0)
+                col = _color.lerp(muted, fg, step)
+                if entry_alpha < 1.0:
+                    col = _color.lerp(_color.SPACE_BG, col, entry_alpha)
+                out.append((ch, col, attrs))
+        if not changed:
+            return None
+        if entry.streaming:
+            out.append(("▌", muted, _color.DIM))
+        return out
+
+    def _fade_busy(self, now: float) -> bool:
+        """Что-то ещё проявляется — нужен кадр; в простое — тишина."""
+        if str(self.settings.get("ui.stream_fade") or "off") == "off":
+            return False
+        if not self.settings.get("ui.animations"):
+            return False
+        fade_s = max(0.05, float(self.settings.get("ui.stream_fade_ms") or 220) / 1000.0)
+        for entry in reversed(self.entries[-3:]):
+            if entry.chunk_marks and now - entry.chunk_marks[-1][1] < fade_s:
+                return True
+        return False
+
     def _feed_lines(self, width: int, now: float):
         lines: list = []
+        self._line_map = []
         thinking_mode = self._thinking_mode()
         for entry in self.entries:
             if (entry.kind == "guard" and entry.guard_of
                     and self._find("tool", entry.guard_of) is not None):
                 continue  # рисуется внутри своего тула, между вызовом и результатом
-            if entry.kind == "thinking" and not entry.expanded \
+            if entry.kind == "thinking" and not self._exp(entry) \
                     and thinking_mode == "hidden":
                 continue  # /thinking скрыл показ рассуждений
-            lines.extend(self._entry_lines(entry, width, now))
+            entry_lines = self._entry_lines(entry, width, now)
+            for i, line in enumerate(entry_lines):
+                lines.append(line)
+                self._line_map.append((entry, i == 0))
             lines.append(([], None))
+            self._line_map.append(None)
         if lines:
             lines.pop()
+            self._line_map.pop()
         return lines
 
     def _panel_content(self, panel_id: str):
@@ -3315,6 +4193,11 @@ class ChatApp:
                 break
             bg = grad[col - px] if col - px < len(grad) else PANEL_BG
             col += buf.text(col, py, ch, fg=fg, bg=bg, attrs=_color.BOLD)
+        if pw >= 6:
+            # Крестик закрытия — в правом конце заголовка (ЗАДАЧА-20);
+            # попадание по нему считает _panel_mouse по геометрии панели.
+            bg = grad[pw - 1] if pw - 1 < len(grad) else PANEL_BG
+            buf.text(px + pw - 1, py, "✕", fg=DIM_FG, bg=bg)
 
     def _draw_panels(self, buf: Buffer, x: int, y: int, w: int, h: int, now: float,
                      tree=None) -> None:
@@ -3381,6 +4264,10 @@ class ChatApp:
             x = 1
             for text, fg, attrs in painted:
                 x += buf.text(x, row, text, fg=fg, bg=bg, attrs=attrs)
+            # Кликабельная зона строки пункта — из карты строк выбиралки.
+            item = picker._row_map.get(row)
+            if item is not None:
+                self.zones.append((0, row, width, row + 1, ("picker", item)))
 
     def _status_line(self, buf: Buffer, y: int, cols: int, now: float) -> None:
         buf.fill_rect(0, y, cols, 1, " ", bg=STATUS_BG)
@@ -3390,23 +4277,60 @@ class ChatApp:
         phase = _moon.context_phase(self.context_pct, self.glyph_mode)
         pct = str(self.context_pct)
         if variant == "compact":
-            left = " " + phase + " контекст " + pct + "% · " + self.model
+            left = " " + phase + " контекст " + pct + "% · "
             buf.text(0, y, left, fg=_color.SILVER, bg=STATUS_BG)
+            mx = str_width(left)
+            buf.text(mx, y, self.model, fg=_color.SILVER, bg=STATUS_BG)
+            self.zones.append((mx, y, mx + str_width(self.model), y + 1,
+                               ("status", "model")))
+            left += self.model
             right = "$" + format(self.cost, ".4f")
             rx = max(str_width(left) + 1, cols - str_width(right) - 1)
             if rx < cols:
                 buf.text(rx, y, right, fg=DIM_FG, bg=STATUS_BG, attrs=_color.DIM)
             return
-        left = " " + phase + " контекст " + pct + "% · " + self.mode + " · " + self.model
+        # Полный вариант — кликабельными сегментами (ЗАДАЧА-20): каждый
+        # сегмент открывает ту же выбиралку, что и его команда. На узком
+        # экране первыми уходят тема, мышление и effort — режим, модель,
+        # отправка и стоимость остаются всегда.
         effort = str(self.settings.get("model.effort") or "auto")
-        if effort != "auto":
-            left += " · effort " + effort
+        segments = [
+            (" " + phase + " контекст " + pct + "%", None, "core"),
+            (" · ", None, "core"),
+            (self.mode, ("status", "mode"), "core"),
+            (" · ", None, "core"),
+            (self.model, ("status", "model"), "core"),
+            (" · effort ", None, "effort"),
+            (effort, ("status", "effort"), "effort"),
+            (" · мышление ", None, "thinking"),
+            (self._thinking_mode(), ("status", "thinking"), "thinking"),
+            (" · отправка ", None, "core"),
+            (self._send_mode(), ("status", "send"), "core"),
+            (" · тема ", None, "theme"),
+            (str(self.settings.get("ui.theme") or "luna"), ("status", "theme"), "theme"),
+        ]
         if self.layout.leaves() and not self.panel_focus:
-            left += " · F6 — панели"
+            segments.append((" · F6 — панели", None, "extra"))
         if self.settings.get("ui.vim_mode"):
-            left += " · vim:" + ("normal" if self._vim_normal else "insert")
-        buf.text(0, y, left, fg=_color.SILVER, bg=STATUS_BG)
-        x = str_width(left)
+            segments.append((" · vim:" + ("normal" if self._vim_normal else "insert"), None, "extra"))
+        right_w = str_width("$" + format(self.cost, ".4f")) + 1
+        if self.queue:
+            right_w += str_width(" · очередь: " + str(len(self.queue)))
+        for drop in ("extra", "theme", "thinking", "effort"):
+            total = sum(str_width(t) for t, _a, _tag in segments)
+            if total + 1 + right_w <= cols:
+                break
+            segments = [s for s in segments if s[2] != drop]
+        x = 0
+        for text, action, _tag in segments:
+            w = str_width(text)
+            if x + w > cols:
+                break
+            buf.text(x, y, text, fg=_color.SILVER, bg=STATUS_BG)
+            if action is not None and w:
+                self.zones.append((x, y, x + w, y + 1, action))
+            x += w
+        left = "".join(t for t, _a, _tag in segments)
         if self.busy:
             phrase, alpha = self.wheel.text_alpha(now)
             spin = "  " + self.spinner.glyph(now) + " " + phrase + "…"
@@ -3435,7 +4359,12 @@ class ChatApp:
             # Ручная ширина колонки (перетаскивание, Shift+←/→) побеждает
             # долю по умолчанию и живёт в раскладке (ЗАДАЧА-18).
             if self.layout.column_w:
-                target = min(max(16, self.layout.column_w), max(24, cols - 24))
+                manual = self.layout.column_w
+                if self._saved_cols and cols < self._saved_cols:
+                    # Терминал уже сохранённого: ужать пропорционально,
+                    # само сохранённое значение не трогаем (ЗАДАЧА-20).
+                    manual = max(16, manual * cols // self._saved_cols)
+                target = min(max(16, manual), max(24, cols - 24))
             else:
                 target = max(24, cols // 3)
         if self.layout.leaves():
@@ -3472,6 +4401,7 @@ class ChatApp:
             _themes.apply_theme(theme_name)
             self._applied_theme = theme_name
         self._geom_cols = cols
+        self.zones = []  # карта кликабельных зон строится заново на кадр
         buf = Buffer(cols, rows)
         buf.clear(bg=_color.SPACE_BG)
         panel_w = self._panel_width(cols, now)
@@ -3479,9 +4409,10 @@ class ChatApp:
         chat_w = cols - panel_w
         guard = self.pending_guard
         ask = self.pending_ask
-        if guard is not None and not self.guard_editing:
+        if guard is not None and not self.guard_editing and not self._guard_replace:
             input_lines, cursor_pos = ["Enter — да · n — нет · e — править · "
-                                       "a — дальше без вопросов · q — стоп"], (0, 0)
+                                       "a — без вопросов · p — в проекте без вопросов · "
+                                       "r — нет, и вот что вместо · q — стоп"], (0, 0)
             input_h = 1
         elif ask is not None and not self.editor.text:
             input_lines, cursor_pos = ["↑↓ — выбор · Enter — ответить"], (0, 0)
@@ -3495,7 +4426,7 @@ class ChatApp:
                           full_cursor[1])
         completion_h = 0
         if self.cmd_completions:
-            completion_h = min(5, len(self.cmd_completions))
+            completion_h = min(10, len(self.cmd_completions))
         elif self.completions:
             completion_h = min(5, len(self.completions))
         meta_lines = self._meta_lines(now)
@@ -3519,6 +4450,13 @@ class ChatApp:
             x = 0
             for text, fg, attrs in spans:
                 x += buf.text(x, row, text, fg=fg, bg=bg or _color.SPACE_BG, attrs=attrs)
+            # Зоны ленты: заголовок раскрываемого блока и ссылки/пути.
+            mapped = self._line_map[start + row] if start + row < len(self._line_map) else None
+            if mapped is not None and mapped[1] and self._expandable(mapped[0]):
+                self.zones.append((0, row, chat_w, row + 1, ("block", mapped[0])))
+            line_text = self._feed_texts[start + row] if start + row < len(self._feed_texts) else ""
+            for a, b, token in _find_links(line_text):
+                self.zones.append((a, row, b + 1, row + 1, ("link", token)))
         self._draw_selection(buf, start, feed_h)
         if panel_w:
             tree = self.layout if self.layout.leaves() else (self._panel_ghost or self.layout)
@@ -3536,10 +4474,19 @@ class ChatApp:
             self._panel_rects = {}
         cy = feed_h
         if self.cmd_completions:
-            for i, (name, desc) in enumerate(self.cmd_completions[:completion_h]):
+            # Окно списка команд вокруг выбранной: список полный (раздел 5
+            # ЗАДАЧИ-20), показ прокручивается за completion_index.
+            total = len(self.cmd_completions)
+            win_start = max(0, min(self.completion_index - completion_h + 1,
+                                   total - completion_h))
+            for j in range(completion_h):
+                i = win_start + j
+                if i >= total:
+                    break
+                name, desc = self.cmd_completions[i]
                 style_fg = _color.CYAN if i == self.completion_index else DIM_FG
                 attrs = _color.BOLD if i == self.completion_index else _color.DIM
-                buf.text(2, cy + i, "/" + name + " — " + desc,
+                buf.text(2, cy + j, "/" + name + " — " + desc,
                          fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
         else:
             for i, candidate in enumerate(self.completions[:completion_h]):
@@ -3568,11 +4515,14 @@ class ChatApp:
             attrs = _color.BOLD if guard is not None or i == 0 else 0
             buf.text(0, iy + i, prefix, fg=fg, bg=_color.SPACE_BG, attrs=_color.BOLD)
             buf.text(2, iy + i, line, fg=_color.SILVER, bg=_color.SPACE_BG, attrs=attrs)
+        if self._pastes and any(ph in self.editor.text for ph in self._pastes):
+            # Клик по полю ввода со свёрнутой вставкой — развернуть её.
+            self.zones.append((0, iy, chat_w, iy + input_h, ("paste",)))
         self._status_line(buf, rows - 1, cols, now)
         if self.picker is not None:
             self._draw_picker(buf, chat_w, feed_h, now)
             return buf, None
-        if guard is not None and not self.guard_editing:
+        if guard is not None and not self.guard_editing and not self._guard_replace:
             return buf, None
         if ask is not None and not self.editor.text:
             return buf, None
@@ -3616,6 +4566,23 @@ def _clipboard_text() -> str:
         if proc.returncode == 0 and proc.stdout:
             return proc.stdout.decode("utf-8", "replace")
     return ""
+
+
+def _open_external(target: str) -> None:
+    """Открыть ссылку/файл снаружи (клик по ленте, ui.click_link=open)."""
+    import subprocess
+    import sys
+    import webbrowser
+
+    if target.startswith(("http://", "https://")):
+        webbrowser.open(target)
+        return
+    if sys.platform == "win32":
+        os.startfile(target)  # noqa: S606 — путь из ленты, действие человека
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    else:
+        subprocess.Popen(["xdg-open", target])
 
 
 def _open_session(settings, data, continue_last: bool, fake: bool,
@@ -3697,6 +4664,25 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                               source=create_source(settings, fake=fake), trap=trap,
                               copy_hook=lambda text: _copy_to_clipboard(text, term),
                               journal=journal, data=data)
+                # Хуки живого терминала (ЗАДАЧА-20): уровень цвета для fade,
+                # звонок/уведомления, заголовок окна, открытие ссылок, фон.
+                app.color_level = term.caps.color_level
+                app.notify_hook = term.write
+                app.title_hook = lambda t: term.write("\x1b]2;" + t + "\a")
+                app.open_hook = _open_external
+                if os.name == "posix":
+                    def _suspend() -> None:
+                        term.suspend()
+                        try:
+                            import signal as _signal
+
+                            os.kill(os.getpid(), _signal.SIGTSTP)
+                        finally:
+                            term.resume()
+                            app._redraw = True
+
+                    app.suspend_hook = _suspend
+                app._update_title()
                 if restored:
                     app.restore(restored)
                     app.attach_history(restored)

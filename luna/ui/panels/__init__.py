@@ -287,6 +287,64 @@ class LayoutTree:
         self.open(panel_id)
         return True
 
+    def open_at(self, panel_id: str, index: int | None = None,
+                weight: float | None = None) -> bool:
+        """Открыть панель на запомненное место (ЗАДАЧА-20): если корень —
+        плоская стопка листьев, вставить по индексу с запомненным весом;
+        иначе — обычное open(). True — панель появилась."""
+        if panel_id in self:
+            self.focused = panel_id
+            return False
+        root = self.root
+        if (index is not None and root is not None and root.kind == "split"
+                and root.direction == "v"
+                and all(c.kind == "leaf" for c in root.children)):
+            leaf = Node("leaf", panel_id=panel_id)
+            idx = max(0, min(int(index), len(root.children)))
+            root.children.insert(idx, leaf)
+            root.weights.insert(idx, float(weight) if weight else 1.0)
+            self.focused = panel_id
+            return True
+        return self.open(panel_id)
+
+    # --- снимок целиком (память раскладки, ЗАДАЧА-20) -------------------------
+
+    def snapshot(self) -> dict:
+        """Всё состояние дерева одним словарём: дерево, фокус, веса по id."""
+        weights: dict = {}
+        order: list = []
+
+        def walk(node):
+            if node is None:
+                return
+            if node.kind == "leaf":
+                order.append(node.panel_id)
+                return
+            for child, w in zip(node.children, node.weights):
+                if child.kind == "leaf":
+                    weights[child.panel_id] = w
+                walk(child)
+
+        walk(self.root)
+        return {"tree": self.root.to_dict() if self.root is not None else None,
+                "focused": self.focused, "maximized": self.maximized,
+                "column_w": self.column_w, "manual": sorted(self.manual),
+                "weights": weights, "order": order}
+
+    def restore(self, data: dict) -> None:
+        """Применить снимок snapshot(); битые куски пропускаются молча."""
+        if not isinstance(data, dict):
+            return
+        tree = data.get("tree")
+        self.root = Node.from_dict(tree) if isinstance(tree, dict) else None
+        leaves = self.leaves()
+        self.focused = data.get("focused") if data.get("focused") in leaves \
+            else (leaves[0] if leaves else None)
+        self.maximized = data.get("maximized") if data.get("maximized") in leaves else None
+        column_w = data.get("column_w")
+        self.column_w = int(column_w) if column_w else None
+        self.manual = {p for p in (data.get("manual") or []) if p in leaves}
+
     def focus_next(self, step: int = 1) -> str | None:
         leaves = self.leaves()
         if not leaves:

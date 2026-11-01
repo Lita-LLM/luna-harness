@@ -28,6 +28,7 @@ from . import layout as _layout
 from . import moon as _moon
 from . import phrases
 from . import themes as _themes
+from . import thinking_view as _think
 from .anim import PhraseWheel, Scheduler, Spinner, ease_in_out, ease_out
 from .editor import TextEditor
 from .keys import Key, Mouse, Paste, Resize
@@ -111,7 +112,9 @@ COMMANDS = [
     ("theme", "тема оформления: палитры luna, amoled, contrast, mono, light и свои из LUNA_HOME/themes"),
     ("editor", "сочинить сообщение во внешнем редакторе"),
     ("details", "детали ленты вкл/выкл: вывод тулов свёрнуто или скрыто"),
-    ("thinking", "показ рассуждений в ленте вкл/выкл"),
+    ("thinking", "показ рассуждений: /thinking [summary|full|hidden] — по кругу summary → hidden → full, на лету — Alt+O"),
+    ("effort", "усилие рассуждений: /effort [роль] [уровень] — выбиралка; шкала auto/none/minimal/low/medium/high/xhigh/max, на лету — Alt+E"),
+    ("delete", "текущую сессию — в корзину и начать новую (повтор команды — подтверждение; вернуть — u в /sessions)"),
     ("btw", "вопрос в сторону, не сбивая ход: /btw <вопрос>"),
     ("bug", "отчёт об ошибке файлом: версия, окружение, ошибки (без секретов)"),
     ("diff", "панель «Git»: ветка, изменения, дифф"),
@@ -157,6 +160,8 @@ COMMAND_RU = {
     "редактор": "editor",
     "детали": "details",
     "рассуждения": "thinking",
+    "усилие": "effort",
+    "удалить": "delete",
     "мимо": "btw",
     "ошибка": "bug",
     "дифф": "diff",
@@ -199,6 +204,7 @@ HELP_TEXT = """Команды и клавиши Луны
 Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера)
 Esc Esc на пустом вводе — откат к ходу выбиралкой · Esc во время хода — прервать ход одним нажатием · Ctrl+C во время хода — прервать; без хода — очистить ввод, второй подряд за секунду — выход
 Отправка во время хода (chat.send_mode): inject — вставка в ход · queue — очередь · interrupt — прервать и отправить · Ctrl+S — сменить режим · Alt+Enter — разово прервать и отправить · ↑ на пустом поле — вернуть сообщение из очереди
+Мышление: /thinking — показ рассуждений по кругу summary (шапка «думает» и пересказ быстрой роли) → hidden → full, Alt+O — тот же круг на лету; /effort — глубина рассуждений, Alt+E — уровень по кругу на лету
 !команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить; Tab после / — дополнить команду)
 Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор · Tab / Shift+Tab — режим по кругу
 Ctrl+O — раскрыть/свернуть детали записи · F6 — в режим панелей (панели открыты) или открыть «План»
@@ -321,6 +327,12 @@ class Entry:
     born: float = 0.0
     streaming: bool = False
     guard_of: str = ""     # guard: id тула, к которому относится подтверждение
+    # Мышление (ЗАДАЧА-19): строки пересказа быстрой ролью — пары
+    # (текст, момент рождения) для градиента появления; finished_at —
+    # когда рассуждение кончилось; chunk_at — последний кусок (вспышка звёзд).
+    summary_lines: list = field(default_factory=list)
+    finished_at: float = 0.0
+    chunk_at: float = 0.0
 
 
 class ChatApp:
@@ -356,6 +368,10 @@ class ChatApp:
         self._edit_manner_id = ""
         self._pending_switch = None   # путь сессии: переключиться по концу хода
         self._pending_new = False     # новая сессия по концу хода
+        # Удаление текущей сессии (ЗАДАЧА-19): по концу хода / подтверждение.
+        self._pending_delete_current = False
+        self._last_deleted_current = None  # путь: u в /sessions вернёт и переключит
+        self._delete_confirm_until = 0.0
         self._want_journal = False    # журнал создать при закрытии выбиралки (--resume)
         self._restoring = False
         self.source = source if source is not None else create_source(self.settings)
@@ -681,6 +697,63 @@ class ChatApp:
                                        "/sessions вернёт к ней."))
         return True
 
+    def delete_current_session(self) -> None:
+        """/delete: текущую сессию — в корзину, сразу новая пустая.
+
+        Подтверждение — повторной командой в течение 10 секунд (как
+        двойной Ctrl+C): первое /delete спрашивает, второе выполняет.
+        Идущий ход сначала прерывается, удаление — по его концу.
+        """
+        if self.journal is None:
+            self._add(Entry("notice", text="Журнал выключен — удалять нечего."))
+            return
+        if self.busy:
+            self._pending_delete_current = True
+            self.send_command({"type": "interrupt"})
+            if self._pending_delete_current:
+                self._add(Entry("notice", text="Прерываю ход — и удаляю "
+                                               "текущую сессию."))
+            return
+        now = self._clock()
+        if now > self._delete_confirm_until:
+            self._delete_confirm_until = now + 10.0
+            self._add(Entry("notice", text="Удалить текущую сессию в корзину "
+                                           "и начать новую? Повтори /delete "
+                                           "в течение 10 секунд."))
+            return
+        self._delete_confirm_until = 0.0
+        self._do_delete_current()
+
+    def _do_delete_current(self) -> None:
+        """Само удаление текущей: журнал закрыт, файл с чекпоинтами — в
+        корзину ЗАДАЧИ-17 (sessions/.trash), дальше — как /new."""
+        from ..core.sessions import trash_session
+
+        journal = self.journal
+        if journal is None:
+            return
+        path = journal.path
+        self.journal = None
+        try:
+            journal.close()
+        except Exception:
+            pass  # журнал уже закрыт — не страшно, файл на месте
+        moved = None
+        try:
+            moved = trash_session(self._data_dir(), path)
+        except OSError:
+            moved = None
+        self._last_deleted_current = str(path)
+        self._do_new_session()
+        if moved is not None:
+            self._add(Entry("notice", text="Прежняя сессия — в корзине. "
+                                           "Вернуть её: /sessions, клавиша u "
+                                           "— и чат переключится обратно."))
+        else:
+            self._add(Entry("notice", text="Файл прежней сессии в корзину не "
+                                           "уехал (его уже не было), но новая "
+                                           "сессия начата."))
+
     def rename_session(self, title: str) -> None:
         """/rename <имя> — имя текущей сессии, в журнал и в выбиралку."""
         title = title.strip()
@@ -962,6 +1035,13 @@ class ChatApp:
                 self.settings.set("ui.theme", item.key)
                 self._applied_theme = _themes.apply_theme(item.key)
                 self._add(Entry("notice", text="Тема оформления: " + item.key))
+            elif kind == "effort":
+                self.picker = None
+                key = str(item.payload or "model.effort")
+                self.settings.set(key, item.key)
+                self._add(Entry("notice", text="Усилие рассуждений (" + key + "): "
+                                               + item.key + " — со следующего "
+                                               "вызова модели."))
             elif kind == "history":
                 self.picker = None
                 if item.payload:
@@ -1094,7 +1174,8 @@ class ChatApp:
         elif self._picker_kind == "manners":
             self._manners_picker_action(action)
         elif self._picker_kind in ("panels", "help", "models", "mcp", "agents",
-                                   "theme", "history", "rewind", "adddir", "cells"):
+                                   "theme", "history", "rewind", "adddir", "cells",
+                                   "effort"):
             self._extra_picker_action(action)
 
     def _is_current_session(self, item) -> bool:
@@ -1109,6 +1190,17 @@ class ChatApp:
                 self.switch_session(inner[1].payload["path"])
             elif inner and inner[0] == "trash":
                 self._trash_session_items(inner[1])
+            elif inner and inner[0] == "trash_current":
+                # Текущую — в корзину и сразу новую (ЗАДАЧА-19).
+                self.picker = None
+                if self.busy:
+                    self._pending_delete_current = True
+                    self.send_command({"type": "interrupt"})
+                    if self._pending_delete_current:
+                        self._add(Entry("notice", text="Прерываю ход — и удаляю "
+                                                       "текущую сессию."))
+                else:
+                    self._do_delete_current()
             return
         if action[0] == "input":
             text, ctx = action[1], action[2]
@@ -1138,6 +1230,14 @@ class ChatApp:
             from ..core.sessions import undo_trash
 
             restored = undo_trash(self._data_dir())
+            if (restored is not None and self._last_deleted_current
+                    and str(restored) == self._last_deleted_current):
+                # Возвращаем именно удалённую текущую — и переключаемся
+                # обратно на неё (ЗАДАЧА-19).
+                self._last_deleted_current = None
+                self.picker = None
+                self.switch_session(restored)
+                return
             self._refresh_sessions_picker()
             note = ("Сессия возвращена из корзины." if restored is not None
                     else "Корзина пуста — возвращать нечего.")
@@ -1161,7 +1261,11 @@ class ChatApp:
             return
         if name == "delete":
             if self._is_current_session(item):
-                self._add(Entry("notice", text="Текущую сессию не трогаю."))
+                # Текущую можно (ЗАДАЧА-19): подтверждение — корзина —
+                # сразу новая пустая сессия, как /new.
+                picker.ask_confirm(
+                    "Текущую сессию — в корзину и начать новую?",
+                    ("trash_current", item))
                 return
             picker.ask_confirm(
                 "Удалить сессию «" + item.title + "» в корзину?",
@@ -1344,11 +1448,28 @@ class ChatApp:
         elif kind == "turn.start":
             self.busy = True
         elif kind == "agent.thinking":
-            self._stream_entry("thinking").text += str(ev.get("text", ""))
+            entry = self._stream_entry("thinking")
+            entry.text += str(ev.get("text", ""))
+            entry.chunk_at = self._clock()
+        elif kind == "thinking.summary":
+            # Пересказ быстрой роли: строкой в запись «думает» (ЗАДАЧА-19).
+            # Событие может прийти позже конца шага — крепится к последней
+            # записи рассуждений, поток хода оно не задерживает.
+            target = None
+            for cand in reversed(self.entries):
+                if cand.kind == "thinking":
+                    target = cand
+                    break
+            if target is not None:
+                target.summary_lines.append(
+                    (str(ev.get("text", "")), self._clock()))
         elif kind == "agent.text":
             self._stream_entry("agent").text += str(ev.get("text", ""))
         elif kind == "agent.text.done":
+            now_clock = self._clock()
             for entry in self.entries:
+                if entry.streaming and entry.kind == "thinking":
+                    entry.finished_at = now_clock
                 entry.streaming = False
         elif kind == "tool.call":
             self._add(Entry("tool", name=str(ev.get("name", "")),
@@ -1427,7 +1548,10 @@ class ChatApp:
             self._add(Entry("error", text=text))
         elif kind == "turn.done":
             self.busy = False
+            now_clock = self._clock()
             for entry in self.entries:
+                if entry.streaming and entry.kind == "thinking":
+                    entry.finished_at = now_clock
                 entry.streaming = False
             if self._pending_switch is not None:
                 path, self._pending_switch = self._pending_switch, None
@@ -1435,6 +1559,9 @@ class ChatApp:
             elif self._pending_new:
                 self._pending_new = False
                 self._do_new_session()
+            elif self._pending_delete_current:
+                self._pending_delete_current = False
+                self._do_delete_current()
             elif self._after_interrupt:
                 text, self._after_interrupt = self._after_interrupt, ""
                 self._send_user_message(text, delivery="interrupt")
@@ -1642,7 +1769,11 @@ class ChatApp:
         elif cmd == "/details":
             self._flip_setting("ui.details", "Детали ленты")
         elif cmd == "/thinking":
-            self._flip_setting("ui.show_thinking", "Рассуждения в ленте")
+            self._thinking_command(parts[1:])
+        elif cmd == "/effort":
+            self._effort_command(parts[1:])
+        elif cmd == "/delete":
+            self.delete_current_session()
         elif cmd == "/copy":
             self._copy_command(parts[1:])
         elif cmd in ("/sessions", "/resume", "/continue"):
@@ -1705,6 +1836,108 @@ class ChatApp:
         self._add(Entry("notice", text="Модель роли " + role + ": " + ref
                                        + " — со следующего хода."))
 
+    # --- мышление и усилие (ЗАДАЧА-19) ------------------------------------
+
+    _THINKING_ORDER = ("summary", "hidden", "full")
+    _THINKING_TITLES = {
+        "summary": "summary — шапка «думает» и пересказ одной строкой; "
+                   "полный текст — Ctrl+O",
+        "full": "full — полный текст рассуждений сразу",
+        "hidden": "hidden — рассуждения не показываются (Ctrl+O развернёт)",
+    }
+
+    def _set_thinking_mode(self, mode: str) -> None:
+        # ui.show_thinking старше и не переименовывается: держим оба ключа
+        # согласованными, чтобы старые читатели не врали.
+        self.settings.set("ui.thinking", mode)
+        self.settings.set("ui.show_thinking", mode != "hidden")
+
+    def _thinking_command(self, args: list) -> None:
+        """/thinking: по кругу summary → hidden → full; аргумент — сразу."""
+        arg = args[0].strip().lower() if args else ""
+        if arg in ("off", "нет"):
+            mode = "hidden"
+        elif arg in ("on",):
+            mode = "full"
+        elif arg in self._THINKING_ORDER:
+            mode = arg
+        elif not arg:
+            mode = self._next_thinking_mode()
+        else:
+            self._add(Entry("notice", text="Режимы рассуждений: summary, "
+                                           "full, hidden. Сейчас: "
+                                           + self._thinking_mode()))
+            return
+        self._set_thinking_mode(mode)
+        self._add(Entry("notice", text="Рассуждения: "
+                                       + self._THINKING_TITLES[mode]))
+
+    def _next_thinking_mode(self) -> str:
+        current = self._thinking_mode()
+        idx = self._THINKING_ORDER.index(current)
+        return self._THINKING_ORDER[(idx + 1) % len(self._THINKING_ORDER)]
+
+    def _cycle_thinking(self) -> None:
+        """Alt+O: режим показа рассуждений — по кругу, на лету."""
+        mode = self._next_thinking_mode()
+        self._set_thinking_mode(mode)
+        self._flash_hint("Рассуждения: " + self._THINKING_TITLES[mode])
+
+    _EFFORT_LEVELS = ("auto", "none", "minimal", "low", "medium", "high",
+                      "xhigh", "max")
+    _EFFORT_ROLES = ("main", "fast", "guard", "vision")
+
+    def open_effort_picker(self, setting_key: str) -> None:
+        """/effort: уровень шкалы выбиралкой для общего ключа или роли."""
+        current = str(self.settings.get(setting_key) or "auto")
+        items = []
+        for level in self._EFFORT_LEVELS:
+            items.append(PickerItem(
+                key=level, title=level + " — " + _think.EFFORT_TITLES[level],
+                mark="→" if level == current else "", payload=setting_key))
+        self._open_picker("effort", "Усилие рассуждений (" + setting_key + ")",
+                          items,
+                          hint="Enter — задать · Esc — закрыть",
+                          preview_lines=0)
+
+    def _effort_command(self, args: list) -> None:
+        """/effort [роль] [уровень]: без аргументов — выбиралка общего."""
+        args = [a.strip().lower() for a in args if a.strip()]
+        if not args:
+            self.open_effort_picker("model.effort")
+            return
+        if len(args) == 1 and args[0] in self._EFFORT_ROLES:
+            self.open_effort_picker("model.effort_" + args[0])
+            return
+        if len(args) == 1 and args[0] in self._EFFORT_LEVELS:
+            self.settings.set("model.effort", args[0])
+            self._add(Entry("notice", text="Усилие рассуждений: " + args[0]
+                                           + " — со следующего вызова модели."))
+            return
+        if (len(args) == 2 and args[0] in self._EFFORT_ROLES
+                and args[1] in self._EFFORT_LEVELS):
+            self.settings.set("model.effort_" + args[0], args[1])
+            self._add(Entry("notice", text="Усилие роли " + args[0] + ": "
+                                           + args[1] + " — со следующего "
+                                           "вызова модели."))
+            return
+        self._add(Entry("notice", text="Нужно: /effort, /effort <уровень>, "
+                                       "/effort <роль> или /effort <роль> "
+                                       "<уровень>; роли: main, fast, guard, "
+                                       "vision; шкала: auto, none, minimal, "
+                                       "low, medium, high, xhigh, max."))
+
+    def _cycle_effort(self) -> None:
+        """Alt+E: общее усилие рассуждений — по кругу шкалы, на лету."""
+        current = str(self.settings.get("model.effort") or "auto")
+        if current not in self._EFFORT_LEVELS:
+            current = "auto"
+        nxt = self._EFFORT_LEVELS[
+            (self._EFFORT_LEVELS.index(current) + 1) % len(self._EFFORT_LEVELS)]
+        self.settings.set("model.effort", nxt)
+        self._flash_hint("Усилие рассуждений: " + nxt + " ("
+                         + _think.EFFORT_TITLES[nxt] + ")")
+
     def _usage_command(self, *, usage: bool) -> None:
         """/cost и /usage: расход сессии из PanelData (события usage)."""
         data = self.panel_data
@@ -1745,7 +1978,9 @@ class ChatApp:
                  + format(self.cost, ".4f") + " · ходов: " + str(turns),
                  "панели открыты: " + panels,
                  "тема: " + str(self.settings.get("ui.theme"))
-                 + " · статус-строка: " + str(self.settings.get("ui.statusline"))]
+                 + " · статус-строка: " + str(self.settings.get("ui.statusline")),
+                 "мышление: " + self._thinking_mode()
+                 + " · усилие: " + str(self.settings.get("model.effort") or "auto")]
         if self.extra_dirs:
             lines.append("доп. каталоги: " + ", ".join(self.extra_dirs))
         self._add(Entry("help", text="\n".join(lines)))
@@ -2118,6 +2353,12 @@ class ChatApp:
             return
         if key.label == "ctrl+s":
             self._cycle_send_mode()
+            return
+        if key.label == "alt+e":
+            self._cycle_effort()
+            return
+        if key.label == "alt+o":
+            self._cycle_thinking()
             return
         if key.label == "ctrl+r":
             self.open_history_picker()
@@ -2818,13 +3059,54 @@ class ChatApp:
                     spans.append(("▌", "dim"))  # живой курсор стрима — в той же строке
                 add(spans)
         elif entry.kind == "thinking":
-            if entry.expanded:
+            mode = self._thinking_mode()
+            elapsed = max(0.0, (entry.finished_at or now) - entry.born) \
+                if entry.born else 0.0
+            secs = int(elapsed)
+            moon = _think.moon_glyph(elapsed, self.glyph_mode)
+            effort = str(self.settings.get("model.effort") or "auto")
+            stars = ""
+            if entry.streaming and self.settings.get("ui.animations"):
+                # Звёзды вспыхивают на свежих кусках; глубина effort —
+                # числом звёзд (орбит) в шапке.
+                stars = " " + _think.star_sparkle(
+                    now, entry.chunk_at, 2 + _think.orbit_count(effort),
+                    self.glyph_mode)
+            verb = "думает" if entry.streaming else "думала"
+            head = [(moon + " ", "amber"),
+                    (verb + " · " + str(secs) + " с", "dim")]
+            if stars:
+                head.append((stars, "cyan"))
+            add(_clip_line(head, w))
+
+            def add_grad(spans, born_at):
+                line_alpha = alpha
+                if self.settings.get("ui.animations"):
+                    line_alpha = alpha * _think.summary_alpha(born_at, now)
+                raw.append((self._paint(spans, line_alpha), None))
+
+            if entry.expanded or mode == "full":
                 for line in wrap_text(entry.text, w - 2):
                     add([("◦ ", "dim"), (line, "comment")])
-            else:
+            elif mode == "summary":
+                for text_line, line_born in entry.summary_lines:
+                    for visual in wrap_text(text_line, w - 4):
+                        add_grad([("  ↳ ", "cyan"), (visual, "text")], line_born)
                 count = len(entry.text)
-                label = "рассуждения · символов: " + str(count) + " · Ctrl+O — показать"
-                add([("◦ ", "dim"), (label, "dim")])
+                if entry.summary_lines:
+                    label = "Ctrl+O — полный текст рассуждений"
+                elif not entry.streaming:
+                    # Пересказа не случилось: быстрая роль не настроена
+                    # или провайдер молчал — говорим честно.
+                    label = ("рассуждения · символов: " + str(count)
+                             + " · без пересказа · Ctrl+O — показать")
+                else:
+                    label = ""
+                if label:
+                    add([("◦ ", "dim"), (label, "dim")])
+            else:  # hidden, но запись раскрыта Ctrl+O
+                for line in wrap_text(entry.text, w - 2):
+                    add([("◦ ", "dim"), (line, "comment")])
         elif entry.kind == "tool":
             glyph = {"emoji": "⚙", "narrow": "•", "ascii": "+"}[self.glyph_mode]
             head = [(glyph + " ", "tool"), (entry.name or "tool", "tool")]
@@ -2833,6 +3115,10 @@ class ChatApp:
                 head.append(("  " + compact, "text"))
             if entry.status == "running":
                 head.append(("  " + self.spinner.glyph(now), "amber"))
+                if self.settings.get("ui.animations"):
+                    # Метеор вызова (ЗАДАЧА-19): звёздный след у идущего тула.
+                    head.append((" " + _think.star_sparkle(
+                        now, entry.born, 3, self.glyph_mode), "cyan"))
             add(_clip_line(head, w))
             if entry.intent:
                 for line in wrap_text(entry.intent, w - 2):
@@ -2959,15 +3245,27 @@ class ChatApp:
                 if e.kind == "guard" and e.guard_of
                 and e.guard_of == tool_entry.entry_id]
 
+    def _thinking_mode(self) -> str:
+        """Режим показа рассуждений (ЗАДАЧА-19): hidden | summary | full.
+
+        ui.show_thinking старше ui.thinking и не переименовывается:
+        выключенный ui.show_thinking всегда значит hidden.
+        """
+        mode = str(self.settings.get("ui.thinking") or "summary")
+        if mode == "hidden" or not self.settings.get("ui.show_thinking"):
+            return "hidden"
+        return mode if mode in ("summary", "full") else "summary"
+
     def _feed_lines(self, width: int, now: float):
         lines: list = []
-        show_thinking = bool(self.settings.get("ui.show_thinking"))
+        thinking_mode = self._thinking_mode()
         for entry in self.entries:
             if (entry.kind == "guard" and entry.guard_of
                     and self._find("tool", entry.guard_of) is not None):
                 continue  # рисуется внутри своего тула, между вызовом и результатом
-            if entry.kind == "thinking" and not entry.expanded and not show_thinking:
-                continue  # /thinking выключил показ рассуждений
+            if entry.kind == "thinking" and not entry.expanded \
+                    and thinking_mode == "hidden":
+                continue  # /thinking скрыл показ рассуждений
             lines.extend(self._entry_lines(entry, width, now))
             lines.append(([], None))
         if lines:
@@ -3100,6 +3398,9 @@ class ChatApp:
                 buf.text(rx, y, right, fg=DIM_FG, bg=STATUS_BG, attrs=_color.DIM)
             return
         left = " " + phase + " контекст " + pct + "% · " + self.mode + " · " + self.model
+        effort = str(self.settings.get("model.effort") or "auto")
+        if effort != "auto":
+            left += " · effort " + effort
         if self.layout.leaves() and not self.panel_focus:
             left += " · F6 — панели"
         if self.settings.get("ui.vim_mode"):

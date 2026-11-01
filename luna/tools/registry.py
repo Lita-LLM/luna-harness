@@ -34,6 +34,8 @@ class ToolContext:
     ask_user_fn: Callable | None = None   # (question, options) -> str | None
     output_dir: Path | None = None        # куда складывать полный вывод при обрезке
     web_fetcher: Callable | None = None   # (url) -> str, подмена сети в тестах
+    mcp_caller: Callable | None = None    # (url, headers, tool, args) -> dict:
+                                          # подмена MCP-вызовов поиска в тестах
     todos: list = field(default_factory=list)
     background: dict = field(default_factory=dict)
     agent: object = None                  # агент-владелец (для тулов детей: assistant, crew)

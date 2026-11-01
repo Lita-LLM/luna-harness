@@ -50,3 +50,7 @@ class ChatResult:
     usage: Usage = field(default_factory=Usage)
     model: str = ""
     finish: str = ""
+    # Пометы роутера человеку (ЗАДАЧА-19): например, effort пришлось
+    # подвинуть к ближайшему допустимому. Агент публикует их событием
+    # effort.note — они видны в «Обратной стороне», а не в ленте.
+    notes: list = field(default_factory=list)  # list[str]

@@ -104,7 +104,8 @@ class OpenAIAdapter:
             out.append(item)
         return out
 
-    def body(self, model: str, messages: list[dict], tools, stream: bool) -> dict:
+    def body(self, model: str, messages: list[dict], tools, stream: bool,
+             extra: dict | None = None) -> dict:
         body: dict = {"model": model, "messages": self._convert(messages), "stream": stream}
         if stream:
             body["stream_options"] = {"include_usage": True}
@@ -114,6 +115,10 @@ class OpenAIAdapter:
                  "function": {"name": t.name, "description": t.description,
                               "parameters": _with_intent(t.parameters)}}
                 for t in tools]
+        if extra:
+            # Поля усилия рассуждений от router/effort.py (уже переведены
+            # в формат провайдера и поджаты к допустимым значениям).
+            body.update(extra)
         return body
 
     def parse_full(self, data: dict, model: str) -> ChatResult:
@@ -236,7 +241,8 @@ class AnthropicAdapter:
                             "content": blocks})
         return "\n\n".join(p for p in system_parts if p), out
 
-    def body(self, model: str, messages: list[dict], tools, stream: bool) -> dict:
+    def body(self, model: str, messages: list[dict], tools, stream: bool,
+             extra: dict | None = None) -> dict:
         system, converted = self._convert(messages)
         body: dict = {"model": model, "messages": converted, "max_tokens": 8192, "stream": stream}
         if system:
@@ -244,6 +250,13 @@ class AnthropicAdapter:
         if tools:
             body["tools"] = [{"name": t.name, "description": t.description,
                               "input_schema": _with_intent(t.parameters)} for t in tools]
+        if extra:
+            body.update(extra)
+            thinking = extra.get("thinking") or {}
+            budget = thinking.get("budget_tokens")
+            if budget:
+                # Бюджет мышления обязан быть меньше max_tokens, иначе 400.
+                body["max_tokens"] = max(body["max_tokens"], int(budget) + 4096)
         return body
 
     def _blocks_to_result(self, data: dict, model: str) -> ChatResult:
@@ -368,7 +381,8 @@ class GeminiAdapter:
                 out.append({"role": "model" if role == "assistant" else "user", "parts": parts})
         return "\n\n".join(p for p in system_parts if p), out
 
-    def body(self, model: str, messages: list[dict], tools, stream: bool) -> dict:
+    def body(self, model: str, messages: list[dict], tools, stream: bool,
+             extra: dict | None = None) -> dict:
         system, converted = self._convert(messages)
         body: dict = {"contents": converted}
         if system:
@@ -377,6 +391,16 @@ class GeminiAdapter:
             decls = [{"name": t.name, "description": t.description,
                       "parameters": _with_intent(t.parameters)} for t in tools]
             body["tools"] = [{"functionDeclarations": decls}]
+        if extra:
+            # generationConfig слиянием: thinkingConfig не должен затирать
+            # остальные поля конфига, если они появятся.
+            for key, value in extra.items():
+                if key == "generationConfig" and isinstance(value, dict):
+                    merged = dict(body.get("generationConfig") or {})
+                    merged.update(value)
+                    body["generationConfig"] = merged
+                else:
+                    body[key] = value
         return body
 
     def _parts_to_result(self, data: dict, model: str, emit=None) -> ChatResult:
@@ -386,9 +410,16 @@ class GeminiAdapter:
                 if not isinstance(part, dict):
                     continue
                 if part.get("text"):
-                    result.text += part["text"]
-                    if emit is not None:
-                        emit("text", part["text"])
+                    if part.get("thought"):
+                        # Мысли Gemini (thought summaries) — не ответ:
+                        # в thinking и отдельным событием, как у остальных.
+                        result.thinking += part["text"]
+                        if emit is not None:
+                            emit("thinking", part["text"])
+                    else:
+                        result.text += part["text"]
+                        if emit is not None:
+                            emit("text", part["text"])
                 fc = part.get("functionCall")
                 if fc:
                     args, intent = _split_intent(fc.get("args"))

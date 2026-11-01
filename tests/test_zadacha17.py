@@ -317,12 +317,19 @@ class SessionsPickerTest(unittest.TestCase):
         self.assertTrue(self.other.exists())
 
     def test_delete_current_forbidden(self):
+        # ЗАДАЧА-19 отменила запрет ЗАДАЧИ-17: текущую удалять можно —
+        # подтверждение, корзина и сразу новая пустая сессия.
         app = self.app
         app.open_sessions_picker()
         self._select(self.current)
         app.handle_key(key("d", "d"))
-        self.assertEqual(app.picker.mode, "list")  # подтверждения не было
-        self.assertTrue(self.current.exists())
+        self.assertEqual(app.picker.mode, "confirm")
+        app.handle_key(key("enter"))
+        self.assertFalse(self.current.exists())
+        trash = app._data_dir().sessions / ".trash"
+        self.assertTrue((trash / self.current.name).exists())
+        self.assertIsNotNone(app.journal)
+        self.assertNotEqual(str(app.journal.path), str(self.current))
 
     def test_mark_and_delete_marked(self):
         app = self.app

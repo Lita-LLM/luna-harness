@@ -167,6 +167,33 @@ _f("starfall.output_dir", "str", "", "Папка результатов пото
 _f("chat.send_mode", "choice", "inject",
    "Отправка сообщения во время хода: inject — подмешать в текущий ход перед следующим вызовом модели, queue — отдельным ходом после, interrupt — прервать ход и сразу отправить; на лету — Ctrl+S, разово прервать и отправить — Alt+Enter",
    ("inject", "queue", "interrupt"))
+# Мышление, усилие и поиск (ЗАДАЧА-19). ui.thinking — режим показа
+# рассуждений; ui.show_thinking старше и не переименовывается: выключенный
+# ui.show_thinking всегда означает hidden, что бы ни говорил ui.thinking.
+_f("ui.thinking", "choice", "summary",
+   "Показ рассуждений модели: summary — шапка «думает» и пересказ одной строкой от быстрой роли (полный текст — Ctrl+O), full — полный текст сразу, hidden — не показывать; на лету — /thinking",
+   ("hidden", "summary", "full"))
+_f("ui.thinking_summary_s", "int", 15,
+   "Раз в сколько секунд рассуждений делать пересказ быстрой ролью (и ещё раз — по концу размышления)")
+_f("model.effort", "choice", "auto",
+   "Усилие рассуждений по умолчанию для всех ролей: auto — провайдер решает сам; шкала none < minimal < low < medium < high < xhigh < max; роутер переводит в формат провайдера, неподдерживаемое заменяется ближайшим; на лету — /effort и Alt+E",
+   ("auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"))
+_f("model.effort_main", "str", "",
+   "Усилие рассуждений главной роли (пусто — как model.effort); значения шкалы: none, minimal, low, medium, high, xhigh, max")
+_f("model.effort_fast", "str", "",
+   "Усилие рассуждений быстрой роли (пусто — как model.effort); значения шкалы: none, minimal, low, medium, high, xhigh, max")
+_f("model.effort_guard", "str", "",
+   "Усилие рассуждений роли охранника (пусто — как model.effort); значения шкалы: none, minimal, low, medium, high, xhigh, max")
+_f("model.effort_vision", "str", "",
+   "Усилие рассуждений роли зрения (пусто — как model.effort); значения шкалы: none, minimal, low, medium, high, xhigh, max")
+_f("web.search_providers", "str", "searxng,exa,parallel,duckduckgo,brave,tavily,perplexity",
+   "Цепочка провайдеров web_search через запятую, в порядке попыток: searxng (только если задан web.searxng_url), exa и parallel — бесплатные hosted MCP без ключа, duckduckgo — резерв, brave/tavily/perplexity — по ключам из luna setup")
+_f("web.exa_url", "str", "https://mcp.exa.ai/mcp",
+   "Адрес hosted MCP поиска Exa (без ключа — свободный лимит; ключ — через luna setup)")
+_f("web.parallel_url", "str", "https://search.parallel.ai/mcp",
+   "Адрес hosted MCP Parallel Search (бесплатно без ключа; ключ — через luna setup)")
+_f("web.native_search", "bool", False,
+   "Родной поиск провайдера модели как последний резерв цепочки web_search (сейчас умеет OpenRouter-модели с суффиксом :online); по умолчанию выключен")
 
 
 def _dig(data: dict, key: str):

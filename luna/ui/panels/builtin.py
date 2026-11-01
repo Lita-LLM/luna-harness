@@ -117,6 +117,11 @@ class PanelData:
             text = str(ev.get("message", ""))
             detail = str(ev.get("detail", ""))
             self._push("error", "Ошибка: " + text, detail, ok=False)
+        elif kind == "effort.note":
+            # Роутер подвинул усилие к ближайшему допустимому (ЗАДАЧА-19):
+            # в «Обратную сторону», а не в ленту — это не ошибка.
+            self._push("effort", "Усилие: " + str(ev.get("model", "")),
+                       str(ev.get("text", "")))
         elif kind == "agent.thinking":
             self._thinking += str(ev.get("text", ""))
         elif kind == "turn.done":

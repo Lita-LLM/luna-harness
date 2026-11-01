@@ -25,8 +25,16 @@ def _pick(input_fn, out, prompt: str, options: list[str]) -> str:
     return raw
 
 
+# Ключи провайдеров поиска (ЗАДАЧА-19): необязательные, уходят в сейф
+# именами «search:<провайдер>»; агенту не показываются никогда. Exa и
+# Parallel работают и без ключей — ключи только поднимают лимиты.
+SEARCH_KEY_PROVIDERS = (("exa", "Exa"), ("brave", "Brave Search"),
+                        ("tavily", "Tavily"), ("perplexity", "Perplexity"))
+
+
 def run_setup(*, settings, secrets, input_fn=None, getpass_fn=None,
-              router: Router | None = None, out=None) -> int:
+              router: Router | None = None, out=None,
+              ask_search_keys: bool = False) -> int:
     """Интерактивная настройка. Ввод и вывод подменяются в тестах."""
     ensure = out or print
     ask = input_fn or input
@@ -94,6 +102,18 @@ def run_setup(*, settings, secrets, input_fn=None, getpass_fn=None,
     shown_answer = answer_text[:80] if answer_text else "(пустой ответ)"
     ensure("Модель ответила: " + shown_answer)
     ensure("Готово. Главная модель: " + main_ref + ". Ключ — только в сейфе секретов.")
+    if ask_search_keys:
+        # Необязательный хвост: ключи поиска. Отдельным флагом, чтобы
+        # скриптовые вызовы run_setup (тесты, автоматика) не спотыкались
+        # о новые вопросы; живой `luna setup` флаг включает.
+        ensure("Ключи поиска (необязательно): Exa и Parallel работают без "
+               "ключей, ключи поднимают лимиты; Brave, Tavily и Perplexity "
+               "без ключей не работают. Enter — пропустить.")
+        for name, label in SEARCH_KEY_PROVIDERS:
+            value = secret_input("Ключ " + label + " (ввод скрыт): ").strip()
+            if value:
+                secrets.set("search:" + name, value)
+                ensure("  " + label + ": ключ сохранён в сейф.")
     return 0
 
 

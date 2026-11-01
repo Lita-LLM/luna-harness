@@ -102,6 +102,15 @@ class AgentSource:
         self._agent = self._build_agent()
         self._agent.load_history(self._pending_history, **self._pending_state)
         self._pending_history = None
+        # Спутники прошлой сессии возвращаются спящими (ЗАДАЧА-11).
+        try:
+            if self._journal is not None:
+                self._agent.journal = self._journal
+            from ..agents.host import host_for
+
+            host_for(self._agent).ensure_restored()
+        except Exception:  # noqa: BLE001 — команда не мешает продолжению сессии
+            pass
         self._agent.listen(self._events.put)
 
     def set_journal(self, journal) -> None:

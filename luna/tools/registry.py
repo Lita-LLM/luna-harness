@@ -36,6 +36,7 @@ class ToolContext:
     web_fetcher: Callable | None = None   # (url) -> str, подмена сети в тестах
     todos: list = field(default_factory=list)
     background: dict = field(default_factory=dict)
+    agent: object = None                  # агент-владелец (для тулов детей: assistant, crew)
 
 
 @dataclass
@@ -196,6 +197,7 @@ def _load_mcp_tools() -> tuple:
 
 def build_registry() -> dict[str, Tool]:
     """Все встроенные тулы вехи 1; MCP-тулы догружаются лениво (LazyRegistry)."""
+    from ..agents.tools import assistant_tool, crew_tool
     from .files import edit_tool, glob_tool, grep_tool, read_tool, write_tool
     from .luna_tool import luna_tool, skill_tool
     from .manner import manner_tool
@@ -204,5 +206,5 @@ def build_registry() -> dict[str, Tool]:
 
     tools = [bash_tool(), read_tool(), write_tool(), edit_tool(), glob_tool(),
              grep_tool(), web_fetch_tool(), web_search_tool(), todo_tool(), ask_user_tool(),
-             manner_tool(), luna_tool(), skill_tool()]
+             manner_tool(), luna_tool(), skill_tool(), assistant_tool(), crew_tool()]
     return LazyRegistry({tool.name: tool for tool in tools})

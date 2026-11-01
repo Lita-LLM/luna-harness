@@ -102,7 +102,7 @@ COMMANDS = [
     ("layout", "раскладки панелей: /layout save|load|list <имя>"),
     ("todo", "панель «План»"),
     ("mcp", "MCP-серверы: выбиралка статуса и включения"),
-    ("agents", "экипаж агентов (строится — ЗАДАЧА-11)"),
+    ("agents", "экипаж: главный агент, спутники и ассистенты"),
     ("theme", "тема оформления: luna, contrast, mono"),
     ("editor", "сочинить сообщение во внешнем редакторе"),
     ("details", "детали ленты вкл/выкл: вывод тулов свёрнуто или скрыто"),
@@ -668,17 +668,25 @@ class ChatApp:
                           extra={"t": "toggle"}, preview_lines=0)
 
     def open_agents_picker(self) -> None:
-        """/agents: заглушка под «Экипаж» ЗАДАЧИ-11."""
-        items = [
-            PickerItem(key="main", title="Главный агент — эта сессия",
-                       detail="модель: " + self.model + " · режим: " + self.mode,
-                       mark="→"),
-            PickerItem(key="crew", title="Экипаж: рой и временные агенты",
-                       detail="строится в ЗАДАЧЕ-11 — здесь будет его выбиралка "
-                              "и панель «Экипаж»"),
-        ]
+        """/agents: главный агент и экипаж (ЗАДАЧА-11) — Enter открывает «Экипаж»."""
+        from .panels import panel_data
+
+        items = [PickerItem(key="main", title="Главный агент — эта сессия",
+                            detail="модель: " + self.model + " · режим: " + self.mode,
+                            mark="→")]
+        crew = panel_data(self).crew
+        for agent_id in crew.order:
+            row = crew.agents[agent_id]
+            kind = {"assistant": "ассистент", "satellite": "спутник"}.get(row["kind"], row["kind"])
+            title = row["name"] + (" — лидер" if row["leader"] else "")
+            detail = " · ".join(x for x in (kind, row["role"], row["model"], row["state"],
+                                            "$" + format(row["cost"], ".4f")) if x)
+            items.append(PickerItem(key=agent_id, title=title, detail=detail))
+        if len(items) == 1:
+            items.append(PickerItem(key="crew", title="Экипажа пока нет",
+                                    detail="попроси агента собрать команду или позвать ассистента"))
         self._open_picker("agents", "Агенты", items,
-                          hint="Esc — закрыть", preview_lines=0)
+                          hint="Enter — панель «Экипаж» · Esc — закрыть", preview_lines=0)
 
     def open_theme_picker(self) -> None:
         """/theme: тема оформления выбиралкой (настройка ui.theme)."""
@@ -751,9 +759,8 @@ class ChatApp:
                     self.toggle_panel("mcp")
             elif kind == "agents":
                 self.picker = None
-                if item.key == "crew":
-                    self._add(Entry("notice", text="Экипаж строится в ЗАДАЧЕ-11: "
-                                                   "здесь будет выбиралка роя."))
+                if item.key != "main" and "crew" not in self.layout:
+                    self.toggle_panel("crew")
             elif kind == "theme":
                 self.picker = None
                 self.settings.set("ui.theme", item.key)
@@ -1074,9 +1081,12 @@ class ChatApp:
             entry.items = list(self.todos)
             entry.born = self._clock()
         elif kind == "usage":
-            self.model = str(ev.get("model") or self.model)
-            self.cost = float(ev.get("cost") or 0.0)
-            self.context_pct = int(round(float(ev.get("context_pct") or 0)))
+            # Расход детей (agent_id, ЗАДАЧА-11) не двигает модель, стоимость
+            # и контекст главного агента в статус-баре: их место — «Экипаж».
+            if not ev.get("agent_id"):
+                self.model = str(ev.get("model") or self.model)
+                self.cost = float(ev.get("cost") or 0.0)
+                self.context_pct = int(round(float(ev.get("context_pct") or 0)))
         elif kind == "mode.changed":
             self.mode = str(ev.get("mode") or self.mode)
         elif kind == "notice":

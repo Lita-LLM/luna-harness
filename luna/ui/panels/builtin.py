@@ -18,6 +18,7 @@ import time
 
 from ..disc import _smooth01
 from . import PanelContent, register_panel
+from .crewdata import CrewData
 
 _MAX_ENTRIES = 120        # записей в «Обратной стороне»
 _MAX_BODY = 20000         # символов результата тула храним целиком, дальше — пометка
@@ -63,6 +64,7 @@ class PanelData:
         self.backside: list[dict] = []   # {kind, title, body, ok}
         self.files: dict = {}            # путь → {reads, writes, plus, minus, diff}
         self.nibbler: list[dict] = []    # {severity, text}
+        self.crew = CrewData()           # команда детей (ЗАДАЧА-11): panels/crewdata.py
         self._calls: dict = {}           # id вызова → (имя, args, запись журнала)
         self._thinking = ""
         # ЗАДАЧА-16: фоновые bash, диагностика, MCP-активность, время хода.
@@ -77,6 +79,13 @@ class PanelData:
 
     def observe(self, ev: dict) -> None:
         kind = ev.get("type")
+        # События детей (ЗАДАЧА-11) агрегирует CrewData; расход ребёнка не
+        # должен двигать контекст и стоимость главного агента в «Луне».
+        if ev.get("agent_id") or str(kind or "").startswith("agent.") \
+                or kind == "budget.update" or kind == "session.start":
+            self.crew.observe(ev)
+            if kind == "usage":
+                return
         if kind == "session.start":
             if ev.get("model"):
                 self.model = str(ev.get("model"))
@@ -340,6 +349,9 @@ class MoonPanel(PanelContent):
             tokens += " · кэш " + _fmt_int(data.cache)
         out.append(tokens)
         out.append("стоимость сессии: $" + format(data.cost, ".4f"))
+        budget = data.crew.budget_line()
+        if budget:
+            out.append(budget)
         return out
 
 

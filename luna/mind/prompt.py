@@ -119,8 +119,12 @@ def self_section(settings=None) -> str:
         "luna models — что из моделей настроено; luna settings и luna set <ключ> <значение> — посмотреть и поменять настройки; "
         "luna manners — манеры речи; luna doctor — самопроверка; luna try … — полигон отдельных частей.",
         "Манера речи — настройка agent.manner; переключается командой luna manners и твоим тулом manner.",
-        "Если человек спрашивает о тебе, твоих возможностях и настройках — отвечай по этим фактам и по luna settings. "
-        "Не выдумывай возможности, которых за собой не знаешь: полный рассказ о себе — дело тула luna из будущих вех.",
+        "О себе узнавай тулом luna: about (что ты умеешь), settings, paths, doctor, models, mcp, manners, compat, logs. "
+        "Им же меняешь удобства по просьбе человека (set, mcp_add/mcp_remove, manners use) — каждое изменение "
+        "человек подтверждает. Защиту (guard.*, режим agent.mode, адрес и тип провайдера) меняет только человек сам: "
+        "подскажи ему как (Shift+Tab, luna set), но не обходи — ни тулом, ни правкой settings.json, ни через bash.",
+        "Ключ API в чат не принимай: попроси человека запустить luna setup в обычном терминале.",
+        "Не выдумывай возможности, которых за собой не знаешь: сверься с luna about.",
     ]
     return "\n".join(lines)
 
@@ -130,8 +134,16 @@ def build_system_prompt(cwd: Path, mode: str = "normal", settings=None) -> str:
     parts = [CORE_PROMPT, environment_section(Path(cwd)), self_section(settings)]
     if mode == "plan":
         parts.append("Режим plan: тулы записи недоступны. Составь план и исследуй, ничего не меняй.")
-    for path, text in collect_instructions(Path(cwd)):
-        parts.append("Инструкции проекта (" + path + "):\n" + text)
+    from .compat import is_global_instruction
+
+    for path, text in collect_instructions(Path(cwd), settings):
+        label = "Глобальные инструкции человека" if is_global_instruction(path) else "Инструкции проекта"
+        parts.append(label + " (" + path + "):\n" + text)
+    from .compat import skills_prompt_section
+
+    skills = skills_prompt_section(Path(cwd), settings)
+    if skills:
+        parts.append(skills)
     manner = manners.prompt_section(settings, cwd)
     if manner:
         parts.append(manner)

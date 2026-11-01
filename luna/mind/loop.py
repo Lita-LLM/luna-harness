@@ -283,6 +283,23 @@ class Agent:
                     digest = ""
         return (self.mode, manner, digest)
 
+    def _reload_settings(self) -> None:
+        """Настройки поменяли руками или другой процесс — подхватить перед ходом."""
+        reloader = getattr(self.settings, "reload_if_changed", None)
+        if not callable(reloader):
+            return
+        try:
+            changes = reloader()
+        except Exception as exc:  # noqa: BLE001 — битый файл: прошлые значения остаются
+            title = getattr(exc, "title", "") or str(exc)
+            self.publish({"type": "notice", "level": "warn",
+                          "text": title + " — работаю на прошлых значениях."})
+            return
+        if changes:
+            # манера, инструкции — пересобрать промпт; agent.mode — режим по
+            # умолчанию для новых сессий, текущий режим (Shift+Tab) не трогаем
+            self._prompt_sig = None
+
     def _ensure_system_prompt(self) -> None:
         """Собрать промпт к первому ходу; дальше — пересобрать, если сменились
         режим или манера (тул manner и mode.set действуют со следующего хода)."""
@@ -300,6 +317,7 @@ class Agent:
 
     def run_turn(self, text: str, attachments=None) -> str:
         """Один ход до финала. Возвращает причину turn.done."""
+        self._reload_settings()
         self._active = True
         self._interrupt.clear()
         self._turn += 1

@@ -35,6 +35,11 @@ IRREVERSIBLE = [
     (re.compile(r":\(\)\s*\{"), "вилка-бомба"),
 ]
 
+# Настройки самой Луны: агент меняет их только тулом luna, с подтверждением.
+# Правка файла в обход тула или `luna set` защиты через оболочку — спросить всегда.
+LUNA_SET_PROTECTED = re.compile(r"\bluna(\.cmd|\.bat)?\s+set\s+(guard\.|agent\.mode|model\.(provider|kind|base_url))")
+LUNA_TOOL_CHANGING = ("set", "mcp_add", "mcp_remove", "manners_use")
+
 SECRET_PATHS = re.compile(r"(^|[/\\])(\.env|secrets\.json|id_rsa|id_ed25519)([/\\]|$)|\\.(pem|key)$")
 
 
@@ -129,6 +134,25 @@ class Guard:
                 return True
         return False
 
+    def _is_luna_config(self, raw: str) -> bool:
+        """Файл настроек или MCP Луны — глобальный (LUNA_HOME) или проектный (.luna/)."""
+        from pathlib import Path
+
+        if not raw:
+            return False
+        norm = raw.replace("\\", "/")
+        if "/.luna/" in "/" + norm or norm.startswith(".luna/"):
+            return True
+        home = getattr(self.settings, "home_dir", None)
+        if home is not None:
+            try:
+                target = Path(raw).expanduser().resolve()
+                return (target.name in ("settings.json", "mcp.json")
+                        and target.parent == Path(home).expanduser().resolve())
+            except OSError:
+                return False
+        return False
+
     def hard_block(self, tool_name: str, args: dict) -> Decision | None:
         """Жёсткие блоки вне режимов: правило deny, необратимое, утечки, локальная сеть.
 
@@ -140,6 +164,14 @@ class Guard:
         rule = self._rule(tool_name, args_text)
         if rule == "deny":
             return Decision("deny", "rules", "Запрещено правилом в настройках (guard.rules)", "medium")
+        if tool_name == "luna" and str(args.get("action", "")) in LUNA_TOOL_CHANGING:
+            return Decision("ask", "rules", "Изменение настроек Луны: подтверждает человек "
+                            "в любом режиме", "high")
+        if tool_name in ("write", "edit") and self._is_luna_config(str(args.get("path", ""))):
+            return Decision("ask", "rules", "Правка настроек Луны в обход тула luna", "high")
+        if tool_name == "bash" and LUNA_SET_PROTECTED.search(args_text):
+            return Decision("ask", "rules", "Смена защиты, режима или провайдера Луны через оболочку — "
+                            "это решает человек", "high")
         irreversible = check_irreversible(tool_name, args)
         if irreversible:
             return Decision("ask", "rules", "Необратимое: " + irreversible +

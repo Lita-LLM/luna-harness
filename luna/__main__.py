@@ -58,6 +58,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
                             show <имя> — текст, use <имя> — включить, off — свой голос,
                             new <имя> — создать свою из шаблона, edit <имя> — открыть в редакторе
   luna try prompt           показать собранный системный промпт для текущего каталога
+  luna try compat           что видно из других агентов: инструкции, скиллы, слэш-команды
   luna mcp list             MCP-серверы из mcp.json: статус и число тулов
   luna mcp add <имя> -- <команда …> | --url <адрес>   добавить MCP-сервер
   luna mcp remove <имя>     удалить MCP-сервер
@@ -385,8 +386,16 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.rewind_try import run_compact_try
 
                 return run_compact_try()
+            if what == "compat":
+                from pathlib import Path as _Path
+
+                from .core.settings import Settings
+                from .mind.compat import report
+
+                print(report(_Path.cwd(), Settings()))
+                return 0
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, chat, measure, snapshot, brain, prompt, undo, compact.")
+                             "Есть: render, splash, chat, measure, snapshot, brain, prompt, undo, compact, compat.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

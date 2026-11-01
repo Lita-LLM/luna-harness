@@ -778,6 +778,38 @@ class ChatApp:
 
     # --- отправка и команды ---------------------------------------------------------
 
+    def _compat_command(self, cmd: str, text: str) -> bool:
+        """Слэш-команда из файлов (.claude/commands и родня, ЗАДАЧА-12): текст — модели."""
+        from ..mind.compat import resolve_command
+
+        try:
+            body = resolve_command(Path(self.cwd), cmd[1:], text[len(cmd):].strip(), self.settings)
+        except OSError:
+            body = None
+        if not body:
+            return False
+        self._send_user_message(body)
+        return True
+
+    def _reload_settings(self) -> None:
+        """Настройки поправили руками — подхватить на лету (не чаще раза в 2 с)."""
+        now = time.monotonic()
+        if now - getattr(self, "_settings_checked", 0.0) < 2.0:
+            return
+        self._settings_checked = now
+        reloader = getattr(self.settings, "reload_if_changed", None)
+        if not callable(reloader):
+            return
+        try:
+            changes = reloader()
+        except Exception as exc:  # noqa: BLE001 — битый файл: прошлые значения остаются
+            title = getattr(exc, "title", "") or str(exc)
+            self._add(Entry("notice", text=title + " — работаю на прошлых значениях."))
+            return
+        if changes:
+            keys = ", ".join(c["key"] for c in changes[:6]) + (" …" if len(changes) > 6 else "")
+            self._add(Entry("notice", text="Настройки обновлены из файла: " + keys))
+
     def _send_user_message(self, text: str) -> None:
         attachments = [tok[1:] for tok in text.split()
                        if tok.startswith("@") and len(tok) > 1]
@@ -862,7 +894,7 @@ class ChatApp:
             self._panels_menu()
         elif cmd == "/layout":
             self._layout_command(parts[1:])
-        else:
+        elif not self._compat_command(cmd, text):
             self._add(Entry("notice", text="Не знаю команду " + cmd + " — /help подскажет."))
 
     def _panel_command(self, args: list) -> None:
@@ -1039,6 +1071,7 @@ class ChatApp:
     def handle_key(self, key: Key) -> None:
         if self.done:
             return
+        self._reload_settings()
         if key.label == "ctrl+c" or key.name == "eof":
             self.done = True
             return

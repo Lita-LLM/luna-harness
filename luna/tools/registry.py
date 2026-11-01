@@ -86,6 +86,16 @@ def truncate_output(text: str, limit: int, output_dir: Path | None, name: str) -
     return text[:half] + note + text[-half:], path
 
 
+# Поколение конфигов MCP: тул luna после mcp_add/mcp_remove поднимает его,
+# и реестры перечитывают серверы при следующем обращении (без перезапуска).
+_MCP_GENERATION = 0
+
+
+def request_mcp_reload() -> None:
+    global _MCP_GENERATION
+    _MCP_GENERATION += 1
+
+
 class LazyRegistry(dict):
     """Реестр с ленивой догрузкой MCP-тулов при первом обращении.
 
@@ -102,8 +112,11 @@ class LazyRegistry(dict):
         self._mcp_lock = threading.Lock()
         self.mcp_errors: list = []
         self.mcp_manager = None
+        self._mcp_generation = _MCP_GENERATION
 
     def _ensure_mcp(self) -> None:
+        if self._mcp_generation != _MCP_GENERATION:
+            self._drop_mcp()
         if self._mcp_loaded:
             return
         with self._mcp_lock:
@@ -118,6 +131,21 @@ class LazyRegistry(dict):
             self.mcp_manager = manager
             for name, tool in tools.items():
                 self.setdefault(name, tool)
+
+    def _drop_mcp(self) -> None:
+        """Забыть MCP-тулы и серверы: следующее обращение поднимет их заново."""
+        with self._mcp_lock:
+            self._mcp_generation = _MCP_GENERATION
+            for name in [n for n in dict.keys(self) if n.startswith("mcp__")]:
+                dict.pop(self, name, None)
+            manager, self.mcp_manager = self.mcp_manager, None
+            self._mcp_loaded = False
+        closer = getattr(manager, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 — упавший сервер не мешает перечитать конфиг
+                pass
 
     def values(self):
         self._ensure_mcp()
@@ -169,11 +197,12 @@ def _load_mcp_tools() -> tuple:
 def build_registry() -> dict[str, Tool]:
     """Все встроенные тулы вехи 1; MCP-тулы догружаются лениво (LazyRegistry)."""
     from .files import edit_tool, glob_tool, grep_tool, read_tool, write_tool
+    from .luna_tool import luna_tool, skill_tool
     from .manner import manner_tool
     from .shell import bash_tool
     from .web import ask_user_tool, todo_tool, web_fetch_tool, web_search_tool
 
     tools = [bash_tool(), read_tool(), write_tool(), edit_tool(), glob_tool(),
              grep_tool(), web_fetch_tool(), web_search_tool(), todo_tool(), ask_user_tool(),
-             manner_tool()]
+             manner_tool(), luna_tool(), skill_tool()]
     return LazyRegistry({tool.name: tool for tool in tools})

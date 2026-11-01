@@ -30,13 +30,25 @@ class Field:
     default: Any
     title: str          # описание по-русски
     choices: tuple = ()  # для choice: допустимые значения
+    # Только человек: агент (тул luna) это поле не меняет ни с подтверждением,
+    # ни без. Защита, режим и адрес провайдера (туда уходит ключ API).
+    human_only: bool = False
 
 
 SCHEMA: dict[str, Field] = {}
 
 
-def _f(key: str, type_: str, default: Any, title: str, choices: tuple = ()) -> None:
-    SCHEMA[key] = Field(key, type_, default, title, tuple(choices))
+def _f(key: str, type_: str, default: Any, title: str, choices: tuple = (),
+       human_only: bool = False) -> None:
+    SCHEMA[key] = Field(key, type_, default, title, tuple(choices), human_only)
+
+
+def is_human_only(key: str) -> bool:
+    """Поле только для человека; незнакомые ключи защиты — тоже."""
+    field = SCHEMA.get(key)
+    if field is not None:
+        return field.human_only
+    return key.startswith("guard.")
 
 
 _f("ui.color", "choice", "auto", "Цвет терминала: auto — по возможностям, иначе вручную",
@@ -62,10 +74,10 @@ _f("chat.sessions_scope", "choice", "all",
 # Модели и провайдеры (веха 1). Роль — строка вида «провайдер:модель»;
 # пустая роль означает «как main». Провайдер по умолчанию задаётся тремя
 # настройками ниже; setup пишет их и ключ в сейф секретов.
-_f("model.provider", "str", "", "Провайдер по умолчанию: имя (openai, openrouter, anthropic, gemini, ollama, …)")
+_f("model.provider", "str", "", "Провайдер по умолчанию: имя (openai, openrouter, anthropic, gemini, ollama, …)", human_only=True)
 _f("model.kind", "choice", "openai", "Тип API провайдера по умолчанию",
-   ("openai", "anthropic", "gemini", "fake"))
-_f("model.base_url", "str", "", "Адрес API провайдера по умолчанию (пусто — адрес по типу)")
+   ("openai", "anthropic", "gemini", "fake"), human_only=True)
+_f("model.base_url", "str", "", "Адрес API провайдера по умолчанию (пусто — адрес по типу)", human_only=True)
 _f("model.main", "str", "", "Главная модель: «провайдер:модель» или просто модель")
 _f("model.fast", "str", "", "Быстрая модель (разведка, сжатие); пусто — как главная")
 _f("model.guard", "str", "", "Модель-охранник для режима review; пусто — как главная")
@@ -78,7 +90,7 @@ _f("model.price_out", "float", 0.0, "Цена главной модели за �
 # Агент и Предохранитель (веха 1)
 _f("agent.max_steps", "int", 30, "Максимум шагов модели в одном ходе")
 _f("agent.mode", "choice", "normal", "Режим Предохранителя по умолчанию",
-   ("normal", "plan", "review", "auto", "yolo"))
+   ("normal", "plan", "review", "auto", "yolo"), human_only=True)
 _f("agent.manner", "str", "luna", "Манера речи: имя из luna manners (встроенные, свои в папке manners каталога данных, .luna/manners проекта); пусто — без манеры")
 _f("nibbler.enabled", "bool", True, "Ниблер — компаньон внизу экрана: смотрит события агента и изредка говорит одну строку")
 _f("nibbler.interval_sec", "int", 60, "Ниблер: минимальная пауза между репликами, секунд")
@@ -87,11 +99,17 @@ _f("nibbler.to_agent", "choice", "serious", "Ниблер: какие замеч
    ("serious", "all", "never"))
 _f("nibbler.manner", "str", "nibbler", "Ниблер: его манера речи (имя из luna manners); пусто — без манеры")
 _f("nibbler.long_turn_sec", "int", 90, "Ниблер: ход дольше стольких секунд считается долгим и зовёт его высказаться")
-_f("guard.enabled", "bool", True, "Предохранитель включён (выключение ослабляет безопасность)")
-_f("guard.rules", "str", "", "Правила allow/ask/deny по строкам: «шаблон=действие», шаблон — тул или тул:подстрока аргументов")
+_f("guard.enabled", "bool", True, "Предохранитель включён (выключение ослабляет безопасность)", human_only=True)
+_f("guard.rules", "str", "", "Правила allow/ask/deny по строкам: «шаблон=действие», шаблон — тул или тул:подстрока аргументов", human_only=True)
 _f("tools.bash_timeout", "int", 120, "Таймаут команды bash, секунд")
 _f("tools.output_limit", "int", 8000, "Обрезка вывода тулов, символов (полный вывод — в файл)")
 _f("web.enabled", "bool", True, "Веб-тулы (web_fetch, web_search) включены")
+
+# Совместимость с другими харнессами (ЗАДАЧА-12)
+_f("compat.global_instructions", "bool", True,
+   "Читать глобальные инструкции других агентов: ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.gemini/GEMINI.md")
+_f("compat.skills", "bool", True, "Скиллы из .claude/skills, .opencode/skill и папки skills Луны (тул skill)")
+_f("compat.commands", "bool", True, "Слэш-команды из .claude/commands, .opencode/command и папки commands Луны")
 
 # Чекпоинты и откат (веха 3, ЗАДАЧА-13): снимки файлов перед изменениями
 # тулами — в LUNA_HOME/checkpoints/<сессия>/, откат — /undo и /rewind.
@@ -148,6 +166,7 @@ class Settings:
         self.bus = bus
         self._global = self._load(self.global_path)
         self._project = self._load(self.project_path)
+        self._stamps = self._file_stamps()
 
     @staticmethod
     def _load(path: Path) -> dict:
@@ -170,6 +189,47 @@ class Settings:
     def reload(self) -> None:
         self._global = self._load(self.global_path)
         self._project = self._load(self.project_path)
+        self._stamps = self._file_stamps()
+
+    def _file_stamps(self) -> tuple:
+        out = []
+        for path in (self.global_path, self.project_path):
+            try:
+                st = path.stat()
+                out.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                out.append(None)
+        return tuple(out)
+
+    def reload_if_changed(self) -> list[dict]:
+        """Горячая перезагрузка: файлы поменяли руками или другой процесс.
+
+        Дёшево (два stat), зовётся перед ходом и при вводе — без фонового
+        опроса. Возвращает изменения [{key, old, value}] и публикует
+        settings.changed на каждое. Битый JSON не роняет: прошлые значения
+        остаются, HumanError летит наверх — вызывающий покажет уведомление,
+        а повторно ругаться на тот же битый файл не будем.
+        """
+        stamps = self._file_stamps()
+        if stamps == getattr(self, "_stamps", None):
+            return []
+        self._stamps = stamps  # и при ошибке: тот же битый файл — одно уведомление
+        before = dict(_flatten(self._project))
+        before_g = dict(_flatten(self._global))
+        new_global = self._load(self.global_path)
+        new_project = self._load(self.project_path)
+        old_values = {k: self.get(k) for k in set(before) | set(before_g) | set(SCHEMA)}
+        self._global, self._project = new_global, new_project
+        keys = set(old_values) | {k for k, _ in _flatten(new_global)} | {k for k, _ in _flatten(new_project)}
+        changes = []
+        for key in sorted(keys):
+            old, new = old_values.get(key), self.get(key)
+            if old != new:
+                changes.append({"key": key, "old": old, "value": new})
+                if self.bus is not None:
+                    self.bus.publish({"type": "settings.changed", "key": key, "value": new,
+                                      "old": old, "layer": "file"})
+        return changes
 
     # чтение
 
@@ -199,7 +259,7 @@ class Settings:
             out.append({
                 "key": key, "value": self.get(key), "source": self.source(key),
                 "title": field.title, "type": field.type, "choices": field.choices,
-                "default": field.default,
+                "default": field.default, "human_only": field.human_only,
             })
         return out
 
@@ -272,6 +332,7 @@ class Settings:
         _plant(data, key, value)
         text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
         atomic_write_text(path, text)
+        self._stamps = self._file_stamps()  # своя запись — не «внешнее изменение»
         if self.bus is not None:
             self.bus.publish({"type": "settings.changed", "key": key,
                               "value": value, "old": old, "layer": layer})

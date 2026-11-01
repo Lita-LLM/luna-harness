@@ -319,3 +319,12 @@ class NibblerFullContextTest(unittest.TestCase):
         self.assertIn("АГЕНТ: Смотрю логи подробно", digest)
         self.assertIn('"command": "make all"', digest)
         self.assertEqual(digest.count("строка вывода"), 30)
+
+
+class LunaToolGuardSyncTest(unittest.TestCase):
+    def test_every_changing_action_asks_in_yolo(self):
+        from luna.tools.luna_tool import CHANGING
+
+        g = Guard()
+        for action in CHANGING:
+            self.assertEqual(g.decide("luna", True, {"action": action}, mode="yolo").decision, "ask", action)

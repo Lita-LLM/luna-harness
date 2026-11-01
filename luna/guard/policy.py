@@ -38,7 +38,13 @@ IRREVERSIBLE = [
 # Настройки самой Луны: агент меняет их только тулом luna, с подтверждением.
 # Правка файла в обход тула или `luna set` защиты через оболочку — спросить всегда.
 LUNA_SET_PROTECTED = re.compile(r"\bluna(\.cmd|\.bat)?\s+set\s+(guard\.|agent\.mode|model\.(provider|kind|base_url))")
-LUNA_TOOL_CHANGING = ("set", "mcp_add", "mcp_remove", "manners_use")
+def _luna_tool_changing() -> tuple:
+    """Меняющие действия тула luna — из самого тула, чтобы списки не разошлись."""
+    try:
+        from ..tools.luna_tool import CHANGING
+    except Exception:  # noqa: BLE001 — без тула: всё, что не чтение, считаем изменением
+        return ("set", "mcp_add", "mcp_remove", "manners_use", "theme_use", "theme_create")
+    return CHANGING
 
 SECRET_PATHS = re.compile(r"(^|[/\\])(\.env|secrets\.json|id_rsa|id_ed25519)([/\\]|$)|\\.(pem|key)$")
 
@@ -199,7 +205,7 @@ class Guard:
         swarm_risk = self._swarm_risk(tool_name, args)
         if swarm_risk:
             return Decision("ask", "rules", swarm_risk, "high")
-        if tool_name == "luna" and str(args.get("action", "")) in LUNA_TOOL_CHANGING:
+        if tool_name == "luna" and str(args.get("action", "")) in _luna_tool_changing():
             return Decision("ask", "rules", "Изменение настроек Луны: подтверждает человек "
                             "в любом режиме", "high")
         if tool_name in ("write", "edit") and self._is_luna_config(str(args.get("path", ""))):

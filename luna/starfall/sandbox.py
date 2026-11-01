@@ -69,6 +69,7 @@ class SandboxStatus:
     image: str = ""
     reason: str = ""
     install_hint: str = ""
+    pid_ns: bool = True            # рабочий вариант bwrap по пробе (см. verify)
 
     def describe(self) -> str:
         if self.backend == "none":
@@ -101,6 +102,9 @@ class SandboxSpec:
     max_processes: int = 256
     reason: str = ""
     limits: bool = True            # применять ли rlimit (не контейнеру)
+    pid_ns: bool = True            # bwrap: свой pid namespace; во вложенных
+    # контейнерах с «запертым» /proc хоста связка unshare-pid + свежий
+    # /proc не монтируется — пробный запуск подбирает вариант без него
 
     @property
     def unavailable(self) -> bool:
@@ -118,8 +122,14 @@ class SandboxSpec:
             env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                    "HOME": cwd, "LANG": "C.UTF-8", "TERM": "dumb"}
             argv = [self.executable,
-                    "--die-with-parent",
-                    "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+                    # Явный user namespace обязателен: без него bwrap от
+                    # root не может поднять loopback в новой сети
+                    # (RTM_NEWADDR) — проверено живым запуском.
+                    "--unshare-user",
+                    "--die-with-parent"]
+            if self.pid_ns:
+                argv.append("--unshare-pid")
+            argv += ["--unshare-ipc", "--unshare-uts",
                     "--cap-drop", "ALL",
                     "--ro-bind", "/", "/",
                     "--dev", "/dev", "--proc", "/proc",
@@ -291,9 +301,10 @@ def sandbox_status(settings=None, *, verify: bool = False,
     status.executable = chosen["executable"]
     status.image = chosen.get("image", "")
     if verify:
-        ok, reason = verify_backend(status)
+        ok, reason, pid_ns = verify_backend(status)
         status.verified = ok
         status.reason = reason
+        status.pid_ns = pid_ns
     return status
 
 
@@ -301,8 +312,10 @@ def _trial_command(spec: SandboxSpec, outside: Path, port: int) -> str:
     """Команда пробного запуска: внутрь можно, наружу и в сеть (без net) — нет."""
     import shlex
 
-    parts = [": > inside.txt"]
-    parts.append("! : > " + shlex.quote(str(outside)))
+    # touch, а не «: >»: двоеточие — специальный встроенный оператор
+    # sh, и ошибка его перенаправления завершает весь shell пробы.
+    parts = ["touch inside.txt"]
+    parts.append("! touch " + shlex.quote(str(outside)))
     if spec.backend == "bwrap":
         # Слушатель на host-loopback: в своей сетевой namespace ячейка
         # его не увидит; без unshare-net — увидела бы, и проба красная.
@@ -314,7 +327,7 @@ def _trial_command(spec: SandboxSpec, outside: Path, port: int) -> str:
 
 
 def verify_backend(status: SandboxStatus) -> tuple:
-    """Пробный запуск бэкенда (кэш на процесс). (успех, причина)."""
+    """Пробный запуск бэкенда (кэш на процесс). (успех, причина, pid_ns)."""
     key = (status.backend, status.executable, status.image, sys.platform)
     with _CACHE_LOCK:
         if key in _VERIFY_CACHE:
@@ -327,7 +340,7 @@ def verify_backend(status: SandboxStatus) -> tuple:
 
 def _verify_backend_uncached(status: SandboxStatus) -> tuple:
     if not status.available or not status.fs_isolated:
-        return False, status.reason or "бэкенд недоступен"
+        return False, status.reason or "бэкенд недоступен", True
     listener = None
     try:
         listener = socket.socket()
@@ -338,15 +351,37 @@ def _verify_backend_uncached(status: SandboxStatus) -> tuple:
     except OSError:
         port = 0
     try:
-        with tempfile.TemporaryDirectory(prefix="luna-sandbox-probe-") as tmp:
-            root = Path(tmp)
-            work = root / "cell"
-            work.mkdir()
-            spec = SandboxSpec(backend=status.backend, requested=status.requested,
-                               workdir=work, net=False, verified=False,
-                               fs_isolated=True, executable=status.executable,
-                               image=status.image)
-            argv, env = spec.wrap(_trial_command(spec, root / "outside.txt", port))
+        # bwrap: сначала вариант со своим pid namespace; во вложенных
+        # контейнерах с запертым /proc хоста свежий /proc к новому pid
+        # namespace не монтируется — тогда честный запасной вариант без
+        # него (изоляция ФС и сети от этого не страдает).
+        variants = (True, False) if status.backend == "bwrap" else (True,)
+        reason = ""
+        for pid_ns in variants:
+            ok, reason = _probe_once(status, port, pid_ns)
+            if ok:
+                return True, reason, pid_ns
+        return False, reason, True
+    finally:
+        if listener is not None:
+            listener.close()
+
+
+def _probe_once(status: SandboxStatus, port: int, pid_ns: bool) -> tuple:
+    with tempfile.TemporaryDirectory(prefix="luna-sandbox-probe-") as tmp:
+        root = Path(tmp)
+        work = root / "cell"
+        work.mkdir()
+        # Проба «наружу» целится в КОРЕНЬ ФС, а не в папку рядом с
+        # ячейкой: под bwrap /tmp внутри — свой tmpfs, запись туда
+        # «успешна» и ничего не доказывает (первый красный CI — он).
+        outside = Path("/") / ("luna-probe-" + root.name + ".txt")
+        spec = SandboxSpec(backend=status.backend, requested=status.requested,
+                           workdir=work, net=False, verified=False,
+                           fs_isolated=True, executable=status.executable,
+                           image=status.image, pid_ns=pid_ns)
+        try:
+            argv, env = spec.wrap(_trial_command(spec, outside, port))
             try:
                 proc = subprocess.run(argv, cwd=str(work), env=env,
                                       capture_output=True, timeout=20)
@@ -357,14 +392,16 @@ def _verify_backend_uncached(status: SandboxStatus) -> tuple:
                 return False, "пробный запуск не прошёл" + (": " + tail[:200] if tail else "")
             if not (work / "inside.txt").exists():
                 return False, "пробный запуск не записал в папку ячейки"
-            if (root / "outside.txt").exists():
+            if outside.exists():
                 return False, "пробный запуск записал НАРУЖУ папки ячейки"
             return True, "пробный запуск: запись только в папку ячейки" + \
                 (", сети без net нет" if status.backend == "bwrap" else
                  ", сеть закрыта --network none")
-    finally:
-        if listener is not None:
-            listener.close()
+        finally:
+            try:
+                outside.unlink()
+            except OSError:
+                pass
 
 
 def isolation_verified(settings=None) -> tuple:
@@ -388,7 +425,8 @@ def resolve_spec(settings, workdir, *, net: bool = False) -> SandboxSpec:
                        reason=status.reason,
                        limits=status.backend not in ("podman", "docker"))
     if status.backend in BACKEND_ORDER and status.available:
-        ok, reason = verify_backend(status)
+        ok, reason, pid_ns = verify_backend(status)
         spec.verified = ok
         spec.reason = reason
+        spec.pid_ns = pid_ns
     return spec

@@ -51,6 +51,19 @@ class Case(unittest.TestCase):
 # --- изоляция: выбор бэкенда на подменённом окружении -------------------------
 
 
+def _dir_which(name: str, path: str | None = None):
+    """Подменённый shutil.which: ищет имя только в данной папке.
+
+    Герметично на любой платформе: настоящий which на Windows требует
+    расширений из PATHEXT, а на машинах CI в /usr/bin может лежать
+    настоящий docker — тесту выбора бэкенда оба факта мешают.
+    """
+    if not path:
+        return None
+    candidate = Path(path) / name
+    return str(candidate) if candidate.exists() else None
+
+
 class SandboxChoiceTest(Case):
     def _bindir(self, *names: str) -> Path:
         bindir = self.root / "bin"
@@ -64,18 +77,19 @@ class SandboxChoiceTest(Case):
     def test_auto_takes_first_available(self):
         bindir = self._bindir("bwrap", "podman")
         found = {item["name"]: item for item in sandbox.detect_backends(
-            platform_name="linux", environ={"PATH": str(bindir)})}
+            platform_name="linux", environ={"PATH": str(bindir)},
+            which=_dir_which)}
         self.assertTrue(found["bwrap"]["available"])
         status = sandbox.sandbox_status(
             self.settings, platform_name="linux",
-            environ={"PATH": str(bindir)})
+            environ={"PATH": str(bindir)}, which=_dir_which)
         self.assertEqual(status.backend, "bwrap")
 
     def test_no_backend_means_none_not_crash(self):
         bindir = self._bindir()
         status = sandbox.sandbox_status(
             self.settings, platform_name="linux",
-            environ={"PATH": str(bindir)})
+            environ={"PATH": str(bindir)}, which=_dir_which)
         self.assertEqual(status.backend, "none")
         self.assertFalse(status.verified)
 
@@ -84,15 +98,19 @@ class SandboxChoiceTest(Case):
         bindir = self._bindir()
         status = sandbox.sandbox_status(
             self.settings, platform_name="linux",
-            environ={"PATH": str(bindir)})
+            environ={"PATH": str(bindir)}, which=_dir_which)
         self.assertEqual(status.backend, "unavailable")
 
     def test_windows_and_macos_have_no_fs_isolation(self):
+        bindir = self._bindir("bwrap", "podman", "docker")
         for plat in ("win32", "darwin"):
-            found = sandbox.detect_backends(platform_name=plat,
-                                            environ={"PATH": "/usr/bin"})
+            found = sandbox.detect_backends(
+                platform_name=plat, environ={"PATH": str(bindir)},
+                which=_dir_which)
             self.assertFalse(any(item["available"] for item in found), plat)
-            status = sandbox.sandbox_status(self.settings, platform_name=plat)
+            status = sandbox.sandbox_status(
+                self.settings, platform_name=plat,
+                environ={"PATH": str(bindir)}, which=_dir_which)
             self.assertFalse(status.fs_isolated, plat)
 
     def test_wrap_bwrap_no_net_by_default_net_by_profile(self):
@@ -152,11 +170,15 @@ class BwrapLiveTest(Case):
 
     def test_write_inside_ok_outside_denied(self):
         ctx = self._ctx(net=False)
-        inside = _bash(ctx, {"command": ": > inside.txt", "timeout": 20})
+        inside = _bash(ctx, {"command": "touch inside.txt", "timeout": 20})
         self.assertTrue(inside.ok, inside.text)
         self.assertTrue((self.work / "inside.txt").exists())
-        outside = self.root / "outside.txt"
-        res = _bash(ctx, {"command": ": > " + str(outside), "timeout": 20})
+        # «Наружу» — в корень ФС: папка рядом с ячейкой под bwrap лежит
+        # на tmpfs песочницы, и запись туда ничего не доказывает.
+        outside = Path("/") / ("luna-test-" + self.root.name + "-outside.txt")
+        self.addCleanup(lambda: outside.exists() and outside.unlink())
+        res = _bash(ctx, {"command": "touch " + str(outside), "timeout": 20})
+        self.assertFalse(res.ok, res.text)
         self.assertFalse(outside.exists())
 
     def test_network_off_without_net_on_with_net(self):
@@ -431,6 +453,14 @@ class PoolKeyFlowTest(Case):
 # --- luna -p ---------------------------------------------------------------------
 
 
+def _touch_cmd(name: str) -> str:
+    """Создание файла одной командой и в POSIX-sh, и в cmd.exe."""
+    import sys
+
+    return ('"' + sys.executable + '" -c "open(\'' + name
+            + '\',\'w\').close()"')
+
+
 class Headless21Test(Case):
     def setUp(self) -> None:
         super().setUp()
@@ -469,7 +499,7 @@ class Headless21Test(Case):
         marker = self.work / "marker.txt"
         set_script([
             {"tool_calls": [{"name": "bash",
-                             "arguments": {"command": ": > marker.txt"},
+                             "arguments": {"command": _touch_cmd("marker.txt")},
                              "intent": "создать файл"}]},
             {"text": "модель сдала ход"},
         ])
@@ -487,7 +517,7 @@ class Headless21Test(Case):
         marker = self.work / "marker.txt"
         set_script([
             {"tool_calls": [{"name": "bash",
-                             "arguments": {"command": ": > marker.txt"},
+                             "arguments": {"command": _touch_cmd("marker.txt")},
                              "intent": "создать файл"}]},
             {"text": "готово"},
         ])
@@ -504,7 +534,7 @@ class Headless21Test(Case):
         self.settings.set("headless.allow", "bash")
         set_script([
             {"tool_calls": [{"name": "bash",
-                             "arguments": {"command": ": > marker2.txt"},
+                             "arguments": {"command": _touch_cmd("marker2.txt")},
                              "intent": "создать файл"}]},
             {"text": "готово"},
         ])

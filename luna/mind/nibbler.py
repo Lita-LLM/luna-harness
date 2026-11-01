@@ -239,7 +239,7 @@ class Nibbler:
             try:
                 from . import manners
 
-                entry = manners.get(self.settings, mid)
+                entry = manners.get(self.settings, mid, audience="nibbler")
             except Exception:  # noqa: BLE001 — манеры нет: характер из ядра
                 entry = None
             if entry:

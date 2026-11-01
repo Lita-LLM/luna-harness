@@ -97,7 +97,7 @@ _f("nibbler.interval_sec", "int", 60, "Ниблер: минимальная па
 _f("nibbler.every_turns", "int", 2, "Ниблер: не чаще одной реплики в столько ходов")
 _f("nibbler.to_agent", "choice", "serious", "Ниблер: какие замечания уходят главному агенту пометкой в следующий ход",
    ("serious", "all", "never"))
-_f("nibbler.manner", "str", "nibbler", "Ниблер: его манера речи (имя из luna manners); пусто — без манеры")
+_f("nibbler.manner", "str", "nibbler", "Ниблер: его манера речи — файл манеры с «for: nibbler» в шапке; пусто — без манеры")
 _f("nibbler.long_turn_sec", "int", 90, "Ниблер: ход дольше стольких секунд считается долгим и зовёт его высказаться")
 _f("guard.enabled", "bool", True, "Предохранитель включён (выключение ослабляет безопасность)", human_only=True)
 _f("guard.rules", "str", "", "Правила allow/ask/deny по строкам: «шаблон=действие», шаблон — тул или тул:подстрока аргументов", human_only=True)

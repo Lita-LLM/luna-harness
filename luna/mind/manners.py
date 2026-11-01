@@ -50,6 +50,7 @@ def parse_manner(raw: str, mid: str) -> dict:
     text = raw.replace("\r\n", "\n")
     name = ""
     description = ""
+    audience = ["agent"]
     body = text
     if text.startswith("---\n"):
         end = text.find("\n---", 4)
@@ -66,8 +67,11 @@ def parse_manner(raw: str, mid: str) -> dict:
                     name = value
                 elif key == "description":
                     description = value
+                elif key == "for":
+                    # кому манера: agent (главный), nibbler, позже спутники и ячейки роя
+                    audience = [a.strip().lower() for a in value.split(",") if a.strip()] or ["agent"]
     return {"id": mid, "name": name or mid, "description": description,
-            "text": body.strip()}
+            "text": body.strip(), "audience": audience}
 
 
 def render_manner(name: str, description: str, text: str) -> str:
@@ -141,8 +145,11 @@ def _scan(directory: Path, source: str) -> dict:
     return found
 
 
-def library(settings=None, cwd=None) -> list[dict]:
-    """Все манеры: встроенные, потом свои; своя перекрывает встроенную с тем же именем."""
+def library(settings=None, cwd=None, audience: str | None = "agent") -> list[dict]:
+    """Манеры для адресата (по умолчанию — главный агент; None — все).
+
+    Встроенные, потом свои; своя перекрывает встроенную с тем же именем.
+    """
     merged: dict[str, dict] = {}
     order: list[str] = []
     for source, directory in (("builtin", BUILTIN_DIR),
@@ -152,20 +159,23 @@ def library(settings=None, cwd=None) -> list[dict]:
             if mid not in merged:
                 order.append(mid)
             merged[mid] = entry
-    return [merged[mid] for mid in order]
+    items = [merged[mid] for mid in order]
+    if audience is None:
+        return items
+    return [m for m in items if audience in m.get("audience", ["agent"])]
 
 
-def get(settings, mid: str, cwd=None) -> dict | None:
-    return next((m for m in library(settings, cwd) if m["id"] == mid), None)
+def get(settings, mid: str, cwd=None, audience: str | None = "agent") -> dict | None:
+    return next((m for m in library(settings, cwd, audience) if m["id"] == mid), None)
 
 
-def resolve(settings, query: str, cwd=None) -> dict:
+def resolve(settings, query: str, cwd=None, audience: str | None = "agent") -> dict:
     """Манера по id или названию (без учёта регистра, можно начало названия)."""
     q = (query or "").strip().strip("«»\"'").lower()
     if not q:
         raise HumanError("manner_name", "Не сказано, какую манеру выбрать",
                          "Назови id или название: luna manners покажет все.")
-    items = library(settings, cwd)
+    items = library(settings, cwd, audience)
     tests = (lambda m: m["id"].lower() == q,
              lambda m: m["name"].lower() == q,
              lambda m: m["name"].lower().startswith(q))
@@ -223,7 +233,7 @@ def create(settings, mid: str, name: str, description: str, text: str) -> dict:
         raise HumanError("manner_id", "Неверный id манеры «" + str(mid) + "»",
                          "Латинские буквы, цифры, _ и -, до 40 знаков: id — это имя файла.")
     clean = validate(name, description, text)
-    if get(settings, mid) is not None:
+    if get(settings, mid, audience=None) is not None:
         raise HumanError("manner_exists", "Манера с id " + mid + " уже есть",
                          "Правь её действием edit или выбери другой id.")
     directory = home_dir(settings)

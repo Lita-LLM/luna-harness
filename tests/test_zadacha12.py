@@ -232,3 +232,18 @@ class PromptTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MannerAudienceTest(unittest.TestCase):
+    def test_nibbler_manner_hidden_from_main_agent(self):
+        from luna.mind import manners
+
+        with TemporaryDirectory() as tmp:
+            settings = Settings(home=tmp, cwd=tmp)
+            main_ids = [m["id"] for m in manners.library(settings, tmp)]
+            self.assertNotIn("nibbler", main_ids)
+            self.assertIn("luna", main_ids)
+            self.assertIsNotNone(manners.get(settings, "nibbler", tmp, audience="nibbler"))
+            with self.assertRaises(HumanError):
+                manners.resolve(settings, "nibbler", tmp)
+            self.assertIn("nibbler", [m["id"] for m in manners.library(settings, tmp, audience=None)])

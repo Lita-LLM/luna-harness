@@ -118,7 +118,11 @@ def cells_tool() -> Tool:
                     "show — профиль по касте с промптом; create/edit — создать "
                     "или изменить профиль в памяти сессии (без подтверждения; "
                     "поля profile: caste, name, description, model — роль или "
-                    "ссылка, pool — адреса одной модели списком, prompt, tools, "
+                    "ссылка, pool — адреса одной модели списком (адрес может "
+                    "быть словарём {url, secret: «pool:<имя>», kind} — ключ "
+                    "по имени берётся из сейфа, значение ключа профилю и "
+                    "ячейкам не показывается), net — сеть для bash ячейки "
+                    "(по умолчанию выключена изоляцией), prompt, tools, "
                     "write_mode: none|sandbox|worktree|project, ttl, mail, "
                     "steps, budget_usd, budget_tokens, can_spawn); save — "
                     "сохранить профиль сессии на весь харнесс (с подтверждением "
@@ -276,7 +280,8 @@ def _starfall(ctx, args: dict) -> ToolResult:
                              runner=runner,
                              interrupt_check=(lambda: agent._interrupt.is_set())
                              if agent is not None else None,
-                             wallet=host.wallet if host is not None else None)
+                             wallet=host.wallet if host is not None else None,
+                             secrets=getattr(ctx, "secrets", None))
             _journal(ctx, {"swarm": summary["swarm"], "dir": summary["dir"],
                            "finished": True})
             return ToolResult(True, _summary_text(summary))
@@ -353,7 +358,8 @@ def _starfall(ctx, args: dict) -> ToolResult:
                            collapse=str(args.get("collapse") or "auto"),
                            max_attempts=caps["max_attempts"],
                            interrupt_check=lambda: agent._interrupt.is_set(),
-                           wallet=host.wallet)
+                           wallet=host.wallet,
+                           secrets=getattr(ctx, "secrets", None))
             agent._starfall_run = run
             _journal(ctx, {"swarm": run.swarm_id, "dir": str(run.dir),
                            "finished": False, "total": len(inputs)})

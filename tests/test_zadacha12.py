@@ -263,7 +263,14 @@ class LayoutStackTest(unittest.TestCase):
 
 class SwarmGuardTest(unittest.TestCase):
     def test_risky_swarms_always_ask(self):
-        g = Guard()
+        # Изоляция bash выключена явно (ЗАДАЧА-21): без проверенной
+        # изоляции рой с bash спрашивает, как до неё; с проверенной —
+        # отдельный тест SandboxGuardTest в test_zadacha21.
+        from luna.core.settings import Settings
+
+        settings = Settings(home=TemporaryDirectory().name)
+        settings.set("starfall.sandbox", "none")
+        g = Guard(settings)
         ask = lambda **a: g.decide("starfall", True, a, mode="auto").decision
         self.assertEqual(ask(action="run", profile="cls"), "allow")
         self.assertEqual(ask(action="run", profile="cod"), "ask")          # bash

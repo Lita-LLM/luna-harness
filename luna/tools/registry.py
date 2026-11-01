@@ -41,6 +41,10 @@ class ToolContext:
     agent: object = None                  # агент-владелец (для тулов детей: assistant, crew)
     cancel_event: object = None           # threading.Event прерывания хода (ЗАДАЧА-18):
                                           # ставит агент; долгие тулы (bash) рвут работу
+    sandbox: object = None                # рецепт изоляции bash (ЗАДАЧА-21):
+                                          # ставит только исполнитель ячеек роя
+                                          # (luna.starfall.sandbox.SandboxSpec);
+                                          # у обычного агента всегда None
 
 
 @dataclass

@@ -65,7 +65,11 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna mcp add <имя> -- <команда …> | --url <адрес>   добавить MCP-сервер
   luna mcp remove <имя>     удалить MCP-сервер
   luna mcp test <имя>       подключиться к MCP-серверу и перечислить его тулы
-  luna -p "задача"          headless: один ход; --json — события JSONL, --mode, --model
+  luna pool key <имя>       ключ адреса пула роя скрытым вводом в сейф (pool:<имя>)
+  luna -p "задача"          headless: один ход без экрана; ответ — stdout, ход — stderr;
+                            --output text|json|stream-json, --mode, --model, --max-usd,
+                            --max-turns, --allow <шаблон>; промпт можно дать и в stdin;
+                            --continue / --resume <id> продолжают сессию
   luna --version            версия
 """
 
@@ -293,26 +297,72 @@ def main(argv: list[str] | None = None) -> int:
 
             prompt_parts = []
             json_mode = False
+            output = ""
             mode = ""
             model_ref = ""
+            max_usd = 0.0
+            max_turns = 0
+            allow: list[str] = []
             idx = 0
+
+            def next_value(flag: str) -> str:
+                nonlocal idx
+                if idx + 1 >= len(rest):
+                    raise HumanError("usage", "Флагу " + flag + " нужно значение", "")
+                idx += 1
+                return rest[idx]
+
             while idx < len(rest):
                 item = rest[idx]
                 if item == "--json":
                     json_mode = True
-                elif item == "--mode" and idx + 1 < len(rest):
-                    idx += 1
-                    mode = rest[idx]
-                elif item == "--model" and idx + 1 < len(rest):
-                    idx += 1
-                    model_ref = rest[idx]
+                elif item == "--output":
+                    output = next_value("--output")
+                elif item.startswith("--output="):
+                    output = item.split("=", 1)[1]
+                elif item == "--mode":
+                    mode = next_value("--mode")
+                elif item == "--model":
+                    model_ref = next_value("--model")
+                elif item == "--max-usd":
+                    raw = next_value("--max-usd")
+                    try:
+                        max_usd = float(raw)
+                    except ValueError:
+                        raise HumanError("usage", "--max-usd — число, а не " +
+                                         repr(raw), "") from None
+                elif item == "--max-turns":
+                    raw = next_value("--max-turns")
+                    try:
+                        max_turns = int(raw)
+                    except ValueError:
+                        raise HumanError("usage", "--max-turns — целое число, а не " +
+                                         repr(raw), "") from None
+                elif item == "--allow":
+                    allow.append(next_value("--allow"))
+                elif item.startswith("--allow="):
+                    allow.append(item.split("=", 1)[1])
                 else:
                     prompt_parts.append(item)
                 idx += 1
-            if not prompt_parts:
-                raise HumanError("usage", "Нужно: luna -p \"задача\" [--json] [--mode РЕЖИМ] [--model МОДЕЛЬ]", "")
-            return run_headless(" ".join(prompt_parts), json_mode=json_mode,
-                                mode=mode, model_ref=model_ref)
+            if resume is not None and not resume:
+                raise HumanError("usage", "Для luna -p нужно: --resume <id сессии>",
+                                 "Id виден в журнале сессий (LUNA_HOME/sessions) "
+                                 "и в строке сессии headless.")
+            prompt = " ".join(prompt_parts)
+            if not prompt and not sys.stdin.isatty():
+                prompt = sys.stdin.read().strip()
+            if not prompt:
+                raise HumanError("usage",
+                                 "Нужно: luna -p \"задача\" [--output text|json|stream-json] "
+                                 "[--mode РЕЖИМ] [--model МОДЕЛЬ] [--max-usd N] "
+                                 "[--max-turns N] [--allow ШАБЛОН]", "")
+            return run_headless(prompt, json_mode=json_mode, output=output,
+                                mode=mode, model_ref=model_ref,
+                                continue_last=continue_last,
+                                resume_id=resume or "",
+                                max_usd=max_usd, max_turns=max_turns,
+                                allow=allow)
         if cmd == "setup":
             from .core.paths import DataDir
             from .core.secrets import Secrets
@@ -322,7 +372,20 @@ def main(argv: list[str] | None = None) -> int:
             data = DataDir()
             data.ensure()
             return run_setup(settings=Settings(), secrets=Secrets(data.secrets),
-                             ask_search_keys=True)
+                             ask_search_keys=True, ask_pool_keys=True)
+        if cmd == "pool":
+            from .core.paths import DataDir
+            from .core.secrets import Secrets
+            from .setup import run_pool_key
+
+            if len(rest) == 2 and rest[0] == "key":
+                data = DataDir()
+                data.ensure()
+                return run_pool_key(rest[1], secrets=Secrets(data.secrets))
+            raise HumanError("usage", "Нужно: luna pool key <имя>",
+                             "Ключ адреса пула — скрытым вводом в сейф "
+                             "именем pool:<имя>; в профиле ячейки адрес "
+                             "ссылается на него полем secret.")
         if cmd == "mcp":
             from .mcp.cli import run_mcp
 

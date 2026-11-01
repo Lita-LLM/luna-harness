@@ -192,6 +192,28 @@ def run_doctor() -> int:
         add(_WARN, "Настройки", f"ключи вне схемы (сохранятся при записи): {unknown_text}")
     add(_OK, "Файлы", f"глобальный: {settings.global_path}")
 
+    # Изоляция bash роя (ЗАДАЧА-21): какой бэкенд доступен и проверен ли
+    # пробным запуском; без неё рой с bash идёт только с подтверждением.
+    try:
+        from ..starfall.sandbox import sandbox_status
+
+        iso = sandbox_status(settings, verify=True)
+        if iso.verified:
+            add(_OK, "Изоляция роя", iso.describe())
+        elif iso.backend in ("bwrap", "podman", "docker"):
+            add(_WARN, "Изоляция роя",
+                iso.describe() + " — рой с bash пойдёт только с подтверждением")
+        else:
+            text = "изоляции bash ячеек нет: " + (iso.reason or "бэкенд недоступен")
+            if iso.install_hint:
+                text += ". " + iso.install_hint
+            if sys.platform in ("win32", "darwin"):
+                text += (" На этой платформе настоящей изоляции ФС без "
+                         "администратора нет — рой с bash только с подтверждением.")
+            add(_WARN, "Изоляция роя", text)
+    except Exception as exc:  # noqa: BLE001 — диагностика не падает из-за роя
+        add(_WARN, "Изоляция роя", "не удалось проверить: " + str(exc))
+
     width = max(len(name) for _, name, _ in rows)
     for mark, name, text in rows:
         print(f"  {mark} {name:<{width}}  {text}")

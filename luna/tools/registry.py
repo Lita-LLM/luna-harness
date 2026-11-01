@@ -37,6 +37,8 @@ class ToolContext:
     todos: list = field(default_factory=list)
     background: dict = field(default_factory=dict)
     agent: object = None                  # агент-владелец (для тулов детей: assistant, crew)
+    cancel_event: object = None           # threading.Event прерывания хода (ЗАДАЧА-18):
+                                          # ставит агент; долгие тулы (bash) рвут работу
 
 
 @dataclass

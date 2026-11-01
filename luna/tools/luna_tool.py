@@ -3,9 +3,9 @@
 Смысл — человек говорит «сделай потише» или «подключи MCP-сервер», а не лезет
 в конфиги. Это удобство интерфейса, а не право агента управлять собой:
 - чтение (about, settings, paths, doctor, models, mcp, manners, compat, logs,
-  version) — свободно;
-- изменение (set, mcp_add, mcp_remove, manners_use) — всегда с подтверждением
-  человека, даже в auto/yolo (Предохранитель, hard_block);
+  version, themes) — свободно;
+- изменение (set, mcp_add, mcp_remove, manners_use, theme_use, theme_create) —
+  всегда с подтверждением человека, даже в auto/yolo (Предохранитель, hard_block);
 - поля «только человек» (guard.*, agent.mode, адрес и тип провайдера) тул не
   меняет никогда — отказ с подсказкой, как это сделать самому;
 - секреты тул не читает и не показывает; в логах всё похожее на ключ вырезано.
@@ -20,9 +20,10 @@ from pathlib import Path
 
 from .registry import Tool, ToolResult
 
-CHANGING = ("set", "mcp_add", "mcp_remove", "manners_use")
+CHANGING = ("set", "mcp_add", "mcp_remove", "manners_use", "theme_use",
+            "theme_create")
 READING = ("about", "settings", "paths", "doctor", "models", "mcp", "manners",
-           "compat", "logs", "version")
+           "compat", "logs", "version", "themes")
 
 # Похожее на ключи и токены: длинные непрерывные строки и «key=…».
 _KEYLIKE = re.compile(
@@ -289,11 +290,69 @@ def _manners_use(ctx, args) -> ToolResult:
     return _ok("Манера «" + item["name"] + "» включена со следующего хода.")
 
 
+def _themes(ctx, args) -> ToolResult:
+    from ..ui import themes
+    from ..ui.color import PALETTE_TITLES
+
+    home = _home(ctx)
+    current = str(ctx.settings.get("ui.theme") or "luna") if ctx.settings is not None else "luna"
+    lines = ["Текущая тема: " + current]
+    for name, title, _own in themes.list_themes(home):
+        lines.append(("* " if name == current else "  ") + name + " — " + title)
+    lines.append("Ключи палитры: " + ", ".join(sorted(PALETTE_TITLES)) + ".")
+    lines.append("Своя тема — файл JSON в " + str(themes.themes_dir(home)) +
+                 ": {\"title\": \"...\", \"colors\": {\"space_bg\": \"#000000\", ...}}; " +
+                 "недостающие ключи наследуются от luna.")
+    return _ok("\n".join(lines))
+
+
+def _theme_use(ctx, args) -> ToolResult:
+    from ..core.errors import HumanError
+    from ..ui import themes
+
+    settings = ctx.settings
+    if settings is None:
+        return _fail("Настройки недоступны в этом запуске.")
+    name = str(args.get("name") or "")
+    known = {n for n, _t, _o in themes.list_themes(_home(ctx))}
+    if name not in known:
+        return _fail("Нет темы " + repr(name) + ". Список: action=themes.")
+    try:
+        settings.set("ui.theme", name)
+    except HumanError as err:
+        return _fail(err.title + ((" " + err.hint) if err.hint else ""))
+    return _ok("Тема оформления: " + name + ". Чат применит её сразу.")
+
+
+def _theme_create(ctx, args) -> ToolResult:
+    from ..core.errors import HumanError
+    from ..ui import themes
+
+    colors = args.get("colors")
+    if not isinstance(colors, dict):
+        return _fail("Нужны colors: {ключ палитры: \"#RRGGBB\"}. Ключи — action=themes.")
+    name = str(args.get("name") or "")
+    try:
+        path = themes.save_theme(_home(ctx), name, colors,
+                                 str(args.get("title") or ""))
+    except ValueError as exc:
+        return _fail(str(exc))
+    text = "Тема «" + name + "» записана: " + str(path) + "."
+    if args.get("use") and ctx.settings is not None:
+        try:
+            ctx.settings.set("ui.theme", name)
+            text += " И включена."
+        except HumanError as err:
+            return _fail(err.title)
+    return _ok(text)
+
+
 ACTIONS = {
     "about": _about, "settings": _settings, "paths": _paths, "doctor": _doctor,
     "models": _models, "mcp": _mcp, "manners": _manners, "compat": _compat,
-    "logs": _logs, "version": _version,
+    "logs": _logs, "version": _version, "themes": _themes,
     "set": _set, "mcp_add": _mcp_add, "mcp_remove": _mcp_remove, "manners_use": _manners_use,
+    "theme_use": _theme_use, "theme_create": _theme_create,
 }
 
 
@@ -310,9 +369,11 @@ def luna_tool() -> Tool:
         "luna",
         "Ты сама: справка о себе и настройка удобств по просьбе человека. "
         "Чтение: action=about | settings (prefix — фильтр) | paths | doctor | models | mcp | manners | "
-        "compat (инструкции, скиллы, команды других агентов) | logs (lines) | version. "
+        "compat (инструкции, скиллы, команды других агентов) | logs (lines) | version | themes (темы оформления). "
         "Изменение — человек подтверждает каждое: set (key, value, layer=global|project), "
-        "mcp_add (name + command или url), mcp_remove (name), manners_use (name; пусто — свой голос). "
+        "mcp_add (name + command или url), mcp_remove (name), manners_use (name; пусто — свой голос), "
+        "theme_use (name — включить тему), theme_create (name, colors {ключ палитры: #RRGGBB}, title, use — "
+        "записать свою тему в LUNA_HOME/themes и при use=true включить). "
         "Защиту (guard.*), режим (agent.mode) и провайдера (model.provider/kind/base_url) меняет только человек — "
         "тул откажет; подскажи человеку, как сделать самому.",
         {"type": "object", "properties": {
@@ -325,7 +386,10 @@ def luna_tool() -> Tool:
             "command": {},
             "url": {"type": "string"},
             "lines": {"type": "integer"},
-            "check": {"type": "boolean"}},
+            "check": {"type": "boolean"},
+            "colors": {"type": "object"},
+            "title": {"type": "string"},
+            "use": {"type": "boolean"}},
          "required": ["action"]},
         _luna, mutating_for=is_changing)
 

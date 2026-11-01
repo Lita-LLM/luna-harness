@@ -131,6 +131,16 @@ def parse_markdown(text: str) -> list:
             blocks.append(Block("quote", spans=parse_inline(stripped[2:])))
             i += 1
             continue
+        if stripped.startswith("|"):
+            # Таблица (ЗАДАЧА-18): строки не склеиваем в абзац — при
+            # отрисовке каждая обрежется по ширине с пометкой.
+            flush_para()
+            tbl = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                tbl.append(lines[i].strip())
+                i += 1
+            blocks.append(Block("table", lines=tbl))
+            continue
         if not stripped:
             flush_para()
             i += 1
@@ -241,6 +251,36 @@ def wrap_spans(spans: list, width: int) -> list:
     return lines
 
 
+def clip_spans(spans: list, width: int) -> list:
+    """Спаны → одна строка не шире width ячеек: лишнее обрезано по границе
+    символа, в конце — пометка «…». Для кода и таблиц (ЗАДАЧА-18): перенос
+    по словам ломает их смысл, обрезка — нет."""
+    width = max(1, width)
+    if sum(str_width(s.text) for s in spans) <= width:
+        return [Span(s.text, s.style) for s in spans]
+    out: list = []
+    room = width - 1  # последняя ячейка — под «…»
+    for s in spans:
+        if room <= 0:
+            break
+        if str_width(s.text) <= room:
+            out.append(Span(s.text, s.style))
+            room -= str_width(s.text)
+            continue
+        cut = ""
+        for ch in s.text:
+            cw = char_width(ch)
+            if cw > room:
+                break
+            cut += ch
+            room -= cw
+        if cut:
+            out.append(Span(cut, s.style))
+        break
+    out.append(Span("…", DIM))
+    return out
+
+
 def wrap_text(text: str, width: int) -> list:
     """Чистый текст → строки не шире width ячеек (по словам, с учётом юникода)."""
     out: list = []
@@ -268,8 +308,10 @@ def render_markdown(text: str, width: int) -> list:
                     out.append([Span(marker, BULLET)] + line)
         elif block.kind == "code":
             for raw in block.lines:
-                for line in wrap_spans(highlight_code_line(raw), width):
-                    out.append(line)
+                out.append(clip_spans(highlight_code_line(raw), width))
+        elif block.kind == "table":
+            for raw in block.lines:
+                out.append(clip_spans([Span(raw)], width))
         else:  # para
             out.extend(wrap_spans(block.spans, width))
     return out or [[Span("")]]

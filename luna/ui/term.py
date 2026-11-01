@@ -348,6 +348,10 @@ def _posix_raw_mode(stream):
 
 _ENABLE_VT_PROCESSING = 0x0004
 _ENABLE_VT_INPUT = 0x0200
+# PROCESSED|LINE|ECHO гасятся маской. PROCESSED (0x0001) — критично:
+# без него Ctrl+C не превращается в сигнал SIGINT, а приходит обычным
+# событием клавиши в обработчик чата (ЗАДАЧА-18: Ctrl+C — это клавиша,
+# а не выход). На POSIX то же даёт tty.setraw (ISIG выключен, байт 0x03).
 _DISABLE_LINE_ECHO_PROCESSED = ~(0x0001 | 0x0002 | 0x0004)  # PROCESSED|LINE|ECHO
 
 

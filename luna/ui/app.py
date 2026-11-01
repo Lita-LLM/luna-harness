@@ -151,21 +151,21 @@ class MiniApp:
             y += 1
         # строка состояния
         sy = rows - 2
-        buf.fill_rect(0, sy, cols, 1, " ", bg=(0x16, 0x1B, 0x30))
+        buf.fill_rect(0, sy, cols, 1, " ", bg=_color.STATUS_BG)
         pct = self.context_pct()
         left = f" {_moon.context_phase(pct, self.glyph_mode)} контекст {pct}%"
-        buf.text(0, sy, left, fg=_color.SILVER, bg=(0x16, 0x1B, 0x30))
+        buf.text(0, sy, left, fg=_color.SILVER, bg=_color.STATUS_BG)
         if self._spinner is not None:
             mid = f"{self._spinner.glyph(now)} {self._spin_phrase}…"
             mx = max(0, (cols - str_width(mid)) // 2)
             # строка думания появляется и уходит затуханием, а не прыжком
             alpha = min(ease_in_out((now - self._spin_from) / 0.3),
                         ease_in_out((self._spin_until - now) / 0.3))
-            spin_fg = _color.lerp((0x16, 0x1B, 0x30), _color.AMBER, alpha)
-            buf.text(mx, sy, mid, fg=spin_fg, bg=(0x16, 0x1B, 0x30))
+            spin_fg = _color.lerp(_color.STATUS_BG, _color.AMBER, alpha)
+            buf.text(mx, sy, mid, fg=spin_fg, bg=_color.STATUS_BG)
         clock = time.strftime("%H:%M:%S")
         buf.text(cols - len(clock) - 1, sy, clock, fg=_color.SILVER,
-                 bg=(0x16, 0x1B, 0x30), attrs=_color.DIM)
+                 bg=_color.STATUS_BG, attrs=_color.DIM)
         # строка ввода
         iy = rows - 1
         buf.text(0, iy, "› ", fg=_color.CYAN, bg=_color.SPACE_BG, attrs=_color.BOLD)

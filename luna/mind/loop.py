@@ -48,7 +48,9 @@ class Agent:
         self._listeners: list = []
         self._active = False
         self._queue: list[dict] = []
+        self._deferred: list[dict] = []  # delivery=queue: отдельные ходы после текущего
         self._interrupt = threading.Event()
+        self.ctx.cancel_event = self._interrupt  # долгие тулы рвутся вместе с ходом
         self._turn = 0
         self._started = False
         self._prompt_sig: tuple | None = None
@@ -112,9 +114,23 @@ class Agent:
                 if notes:
                     text = notes + ("\n\n" + text if text else "")
             if self._turn_active:
-                self._queue.append({"text": text, "attachments": command.get("attachments") or []})
+                item = {"text": text, "attachments": command.get("attachments") or []}
+                # delivery (ЗАДАЧА-18, docs/СОБЫТИЯ.md): inject — подмешать
+                # в текущий ход перед следующим вызовом модели; queue —
+                # отдельным ходом после; interrupt — прервать и сразу им.
+                delivery = command.get("delivery") or "inject"
+                if delivery == "queue":
+                    self._deferred.append(item)
+                elif delivery == "interrupt":
+                    self._deferred.insert(0, item)
+                    self.interrupt()
+                else:
+                    self._queue.append(item)
                 return None
             return self.run_turn(text, command.get("attachments") or [])
+        if kind == "btw":
+            self.btw(command.get("text", ""))
+            return None
         if kind == "interrupt":
             self.interrupt()
             return None
@@ -133,6 +149,32 @@ class Agent:
             return self.compact_now(str(command.get("hint", "") or ""))
         return None
 
+    def take_deferred(self) -> list[dict]:
+        """Сообщения delivery=queue/interrupt: клиент запускает их
+        отдельными ходами, когда текущий ход завершился."""
+        items, self._deferred = self._deferred, []
+        return items
+
+    def btw(self, question: str) -> None:
+        """Ход в сторону (команда btw, ЗАДАЧА-18): ответ по копии текущей
+        истории. Историю не трогаем, ходом не считаем, системный промпт не
+        пересобираем — только честно списываем usage."""
+        question = (question or "").strip()
+        if not question:
+            self.publish({"type": "btw.answer", "text": "Спроси что-нибудь после /btw."})
+            return
+        messages = list(self._history)
+        messages.append({"role": "user", "content": question})
+        try:
+            result = self.router.chat(messages, None, ref=self.model_ref,
+                                      on_event=None)
+        except Exception as exc:  # noqa: BLE001 — вопрос в сторону не роняет сессию
+            self.publish({"type": "btw.answer",
+                          "text": "Не вышло спросить модель: " + str(exc)})
+            return
+        self._usage_event(result)
+        self.publish({"type": "btw.answer", "text": result.text or "(пустой ответ)"})
+
     def set_mode(self, mode: str) -> None:
         if mode in ("normal", "plan", "review", "auto", "yolo"):
             self.mode = mode
@@ -140,6 +182,16 @@ class Agent:
 
     def interrupt(self) -> None:
         self._interrupt.set()
+        # Рвём идущий стрим модели (ЗАДАЧА-18): HTTP-клиент закрывает
+        # потоковый ответ, разбор получает конец потока и частичный
+        # результат сразу, а не по таймауту сети. Долгий bash в туле
+        # увидит тот же Event через ctx.cancel_event и убьёт дерево.
+        cancel = getattr(self.router, "cancel_active", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 — прерывание не падает
+                pass
         # Esc хозяина гасит и всех его детей (ЗАДАЧА-11), а те — своих.
         host = getattr(self, "_agents_host", None)
         if host is not None:
@@ -161,6 +213,7 @@ class Agent:
         tool = self.tools.get("bash")
         if tool is None:
             return None
+        self._interrupt.clear()  # флаг прошлого хода не должен убивать эту команду
         if self._checkpoints is not None:
             self._checkpoints.begin_turn(self._turn)
         return self._execute_tool(tool, {"command": command}, "команда человека мимо модели",
@@ -399,9 +452,28 @@ class Agent:
         for _step in range(max_steps):
             if self._interrupt.is_set():
                 return "interrupted"
-            result = self.router.chat(self._history, self._specs(),
-                                      ref=self.model_ref, on_event=self._emit)
+            try:
+                result = self.router.chat(self._history, self._specs(),
+                                          ref=self.model_ref, on_event=self._emit)
+            except Exception:
+                if self._interrupt.is_set():
+                    # Отмена стрима могла и бросить: частичного текста нет,
+                    # но ход всё равно честно помечен прерванным.
+                    self._history.append({"role": "assistant",
+                                          "content": "[ответ прерван человеком]"})
+                    self.publish({"type": "agent.text.done"})
+                    return "interrupted"
+                raise
             self._usage_event(result)
+            if self._interrupt.is_set():
+                # Стрим оборвали посреди ответа: частичный текст остаётся
+                # в истории с пометкой, вызовы тулов НЕ выполняем.
+                text = (result.text or "").rstrip()
+                text = (text + "\n\n[ответ прерван человеком]") if text \
+                    else "[ответ прерван человеком]"
+                self._history.append({"role": "assistant", "content": text})
+                self.publish({"type": "agent.text.done"})
+                return "interrupted"
             assistant: dict = {"role": "assistant", "content": result.text}
             if result.tool_calls:
                 assistant["tool_calls"] = [

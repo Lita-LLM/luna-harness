@@ -9,9 +9,57 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Iterator
+
+# Шаг опроса чтения стрима: readline просыпается не реже раза в столько
+# секунд и проверяет отмену — прерывание не зависит от того, умеет ли
+# платформа будить чужой recv закрытием сокета (Windows — не умеет).
+STREAM_POLL_SEC = 0.25
+
+
+def _find_socket(resp):
+    """Сокет под ответом urllib: идём по цепочке fp/raw/_sock вглубь.
+
+    Нужен для shutdown и для короткого таймаута чтения стрима. Для
+    несокетных ответов (подмена транспорта в тестах) — None."""
+    stack = [resp]
+    seen: set = set()
+    while stack:
+        obj = stack.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if callable(getattr(obj, "shutdown", None)) and \
+                callable(getattr(obj, "settimeout", None)):
+            return obj
+        for attr in ("fp", "raw", "_sock", "sock"):
+            stack.append(getattr(obj, attr, None))
+    return None
+
+
+def _force_close(resp) -> None:
+    """Закрыть ответ так, чтобы поток, висящий в readline(), проснулся.
+
+    Одного close() мало (на Linux читающий поток спал дальше до конца
+    ответа сервера) — нужен shutdown сокета. На Windows и этого мало
+    (красный CI ЗАДАЧИ-18): надёжное пробуждение даёт не закрытие, а
+    короткий таймаут чтения в stream_lines — опрос с проверкой отмены,
+    а shutdown здесь остаётся ускорением, где срабатывает."""
+    sock = _find_socket(resp)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:  # noqa: BLE001 — закрытие не должно падать
+            pass
+    try:
+        resp.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 from ..core.errors import HumanError
 
@@ -46,6 +94,23 @@ class HttpClient:
     def __init__(self, opener=None, timeout: float = 120.0):
         self._opener = opener or urllib.request.urlopen
         self.timeout = timeout
+        # Точка отмены стримов (ЗАДАЧА-18): идущие потоковые ответы и
+        # поколение отмены. cancel_active() закрывает ответы из другого
+        # потока — readline() в потоке стрима тут же возвращает конец, и
+        # адаптер честно собирает частичный результат, а не висит до
+        # таймаута. Поколение нужно, чтобы отмена, пришедшая между
+        # подключением и регистрацией ответа, тоже сработала.
+        self._lock = threading.Lock()
+        self._active: set = set()
+        self._cancel_gen = 0
+
+    def cancel_active(self) -> None:
+        """Оборвать все идущие стримы этого клиента (прерывание хода)."""
+        with self._lock:
+            self._cancel_gen += 1
+            actives = list(self._active)
+        for resp in actives:
+            _force_close(resp)
 
     def _request(self, url: str, data: bytes | None, headers: dict, timeout: float | None):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
@@ -94,15 +159,46 @@ class HttpClient:
         hdrs = {"Content-Type": "application/json", "Accept": "text/event-stream"}
         hdrs.update(headers or {})
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        read_timeout = timeout or self.timeout
         resp = self._request(url, body, hdrs, timeout)
-        while True:
-            raw = resp.readline()
-            if not raw:
-                break
-            if isinstance(raw, bytes):
-                yield raw.decode("utf-8", errors="replace")
-            else:
-                yield str(raw)
+        with self._lock:
+            gen = self._cancel_gen
+            self._active.add(resp)
+        # Чтение — опросом: сокету короткий таймаут, readline просыпается
+        # по TimeoutError и проверяет отмену и срок молчания. Подключение
+        # при этом шло с полным таймаутом (TLS не страдает), короткий —
+        # только на чтение уже открытого ответа.
+        sock = _find_socket(resp)
+        if sock is not None:
+            try:
+                sock.settimeout(STREAM_POLL_SEC)
+            except Exception:  # noqa: BLE001 — не вышло: останемся на shutdown
+                sock = None
+        last_data = time.monotonic()
+        try:
+            while True:
+                with self._lock:
+                    if self._cancel_gen != gen:
+                        break  # отмена пришла, пока стрим шёл или спал
+                try:
+                    raw = resp.readline()
+                except TimeoutError:
+                    if time.monotonic() - last_data > read_timeout:
+                        raise  # молчание дольше таймаута — как было раньше
+                    continue  # просто очередной шаг опроса
+                except Exception:  # noqa: BLE001 — ответ закрыли из cancel_active
+                    break
+                if not raw:
+                    break
+                last_data = time.monotonic()
+                if isinstance(raw, bytes):
+                    yield raw.decode("utf-8", errors="replace")
+                else:
+                    yield str(raw)
+        finally:
+            with self._lock:
+                self._active.discard(resp)
+            _force_close(resp)
 
     def get_text(self, url: str, headers: dict | None = None, timeout: float | None = None,
                  limit: int = 2_000_000) -> str:

@@ -172,7 +172,8 @@ def _make_runner(ctx, project_confirmed: bool) -> RouterCellRunner:
         secrets=getattr(ctx, "secrets", None), mother_tools=mother_tools,
         guard=getattr(agent, "guard", None) if agent is not None else None,
         project_dir=Path(getattr(ctx, "cwd", Path.cwd())),
-        project_confirmed=project_confirmed)
+        project_confirmed=project_confirmed,
+        cancel_event=getattr(agent, "_interrupt", None) if agent is not None else None)
 
 
 def _plan(ctx, args: dict):

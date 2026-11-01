@@ -60,8 +60,7 @@ _f("ui.emoji", "choice", "auto",
    ("auto", "on", "off"))
 _f("ui.animations", "bool", True, "Анимации: заставка, спиннеры, мерцание звёзд")
 _f("ui.splash", "bool", True, "Заставка с восходом луны при старте")
-_f("ui.theme", "choice", "luna", "Тема оформления чата: luna — родная палитра, contrast — ярче приглушённый текст, mono — один серебристый цвет",
-   ("luna", "contrast", "mono"))
+_f("ui.theme", "str", "luna", "Тема оформления чата: палитра данными (ui/themes.py) — встроенные luna, amoled, contrast, mono, light и свои из LUNA_HOME/themes")
 _f("ui.hemisphere", "choice", "north",
    "Полушарие для настоящей фазы луны на заставке: north — северное, south — южное (серп зеркальный)",
    ("north", "south"))
@@ -164,6 +163,10 @@ _f("starfall.budget_usd", "float", 1.0, "Потолок бюджета одно�
 _f("starfall.ttl_s", "int", 300, "Потолок TTL одной ячейки роя, секунд")
 _f("starfall.max_attempts", "int", 3, "Сколько раз перезапускать упавшую ячейку")
 _f("starfall.output_dir", "str", "", "Папка результатов потоков роя (пусто — local/starfall в каталоге данных)")
+# Отправка во время хода (ЗАДАЧА-18): что делает Enter, пока агент занят.
+_f("chat.send_mode", "choice", "inject",
+   "Отправка сообщения во время хода: inject — подмешать в текущий ход перед следующим вызовом модели, queue — отдельным ходом после, interrupt — прервать ход и сразу отправить; на лету — Ctrl+S, разово прервать и отправить — Alt+Enter",
+   ("inject", "queue", "interrupt"))
 
 
 def _dig(data: dict, key: str):

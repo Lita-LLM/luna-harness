@@ -272,7 +272,12 @@ class AskFlowTest(unittest.TestCase):
 
 class QueueAndModesTest(unittest.TestCase):
     def test_queue_while_busy(self):
+        # ЗАДАЧА-18: очередь — теперь режим chat.send_mode=queue (по
+        # умолчанию inject: сообщение уходит агенту сразу, вставкой в ход).
         app = make_app()
+        app.settings.set("chat.send_mode", "queue")
+        # Настройка пишется в общий файл прогона — вернуть как было.
+        self.addCleanup(app.settings.set, "chat.send_mode", "inject")
         app.submit_text("первое")
         app.on_agent_event({"type": "turn.start", "turn": 1})
         app.submit_text("второе")
@@ -283,6 +288,7 @@ class QueueAndModesTest(unittest.TestCase):
         sent = [c for c in app.sent_commands if c["type"] == "user.message"]
         self.assertEqual(len(sent), 2)
         self.assertEqual(sent[1]["text"], "второе")
+        self.assertEqual(sent[1].get("delivery"), "queue")
         self.assertEqual(app.queue, [])
 
     def test_tab_cycles_mode(self):

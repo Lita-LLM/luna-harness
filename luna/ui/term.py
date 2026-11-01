@@ -447,6 +447,14 @@ def _windows_read(timeout, parser) -> list:
                                         mods=frozenset(mods)))
                 continue
             ch = kev.UnicodeChar
+            if vk == 0x1B:
+                # Настоящая клавиша Esc (VK_ESCAPE) — сразу событие. Через
+                # разбор она ждала продолжения escape-последовательности до
+                # следующей клавиши, и двойной Esc превращался в одиночный.
+                # Последовательности VT-ввода приходят с vk=0 — их не задевает.
+                events.extend(parser.flush())
+                events.append(_keys.Key("esc"))
+                continue
             if ch and ch != "\x00":
                 events.extend(parser.feed(ch.encode("utf-8")))
             else:

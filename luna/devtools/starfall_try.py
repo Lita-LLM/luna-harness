@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import resource
 import tempfile
 import time
 from pathlib import Path
@@ -19,7 +18,13 @@ from .rewind_try import _make_agent
 
 
 def _rss_mb() -> float:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    """Пик RSS процесса, МБ; на Windows resource нет — честный 0 (н/д)."""
+    try:
+        import resource
+
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except ImportError:
+        return 0.0
 
 
 def run_starfall_try(argv=None) -> int:
@@ -63,8 +68,13 @@ def run_starfall_try(argv=None) -> int:
     seconds = time.time() - started
     print(out.text)
     print()
-    print("Время всего: " + format(seconds, ".1f") + " с; пик памяти процесса: " +
-          format(_rss_mb(), ".1f") + " МБ (до прогона " + format(rss_before, ".1f") +
-          " МБ, рост " + format(_rss_mb() - rss_before, ".1f") + " МБ)")
+    rss_now = _rss_mb()
+    if rss_now:
+        print("Время всего: " + format(seconds, ".1f") + " с; пик памяти процесса: " +
+              format(rss_now, ".1f") + " МБ (до прогона " + format(rss_before, ".1f") +
+              " МБ, рост " + format(rss_now - rss_before, ".1f") + " МБ)")
+    else:
+        print("Время всего: " + format(seconds, ".1f") +
+              " с; пик памяти на этой платформе не меряется")
     print("Результаты потока: " + str(root / "starfall"))
     return 0 if out.ok else 1

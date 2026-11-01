@@ -309,10 +309,15 @@ class EngineTest(StarfallCase):
 
 
 _TEN_K_SCRIPT = """
-import resource, sys, time
+import sys, time
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
-base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+try:
+    import resource
+    base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+except ImportError:
+    resource = None  # Windows: ru_maxrss нет, рост не меряем (урок CI)
+    base = 0
 from luna.starfall.engine import SwarmRun
 from luna.starfall.profiles import get_profile
 run = SwarmRun(stream="leo", profiles=[get_profile("cls")],
@@ -322,7 +327,7 @@ run = SwarmRun(stream="leo", profiles=[get_profile("cls")],
                parallel=8, link_size=8, budget_usd=0.0, mail="none")
 started = time.time()
 summary = run.run()
-peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if resource else 0
 print(summary["done"], summary["failed"], round(time.time() - started, 1),
       peak - base)
 """

@@ -27,6 +27,7 @@ from . import color as _color
 from . import layout as _layout
 from . import moon as _moon
 from . import phrases
+from . import themes as _themes
 from .anim import PhraseWheel, Scheduler, Spinner, ease_in_out, ease_out
 from .editor import TextEditor
 from .keys import Key, Mouse, Paste, Resize
@@ -49,27 +50,29 @@ PANEL_BG = (0x10, 0x13, 0x24)
 GUARD_BG = (0x24, 0x1B, 0x10)
 DIM_FG = (0x8B, 0x94, 0xAC)
 
+# Стиль markdown → (ключ палитры, атрибуты): цвета берутся из текущей
+# темы в момент отрисовки (ЗАДАЧА-18), а не зашиты при импорте.
 _STYLE_MAP = {
-    "text": (_color.SILVER, 0),
-    "bold": (_color.SILVER, _color.BOLD),
-    "italic": (_color.SILVER, _color.ITALIC),
-    "code": (_color.CYAN, 0),
-    "heading": (_color.VIOLET, _color.BOLD),
-    "bullet": (_color.CYAN, 0),
-    "dim": (DIM_FG, _color.DIM),
-    "link": (_color.CYAN, _color.UNDERLINE),
-    "keyword": (_color.VIOLET, 0),
-    "string": (_color.AMBER, 0),
-    "number": (_color.MAGENTA, 0),
-    "comment": (DIM_FG, _color.ITALIC),
-    "user": (_color.SILVER, 0),
-    "amber": (_color.AMBER, _color.BOLD),
-    "guard": (_color.AMBER, _color.BOLD),
-    "cyan": (_color.CYAN, _color.BOLD),
-    "tool": (_color.CYAN, _color.BOLD),
-    "ok": (_color.OK, 0),
-    "err": (_color.ERR, _color.BOLD),
-    "notice": (_color.VIOLET, _color.DIM),
+    "text": ("silver", 0),
+    "bold": ("silver", _color.BOLD),
+    "italic": ("silver", _color.ITALIC),
+    "code": ("cyan", 0),
+    "heading": ("violet", _color.BOLD),
+    "bullet": ("cyan", 0),
+    "dim": ("muted", _color.DIM),
+    "link": ("cyan", _color.UNDERLINE),
+    "keyword": ("violet", 0),
+    "string": ("amber", 0),
+    "number": ("magenta", 0),
+    "comment": ("muted", _color.ITALIC),
+    "user": ("silver", 0),
+    "amber": ("amber", _color.BOLD),
+    "guard": ("amber", _color.BOLD),
+    "cyan": ("cyan", _color.BOLD),
+    "tool": ("cyan", _color.BOLD),
+    "ok": ("ok", 0),
+    "err": ("err", _color.BOLD),
+    "notice": ("violet", _color.DIM),
 }
 
 # Реестр команд чата (ЗАДАЧА-16): один источник для диспетчера /-команд,
@@ -105,7 +108,7 @@ COMMANDS = [
     ("mcp", "MCP-серверы: выбиралка статуса и включения"),
     ("agents", "экипаж: главный агент, спутники и ассистенты"),
     ("cells", "профили ячеек роя: выбиралка, Enter — карточка, e — правка в редакторе"),
-    ("theme", "тема оформления: luna, contrast, mono"),
+    ("theme", "тема оформления: палитры luna, amoled, contrast, mono, light и свои из LUNA_HOME/themes"),
     ("editor", "сочинить сообщение во внешнем редакторе"),
     ("details", "детали ленты вкл/выкл: вывод тулов свёрнуто или скрыто"),
     ("thinking", "показ рассуждений в ленте вкл/выкл"),
@@ -185,10 +188,8 @@ def resolve_command(word: str):
         if c in COMMAND_RU:
             return COMMAND_RU[c]
     return None
-# Темы оформления (/theme, настройка ui.theme): акценты ленты поверх палитры.
-_THEMES = (("luna", "Луна", "родная палитра"),
-           ("contrast", "Контраст", "приглушённый текст ярче — для слабых терминалов"),
-           ("mono", "Монохром", "один серебристый цвет, без акцентов"))
+# Темы оформления (/theme, настройка ui.theme) — палитры данными:
+# встроенные и свои из LUNA_HOME/themes, см. luna/ui/themes.py (ЗАДАЧА-18).
 
 HELP_TEXT = """Команды и клавиши Луны
 """ + "\n".join("/" + name + " — " + desc for name, desc in COMMANDS) + """
@@ -196,7 +197,8 @@ HELP_TEXT = """Команды и клавиши Луны
 /panels — все тайлы выбиралкой · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер · Alt+C/G/P/T — Контекст, Git, Процессы, Дерево
 Команды не зависят от раскладки (ui.layout_fix): /панель = /panel, а .зфтуд в ЙЦУКЕН — тоже /panel; аргументы и Ctrl/Alt-клавиши понимаются в любой раскладке
 Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера)
-Esc Esc на пустом вводе — откат к ходу выбиралкой · Esc Esc во время хода — прервать ход
+Esc Esc на пустом вводе — откат к ходу выбиралкой · Esc во время хода — прервать ход одним нажатием · Ctrl+C во время хода — прервать; без хода — очистить ввод, второй подряд за секунду — выход
+Отправка во время хода (chat.send_mode): inject — вставка в ход · queue — очередь · interrupt — прервать и отправить · Ctrl+S — сменить режим · Alt+Enter — разово прервать и отправить · ↑ на пустом поле — вернуть сообщение из очереди
 !команда — выполнить мимо модели · @файл — вложить файл (Tab — дополнить; Tab после / — дополнить команду)
 Enter — отправить · Alt+Enter — новая строка · стрелки — история и курсор · Tab / Shift+Tab — режим по кругу
 Ctrl+O — раскрыть/свернуть детали записи · F6 — в режим панелей (панели открыты) или открыть «План»
@@ -240,6 +242,36 @@ def diff_counts(summary: str, output: str):
 def _wordy(ch: str) -> bool:
     """Символ «слова» для двойного клика: буквы, цифры и знаки путей/команд."""
     return ch.isalnum() or ch in "_-./:\\@#~"
+
+
+def _clip_line(spans, width: int):
+    """Спаны (текст, стиль) → одна строка не шире width ячеек.
+
+    Хвост обрезается по границе символа с пометкой «…»: заголовки тулов,
+    вопросы и пункты плана не должны уезжать под панели (ЗАДАЧА-18)."""
+    if sum(str_width(t) for t, _s in spans) <= width:
+        return spans
+    out = []
+    room = max(1, width) - 1
+    for text, style in spans:
+        if room <= 0:
+            break
+        if str_width(text) <= room:
+            out.append((text, style))
+            room -= str_width(text)
+            continue
+        cut = ""
+        for ch in text:
+            cw = char_width(ch)
+            if cw > room:
+                break
+            cut += ch
+            room -= cw
+        if cut:
+            out.append((cut, style))
+        break
+    out.append(("…", "dim"))
+    return out
 
 
 def _cells_slice(text: str, a: int, b) -> str:
@@ -382,10 +414,18 @@ class ChatApp:
         self._last_esc = -10.0
         self._last_change = 0.0
         self._after_interrupt = ""
+        # ЗАДАЧА-18: прерывание, режимы отправки, граница колонки панелей.
+        self._ctrl_c_at = -10.0          # первый Ctrl+C на пустом вводе (момент)
+        self._hint: tuple | None = None  # (текст, до какого момента) — строка над вводом
+        self._applied_theme = ""         # имя применённой палитры темы
+        self._col_drag = False           # мышь тянет границу лента↔панели
+        self._geom_cols = 0              # ширина экрана последнего кадра
         self._started = False
         self._page = 10
         self.spinner = Spinner(self.glyph_mode)
         self.wheel = PhraseWheel(phrases.spinner_phrases())
+        self._applied_theme = _themes.apply_theme(
+            str(self.settings.get("ui.theme") or "luna"))
 
     def _make_nibbler(self):
         """Ниблер для этого экрана; фальшивый источник — только эвристики,
@@ -838,9 +878,10 @@ class ChatApp:
     def open_theme_picker(self) -> None:
         """/theme: тема оформления выбиралкой (настройка ui.theme)."""
         current = str(self.settings.get("ui.theme") or "luna")
-        items = [PickerItem(key=key, title=title, detail=desc,
+        items = [PickerItem(key=key, title=title,
+                            detail="своя тема" if own else "встроенная",
                             mark="→" if key == current else "")
-                 for key, title, desc in _THEMES]
+                 for key, title, own in _themes.list_themes()]
         self._open_picker("theme", "Тема оформления", items,
                           hint="Enter — включить · Esc — закрыть",
                           preview_lines=0)
@@ -919,6 +960,7 @@ class ChatApp:
             elif kind == "theme":
                 self.picker = None
                 self.settings.set("ui.theme", item.key)
+                self._applied_theme = _themes.apply_theme(item.key)
                 self._add(Entry("notice", text="Тема оформления: " + item.key))
             elif kind == "history":
                 self.picker = None
@@ -966,8 +1008,9 @@ class ChatApp:
 
         Чужие форматы не трогаем молча: opencode.json может быть JSONC с
         комментариями — перезапись стёрла бы их; там честно отказываем.
-        Применится при следующем подключении серверов (ядро читает конфиги
-        при старте серверов, не на каждый вызов).
+        После правки — request_mcp_reload(): реестр сбрасывает серверы, и
+        при следующем обращении тулов они перечитают конфиги и
+        перезапустятся на лету (ЗАДАЧА-18).
         """
         cfg = item.payload
         label = getattr(cfg, "source", "") or ""
@@ -991,10 +1034,13 @@ class ChatApp:
             self._add(Entry("error", text="Не вышло переключить " + item.key
                                           + ": " + str(exc)))
             return
+        from ..tools.registry import request_mcp_reload
+
+        request_mcp_reload()
         state = "выключен" if cfg.enabled else "включён"
         self._add(Entry("notice", text="MCP-сервер " + item.key + " " + state
-                                       + " в " + label + " — применится при "
-                                       "следующем подключении серверов."))
+                                       + " в " + label + " — сервер "
+                                       "перезапустится при следующем вызове тулов."))
         if self.picker is not None:
             self.picker.set_items(self._mcp_items())
 
@@ -1391,9 +1437,9 @@ class ChatApp:
                 self._do_new_session()
             elif self._after_interrupt:
                 text, self._after_interrupt = self._after_interrupt, ""
-                self._send_user_message(text)
+                self._send_user_message(text, delivery="interrupt")
             elif self.queue:
-                self._send_user_message(self.queue.pop(0))
+                self._send_user_message(self.queue.pop(0), delivery="queue")
         # незнакомые типы молча пропускаем — контракт только добавляется
 
     # --- отправка и команды ---------------------------------------------------------
@@ -1430,7 +1476,8 @@ class ChatApp:
             keys = ", ".join(c["key"] for c in changes[:6]) + (" …" if len(changes) > 6 else "")
             self._add(Entry("notice", text="Настройки обновлены из файла: " + keys))
 
-    def _send_user_message(self, text: str, display: str | None = None) -> None:
+    def _send_user_message(self, text: str, display: str | None = None,
+                           delivery: str | None = None) -> None:
         attachments = [tok[1:] for tok in text.split()
                        if tok.startswith("@") and len(tok) > 1]
         self._add(Entry("user", text=text if display is None else display))
@@ -1443,8 +1490,11 @@ class ChatApp:
             if notes:
                 marks = "\n".join("[Ниблер: " + note + "]" for note in notes)
                 out_text = marks + "\n\n" + text
-        self.send_command({"type": "user.message", "text": out_text,
-                           "attachments": attachments})
+        cmd = {"type": "user.message", "text": out_text,
+               "attachments": attachments}
+        if delivery:
+            cmd["delivery"] = delivery  # контракт: docs/СОБЫТИЯ.md
+        self.send_command(cmd)
 
     def cycle_mode(self, step: int = 1) -> None:
         idx = MODES.index(self.mode) if self.mode in MODES else 0
@@ -1504,8 +1554,18 @@ class ChatApp:
                 self.send_command({"type": "shell", "command": command})
             return
         if self.busy:
-            self.queue.append(text)
-            self._add(Entry("notice", text="В очереди: " + text.split("\n")[0]))
+            # Режим отправки во время хода (chat.send_mode, ЗАДАЧА-18):
+            # inject — сразу агенту, подмешается перед следующим вызовом
+            # модели; queue — сюда, отдельным ходом после; interrupt —
+            # прервать ход и отправить этим же текстом.
+            mode = self._send_mode()
+            if mode == "inject":
+                self._send_user_message(text, delivery="inject")
+            elif mode == "interrupt":
+                self._interrupt_send(text)
+            else:
+                self.queue.append(text)
+                self._add(Entry("notice", text="В очереди: " + text.split("\n")[0]))
             return
         self._send_user_message(text)
 
@@ -1843,19 +1903,10 @@ class ChatApp:
                                        + " — секретов в нём нет, приложи к обращению."))
 
     def _btw_command(self, question: str) -> None:
-        """/btw: вопрос в сторону. Экран и фальшивый агент готовы; настоящее
-        ядро команду btw в контракте пока не знает — честно говорим об этом,
-        а не делаем вид, что вопрос ушёл."""
+        """/btw: вопрос в сторону — ядро отвечает по истории, не трогая её
+        и не занимая ход (команда btw контракта, ЗАДАЧА-18)."""
         if not question:
             self._add(Entry("notice", text="Нужно: /btw <вопрос>"))
-            return
-        from ..devtools.fake_agent import FakeAgent
-
-        if not isinstance(self.source, FakeAgent):
-            self._add(Entry("notice", text="Настоящее ядро пока не умеет /btw: "
-                                           "нужна команда btw в контракте событий "
-                                           "(записано постановщику). Задайте вопрос "
-                                           "обычным сообщением."))
             return
         self._add(Entry("btw", text="в сторону: " + question))
         self.send_command({"type": "btw", "text": question})
@@ -2040,8 +2091,11 @@ class ChatApp:
             # Ctrl/Alt — по физической клавише: Alt+д — это Alt+L.
             key = _layout.physical_key(key)
         self._reload_settings()
-        if key.label == "ctrl+c" or key.name == "eof":
+        if key.name == "eof":
             self.done = True
+            return
+        if key.label == "ctrl+c":
+            self._ctrl_c_key()
             return
         if key.name not in ("pageup", "pagedown"):
             self.selection = None  # любая работа с клавиатуры снимает выделение
@@ -2061,6 +2115,9 @@ class ChatApp:
             return
         if key.label in _PANEL_KEYS:
             self.toggle_panel(_PANEL_KEYS[key.label])
+            return
+        if key.label == "ctrl+s":
+            self._cycle_send_mode()
             return
         if key.label == "ctrl+r":
             self.open_history_picker()
@@ -2121,7 +2178,10 @@ class ChatApp:
             self.scroll = max(0, self.scroll - self._page)
             return
         if key.name == "enter":
-            if "alt" in key.mods or "shift" in key.mods:
+            if "alt" in key.mods and self.busy and self.editor.text.strip():
+                # Alt+Enter во время хода — разово: прервать и отправить.
+                self._interrupt_send(self.editor.submit())
+            elif "alt" in key.mods or "shift" in key.mods:
                 self.editor.newline()
                 self._update_completions()
             else:
@@ -2132,6 +2192,9 @@ class ChatApp:
                 self.completion_index = (self.completion_index - 1) % len(self.cmd_completions)
             elif self.completions:
                 self.completion_index = (self.completion_index - 1) % len(self.completions)
+            elif not self.editor.text and self.queue:
+                # Отозвать последнее сообщение из очереди обратно в редактор.
+                self.editor.set_text(self.queue.pop())
             elif not self.editor.up():
                 self.editor.history_prev()
             return
@@ -2154,7 +2217,9 @@ class ChatApp:
             self.completions = []
             self.cmd_completions = []
             return
-        if double and self.busy:
+        if self.busy:
+            # Esc во время хода — прервать ОДНИМ нажатием (ЗАДАЧА-18);
+            # набросок из поля ввода уезжает следующим ходом.
             draft = self.editor.text
             if draft.strip():
                 self._after_interrupt = draft
@@ -2164,6 +2229,75 @@ class ChatApp:
         if double and not self.editor.text.strip():
             # Esc Esc на пустом вводе — к выбору хода для отката (как у эталонов).
             self.open_rewind_picker()
+
+    # --- прерывание и режимы отправки (ЗАДАЧА-18) ---------------------------
+
+    def _flash_hint(self, text: str) -> None:
+        """Короткая подсказка строкой над полем ввода (не запись ленты)."""
+        self._hint = (text, self._clock() + 4.0)
+
+    def _ctrl_c_key(self) -> None:
+        """Ctrl+C: во время хода — прервать; с текстом в поле — очистить
+        поле; на пустом поле второй подряд за секунду — выход, после
+        первого — подсказка. Выход по первому нажатию остался только
+        у конца ввода (EOF)."""
+        now = self._clock()
+        if self.busy:
+            self.send_command({"type": "interrupt"})
+            self._ctrl_c_at = -10.0
+            return
+        if self.editor.text.strip():
+            self.editor.clear()
+            self._ctrl_c_at = -10.0
+            return
+        if now - self._ctrl_c_at <= 1.0:
+            self.done = True
+            return
+        self._ctrl_c_at = now
+        self._flash_hint("Ещё раз Ctrl+C в течение секунды — выход из Луны.")
+
+    def _send_mode(self) -> str:
+        mode = str(self.settings.get("chat.send_mode") or "inject")
+        return mode if mode in ("inject", "queue", "interrupt") else "inject"
+
+    _SEND_MODE_TITLES = {"inject": "вставка в текущий ход",
+                         "queue": "очередь отдельным ходом",
+                         "interrupt": "прервать и отправить сразу"}
+
+    def _cycle_send_mode(self) -> None:
+        """Ctrl+S: режим отправки во время хода — по кругу, на лету."""
+        order = ("inject", "queue", "interrupt")
+        nxt = order[(order.index(self._send_mode()) + 1) % len(order)]
+        self.settings.set("chat.send_mode", nxt)
+        self._flash_hint("Отправка во время хода: " + self._SEND_MODE_TITLES[nxt] +
+                         " (Ctrl+S — сменить)")
+
+    def _interrupt_send(self, text: str) -> None:
+        """Прервать текущий ход и сразу отправить текст новым (Alt+Enter
+        и режим interrupt): текст уйдёт, как только придёт turn.done."""
+        text = (text or "").strip("\n")
+        if not text.strip():
+            return
+        self._after_interrupt = text
+        self.editor.clear()
+        self.send_command({"type": "interrupt"})
+        self._add(Entry("notice", text="Прерываю ход — дальше: " +
+                                       text.split("\n")[0]))
+
+    def _meta_lines(self, now: float) -> list:
+        """Строки над полем ввода: подсказка, очередь, режим отправки."""
+        out: list = []
+        if self._hint is not None and now < self._hint[1]:
+            out.append(self._hint[0])
+        for text in self.queue[:3]:
+            out.append("в очереди: " + str(text).split("\n")[0])
+        if len(self.queue) > 3:
+            out.append("в очереди ещё " + str(len(self.queue) - 3) +
+                       " (↑ на пустом поле — вернуть в редактор)")
+        if self.busy:
+            out.append("ход идёт · Enter: " + self._SEND_MODE_TITLES[self._send_mode()] +
+                       " · Ctrl+S — сменить · Alt+Enter — прервать и отправить")
+        return out[:4]
 
     # --- vim-режим ввода и вставка (ЗАДАЧА-16) --------------------------------
 
@@ -2304,10 +2438,26 @@ class ChatApp:
         else:
             self._editor_key(key)
 
+    def _resize_column(self, delta: int) -> None:
+        """Ширина колонки панелей: запоминается в раскладке (layout.column_w)."""
+        cols = self._geom_cols or 80
+        base = self.layout.column_w or max(24, cols // 3)
+        self.layout.column_w = min(max(16, base + delta), max(24, cols - 24))
+        self._panel_anchor = (self._panel_shown_w, self._clock())
+
     def _panel_key(self, key: Key) -> None:
         focused = self.layout.focused
         if key.name == "esc":
             self.panel_focus = False
+            return
+        if key.name == "f6":
+            # F6 повторно — выход из режима панелей (раньше не работал:
+            # handle_key уводил все клавиши сюда, а f6 здесь не знали).
+            self.panel_focus = False
+            return
+        if key.name in ("left", "right") and "shift" in key.mods:
+            # Shift+←/→ — граница лента↔панели: стрелка — куда едет граница.
+            self._resize_column(-2 if key.name == "right" else 2)
             return
         if focused:
             # Свои клавиши панели (прокрутка, выбор, дифф) — первыми.
@@ -2405,6 +2555,25 @@ class ChatApp:
     def handle_mouse(self, mouse: Mouse) -> None:
         if self.picker is not None:
             return  # под выбиралкой лента мышью не выделяется
+        if self._col_drag:
+            # Тянем границу лента↔панели: ширина колонки — от позиции мыши.
+            if mouse.kind == "move":
+                cols = self._geom_cols
+                if cols:
+                    self.layout.column_w = min(max(16, cols - (mouse.x - 1)),
+                                               max(24, cols - 24))
+                return
+            if mouse.kind == "release":
+                self._col_drag = False
+                return
+        if (mouse.kind == "press" and mouse.button == 0 and self.layout.leaves()
+                and self._feed_geom[0]
+                and (mouse.x - 1) - self._feed_geom[0] in (-1, 0)):
+            # Захват — только сама граница и последняя колонка ленты:
+            # заголовок панели начинается на колонку правее.
+            self._col_drag = True
+            self.panel_focus = False
+            return
         if self._panel_mouse(mouse):
             return
         if mouse.kind == "wheel_up":
@@ -2412,6 +2581,8 @@ class ChatApp:
         elif mouse.kind == "wheel_down":
             self.scroll = max(0, self.scroll - 3)
         elif mouse.kind == "press" and mouse.button == 0:
+            # Клик по ленте или вводу снимает фокус с панели (ЗАДАЧА-18).
+            self.panel_focus = False
             self._mouse_press(mouse)
         elif mouse.kind == "move" and self._sel_anchor is not None:
             pos = self._feed_pos(mouse)
@@ -2615,16 +2786,11 @@ class ChatApp:
         return ease_in_out((now - entry.born) / 0.3)
 
     def _paint(self, spans, alpha: float):
-        # Тема оформления (ui.theme): mono — всё серебром, contrast —
-        # приглушённый текст ярче; luna — палитра как есть.
-        theme = str(self.settings.get("ui.theme") or "luna")
+        # Цвета — из текущей палитры темы (применяется в draw из ui.theme).
         out = []
         for text, style in spans:
-            fg, attrs = _STYLE_MAP.get(style, _STYLE_MAP["text"])
-            if theme == "mono":
-                fg = _color.SILVER
-            elif theme == "contrast" and style == "dim":
-                fg = (0xB8, 0xC0, 0xD4)
+            key, attrs = _STYLE_MAP.get(style, _STYLE_MAP["text"])
+            fg = _color.palette_color(key)
             if alpha < 1.0:
                 fg = _color.lerp(_color.SPACE_BG, fg, alpha)
             out.append((text, fg, attrs))
@@ -2667,9 +2833,10 @@ class ChatApp:
                 head.append(("  " + compact, "text"))
             if entry.status == "running":
                 head.append(("  " + self.spinner.glyph(now), "amber"))
-            add(head)
+            add(_clip_line(head, w))
             if entry.intent:
-                add([("  " + entry.intent, "dim")])
+                for line in wrap_text(entry.intent, w - 2):
+                    add([("  " + line, "dim")])
             for guard in self._guards_for(entry):
                 self._guard_lines(guard, w, add)
             if entry.status == "done":
@@ -2701,7 +2868,7 @@ class ChatApp:
         elif entry.kind == "ask":
             self._ask_lines(entry, w, add)
         elif entry.kind == "todo":
-            self._todo_lines(entry, add)
+            self._todo_lines(entry, add, w)
         elif entry.kind == "notice":
             for line in wrap_text(entry.text, w):
                 add([(line, "notice")])
@@ -2711,13 +2878,14 @@ class ChatApp:
                 style = "err" if i == 0 else "dim"
                 add([(prefix, "err"), (line, style)])
         elif entry.kind == "help":
-            for line in entry.text.split("\n"):
-                add([(line, "dim")])
+            for raw_line in entry.text.split("\n"):
+                for line in wrap_text(raw_line, w):
+                    add([(line, "dim")])
         elif entry.kind == "btw":
             for line in wrap_text(entry.text, w - 2):
                 add([("· ", "dim"), (line, "comment")])
         elif entry.kind == "shell":
-            add([("$ ", "cyan"), (entry.text, "text")])
+            add(_clip_line([("$ ", "cyan"), (entry.text, "text")], w))
         return raw
 
     _DECISIONS = {"yes": "да", "no": "нет", "edit": "да, с правкой",
@@ -2734,7 +2902,7 @@ class ChatApp:
             target = (entry.name + " " + compact_args(entry.name, entry.args)).strip()
             if target:
                 line += " · " + target
-            add([(mark, "err" if denied else "ok"), (line, "dim")])
+            add(_clip_line([(mark, "err" if denied else "ok"), (line, "dim")], width))
             return
         mark = "⚠ " if self.glyph_mode == "emoji" else "! "
         head = "нужно решение"
@@ -2754,18 +2922,20 @@ class ChatApp:
         if self.guard_editing:
             add([("  правка аргументов: Enter — отправить, Esc — отмена", "dim")], GUARD_BG)
 
-    def _ask_lines(self, entry: Entry, width: int, add) -> None:  # noqa: ARG002 — единый вид строителей строк
-        add([("? ", "guard"), (entry.text, "bold")])
+    def _ask_lines(self, entry: Entry, width: int, add) -> None:
+        for j, line in enumerate(wrap_text(entry.text, max(4, width - 2))):
+            add([("? ", "guard"), (line, "bold")] if j == 0
+                else [("  ", "guard"), (line, "bold")])
         for i, option in enumerate(entry.options):
             marker = "› " if i == entry.selected and entry.status == "pending" else "  "
             style = "cyan" if i == entry.selected and entry.status == "pending" else "text"
-            add([(marker, "cyan"), (option, style)])
+            add(_clip_line([(marker, "cyan"), (option, style)], width))
         if entry.options and entry.status == "pending":
             add([("  ↑↓ — выбор · Enter — ответить · или печатайте свой ответ", "dim")])
         if entry.status == "answered":
             add([("  ответ: " + entry.answer, "dim")])
 
-    def _todo_lines(self, entry: Entry, add) -> None:
+    def _todo_lines(self, entry: Entry, add, width: int = 80) -> None:
         items = entry.items or self.todos
         done_count = sum(1 for it in items if it.get("status") == "done")
         head = "план · сделано " + str(done_count) + " из " + str(len(items))
@@ -2778,7 +2948,8 @@ class ChatApp:
         for item in show:
             mark = marks.get(item.get("status", "pending"), "○")
             style = "dim" if item.get("status") == "done" else "text"
-            add([("  " + mark + " ", "cyan"), (item.get("text", ""), style)])
+            add(_clip_line([("  " + mark + " ", "cyan"),
+                            (item.get("text", ""), style)], width))
         if not entry.expanded and len(items) > len(show):
             add([("  · Ctrl+O — весь план, Ctrl+T — панель", "dim")])
 
@@ -2811,8 +2982,9 @@ class ChatApp:
 
     # Подсказка режима панелей (ЗАДАЧА-17): видна внизу колонки, пока
     # фокус в панелях, — как управлять, не вспоминая справку.
-    _PANEL_HINT = ("↑↓ — фокус · ←→ — размер · Tab — переставить · "
-                   "Enter — развернуть · x — закрыть · Esc — назад к вводу")
+    _PANEL_HINT = ("↑↓ — фокус · ←→ — размер · Shift+←/→ — ширина колонки · "
+                   "Tab — переставить · Enter — развернуть · x — закрыть · "
+                   "Esc/F6 — назад к вводу")
 
     def _panel_hints(self, tree, w: int) -> dict:
         """Желаемые высоты видимых панелей; ручной размер побеждает."""
@@ -2832,7 +3004,7 @@ class ChatApp:
         В фокусе полоса теплее и заголовок — янтарём с пометкой ▸,
         обычные — серебром по приглушённому градиенту (docs/ДИЗАЙН.md).
         """
-        start = (0x2E, 0x2A, 0x4A) if focused else (0x1D, 0x22, 0x3D)
+        start = _color.HEADER_FOCUS_BG if focused else _color.HEADER_BG
         stops = [start, PANEL_BG]
         grad = _color.gradient(stops, max(1, pw))
         for i in range(pw):
@@ -2957,7 +3129,14 @@ class ChatApp:
         Закрывающуюся колонку рисуем по «призраку» — снимку дерева до
         закрытия: само дерево уже пусто, а ширина ещё едет к нулю.
         """
-        target = max(24, cols // 3) if self.layout.leaves() and cols >= 48 else 0
+        target = 0
+        if self.layout.leaves() and cols >= 48:
+            # Ручная ширина колонки (перетаскивание, Shift+←/→) побеждает
+            # долю по умолчанию и живёт в раскладке (ЗАДАЧА-18).
+            if self.layout.column_w:
+                target = min(max(16, self.layout.column_w), max(24, cols - 24))
+            else:
+                target = max(24, cols // 3)
         if self.layout.leaves():
             self._panel_ghost = self.layout.clone()
         if not self.settings.get("ui.animations"):
@@ -2985,6 +3164,13 @@ class ChatApp:
         return int(round(value))
 
     def draw(self, cols: int, rows: int, now: float):
+        # Тема — на лету: настройку ui.theme могли сменить /theme, тулом
+        # luna или правкой файла; палитра применяется до отрисовки кадра.
+        theme_name = str(self.settings.get("ui.theme") or "luna")
+        if theme_name != self._applied_theme:
+            _themes.apply_theme(theme_name)
+            self._applied_theme = theme_name
+        self._geom_cols = cols
         buf = Buffer(cols, rows)
         buf.clear(bg=_color.SPACE_BG)
         panel_w = self._panel_width(cols, now)
@@ -3011,7 +3197,9 @@ class ChatApp:
             completion_h = min(5, len(self.cmd_completions))
         elif self.completions:
             completion_h = min(5, len(self.completions))
-        feed_h = max(1, rows - 1 - input_h - completion_h - nib_h)
+        meta_lines = self._meta_lines(now)
+        meta_h = len(meta_lines)
+        feed_h = max(1, rows - 1 - input_h - completion_h - nib_h - meta_h)
         self._page = feed_h
         lines = self._feed_lines(chat_w, now)
         max_scroll = max(0, len(lines) - feed_h)
@@ -3033,11 +3221,11 @@ class ChatApp:
         self._draw_selection(buf, start, feed_h)
         if panel_w:
             tree = self.layout if self.layout.leaves() else (self._panel_ghost or self.layout)
-            total_h = feed_h + input_h + completion_h + nib_h
+            total_h = feed_h + input_h + completion_h + nib_h + meta_h
             hint_lines: list = []
             if self.panel_focus and self.layout.leaves():
                 # В режиме панелей внизу колонки — подсказка управления.
-                hint_lines = wrap_text(self._PANEL_HINT, max(4, panel_w - 2))[:4]
+                hint_lines = wrap_text(self._PANEL_HINT, max(4, panel_w - 2))[:5]
             self._draw_panels(buf, chat_w, 0, panel_w,
                               total_h - len(hint_lines), now, tree=tree)
             for i, line in enumerate(hint_lines):
@@ -3067,7 +3255,12 @@ class ChatApp:
             label = "🐾 Ниблер: " if self.glyph_mode == "emoji" else "Ниблер: "
             buf.text(2, feed_h + completion_h, label + text, fg=fg,
                      bg=_color.SPACE_BG, attrs=_color.ITALIC)
-        iy = feed_h + completion_h + nib_h
+        my = feed_h + completion_h + nib_h
+        for i, line in enumerate(meta_lines):
+            # Подсказка, очередь и режим отправки — строкой над вводом.
+            buf.text(2, my + i, _cells_slice(line, 0, max(3, chat_w - 3)),
+                     fg=DIM_FG, bg=_color.SPACE_BG, attrs=_color.DIM)
+        iy = my + meta_h
         for i, line in enumerate(input_lines):
             prefix = "› " if i == 0 else "  "
             fg = _color.AMBER if guard is not None else _color.CYAN

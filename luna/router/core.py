@@ -65,6 +65,17 @@ class Router:
         self.http = http or HttpClient()
         self._providers = providers or {}
 
+    def cancel_active(self) -> None:
+        """Оборвать идущие стримы (прерывание хода, ЗАДАЧА-18).
+
+        HTTP-клиент закрывает потоковые ответы: разбор в рабочем потоке
+        получает конец потока и честно собирает частичный результат,
+        а не ждёт сеть до таймаута.
+        """
+        cancel = getattr(self.http, "cancel_active", None)
+        if callable(cancel):
+            cancel()
+
     # --- конфигурация ---
 
     def provider_config(self, name: str) -> ProviderConfig:

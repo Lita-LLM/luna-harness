@@ -104,7 +104,7 @@ class RouterCellRunner:
 
     def __init__(self, *, router, settings, secrets, mother_tools: dict,
                  guard=None, project_dir: Path | None = None,
-                 project_confirmed: bool = False) -> None:
+                 project_confirmed: bool = False, cancel_event=None) -> None:
         self.router = router
         self.settings = settings
         self.secrets = secrets
@@ -112,6 +112,9 @@ class RouterCellRunner:
         self.guard = guard
         self.project_dir = Path(project_dir) if project_dir else Path.cwd()
         self.project_confirmed = bool(project_confirmed)
+        # Прерывание матери (ЗАДАЧА-18): долгий bash ячейки рвётся вместе
+        # со всем роем, а не доживает до своего таймаута.
+        self.cancel_event = cancel_event
 
     # --- ворота ------------------------------------------------------------
 
@@ -180,7 +183,8 @@ class RouterCellRunner:
             # папку ячейки ради чтения не плодим (важно на 10 000).
             cwd = self.project_dir
         return ToolContext(cwd=cwd, settings=self.settings, secrets=self.secrets,
-                           output_dir=Path(meta["cell_dir"]), agent=None)
+                           output_dir=Path(meta["cell_dir"]), agent=None,
+                           cancel_event=self.cancel_event)
 
     # --- прогон ---------------------------------------------------------------
 

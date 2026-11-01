@@ -50,6 +50,94 @@ THEME_TITLES = {
 
 NEON_STOPS = (CYAN, VIOLET, MAGENTA)
 
+# Полная палитра темы (ЗАДАЧА-18): темы — данные (ui/themes.py), рендер
+# берёт цвета только отсюда. PALETTE — текущая применённая палитра;
+# константы выше — её зеркала для старого кода, apply_palette обновляет всё.
+MUTED = (0x8B, 0x94, 0xAC)
+PANEL_BG = (0x10, 0x13, 0x24)
+STATUS_BG = (0x16, 0x1B, 0x30)
+GUARD_BG = (0x24, 0x1B, 0x10)
+HEADER_BG = (0x1D, 0x22, 0x3D)
+HEADER_FOCUS_BG = (0x2E, 0x2A, 0x4A)
+
+PALETTE = {
+    "space_bg": SPACE_BG,
+    "panel_bg": PANEL_BG,
+    "status_bg": STATUS_BG,
+    "guard_bg": GUARD_BG,
+    "header_bg": HEADER_BG,
+    "header_focus_bg": HEADER_FOCUS_BG,
+    "silver": SILVER,
+    "muted": MUTED,
+    "cyan": CYAN,
+    "violet": VIOLET,
+    "magenta": MAGENTA,
+    "amber": AMBER,
+    "ok": OK,
+    "err": ERR,
+}
+
+PALETTE_TITLES = {
+    "space_bg": "фон",
+    "panel_bg": "фон панелей",
+    "status_bg": "фон строки статуса",
+    "guard_bg": "фон вопросов Предохранителя",
+    "header_bg": "фон заголовка панели",
+    "header_focus_bg": "фон заголовка панели в фокусе",
+    "silver": "основной текст",
+    "muted": "приглушённый текст",
+    "cyan": "акцент: циан",
+    "violet": "акцент: фиолет",
+    "magenta": "акцент: маджента",
+    "amber": "акцент: янтарь",
+    "ok": "успех",
+    "err": "ошибка",
+}
+
+
+def palette_color(key: str):
+    """Цвет текущей палитры по ключу (рендер берёт цвета только так)."""
+    return PALETTE[key]
+
+
+def parse_hex(value) -> tuple | None:
+    """'#RRGGBB' или 'RRGGBB' → (r, g, b); мусор → None."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip().lstrip("#")
+    if len(s) != 6:
+        return None
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return None
+
+
+def apply_palette(palette: dict) -> None:
+    """Применить палитру темы: обновить PALETTE, константы и THEME."""
+    global SPACE_BG, SILVER, CYAN, VIOLET, MAGENTA, AMBER, OK, ERR
+    global MUTED, PANEL_BG, STATUS_BG, GUARD_BG, HEADER_BG, HEADER_FOCUS_BG
+    global NEON_STOPS
+    PALETTE.update(palette)
+    SPACE_BG = PALETTE["space_bg"]
+    SILVER = PALETTE["silver"]
+    CYAN = PALETTE["cyan"]
+    VIOLET = PALETTE["violet"]
+    MAGENTA = PALETTE["magenta"]
+    AMBER = PALETTE["amber"]
+    OK = PALETTE["ok"]
+    ERR = PALETTE["err"]
+    MUTED = PALETTE["muted"]
+    PANEL_BG = PALETTE["panel_bg"]
+    STATUS_BG = PALETTE["status_bg"]
+    GUARD_BG = PALETTE["guard_bg"]
+    HEADER_BG = PALETTE["header_bg"]
+    HEADER_FOCUS_BG = PALETTE["header_focus_bg"]
+    NEON_STOPS = (CYAN, VIOLET, MAGENTA)
+    THEME.update({k: PALETTE[k] for k in
+                  ("space_bg", "silver", "cyan", "violet", "magenta",
+                   "amber", "ok", "err")})
+
 
 def hex_of(rgb) -> str:
     return "#%02X%02X%02X" % tuple(rgb)

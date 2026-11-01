@@ -400,7 +400,7 @@ class MoonPanel(PanelContent):
         for line in stats:
             if row >= y + h:
                 break
-            buf.text(x + 1, row, line, fg=_c.SILVER, bg=(0x10, 0x13, 0x24))
+            buf.text(x + 1, row, line, fg=_c.SILVER, bg=_c.PANEL_BG)
             row += 1
         return True
 

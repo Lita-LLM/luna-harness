@@ -61,6 +61,13 @@ class AgentSource:
             self._agent.interrupt()
             self._release_all({"decision": "stop", "text": ""})
             return
+        if kind == "btw":
+            # Вопрос в сторону идёт своим потоком (ЗАДАЧА-18): не ждёт
+            # текущий ход и не мешает ему; историю агент не трогает.
+            if self._agent is not None:
+                threading.Thread(target=self._safe_btw, args=(cmd,),
+                                 name="luna-btw", daemon=True).start()
+            return
         if kind == "mode.set":
             self._agent.handle_command(cmd)
             return
@@ -124,10 +131,28 @@ class AgentSource:
     def _busy(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
 
+    def _safe_btw(self, cmd: dict) -> None:
+        try:
+            self._agent.handle_command(cmd)
+        except Exception as exc:  # noqa: BLE001 — btw не роняет экран
+            self._events.put({"type": "error", "ts": time.time(),
+                              "message": "Вопрос в сторону упал: " + str(exc),
+                              "detail": repr(exc)})
+
     def _run_in_worker(self, cmd: dict) -> None:
         def work() -> None:
             try:
                 self._agent.handle_command(cmd)
+                # delivery=queue/interrupt (ЗАДАЧА-18): отложенные сообщения
+                # уходят отдельными ходами следом, в этом же потоке.
+                take = getattr(self._agent, "take_deferred", None)
+                while take is not None:
+                    deferred = take()
+                    if not deferred:
+                        break
+                    for item in deferred:
+                        self._agent.run_turn(item["text"],
+                                             item.get("attachments") or [])
             except Exception as exc:  # noqa: BLE001 — падение хода не роняет экран
                 self._events.put({"type": "error", "ts": time.time(),
                                   "message": "Ход упал: " + str(exc), "detail": repr(exc)})

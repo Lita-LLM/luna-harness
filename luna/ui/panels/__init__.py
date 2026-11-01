@@ -184,6 +184,10 @@ class LayoutTree:
         self.maximized: str | None = None
         self.saved: dict = {}
         self.manual: set = set()  # панели с ручным размером: hint не действует
+        # Ширина всей колонки панелей в ячейках (ЗАДАЧА-18): None — доля
+        # экрана по умолчанию; число ставит перетаскивание границы или
+        # Shift+←/→ и оно запоминается в сохранённых раскладках.
+        self.column_w: int | None = None
 
     def clone(self) -> "LayoutTree":
         """Независимая копия дерева (для анимации закрытия колонки)."""
@@ -193,6 +197,7 @@ class LayoutTree:
         other.maximized = self.maximized
         other.saved = dict(self.saved)
         other.manual = set(self.manual)
+        other.column_w = self.column_w
         return other
 
     # --- запросы -------------------------------------------------------------
@@ -353,6 +358,7 @@ class LayoutTree:
             "tree": self.root.to_dict() if self.root is not None else None,
             "focused": self.focused,
             "maximized": self.maximized,
+            "column_w": self.column_w,
         }
 
     def load_layout(self, name: str) -> bool:
@@ -363,6 +369,8 @@ class LayoutTree:
         self.root = Node.from_dict(tree) if tree else None
         self.focused = data.get("focused")
         self.maximized = data.get("maximized")
+        column_w = data.get("column_w")
+        self.column_w = int(column_w) if column_w else None
         if self.focused not in self:
             leaves = self.leaves()
             self.focused = leaves[0] if leaves else None

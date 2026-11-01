@@ -271,11 +271,14 @@ class PanelsDataTest(unittest.TestCase):
         self.assertIn("! Серьёзная заметка", joined)
 
     def test_registry_and_no_swarm_yet(self):
+        # Название теста — из ЗАДАЧИ-14, когда роя ещё не было; ЗАДАЧА-15
+        # рой построила: «Созвездие» теперь в реестре, смысл проверки —
+        # что прежние панели на месте и рой нашёлся по своему алиасу.
         self.assertEqual(find_panel("Луна").panel_id, "moon")
         self.assertEqual(find_panel("лог").panel_id, "backside")
         self.assertEqual(find_panel("files").panel_id, "files")
-        self.assertIsNone(find_panel("рой"))
-        self.assertNotIn("swarm", registered_panels())
+        self.assertEqual(find_panel("рой").panel_id, "constellation")
+        self.assertIn("constellation", registered_panels())
 
 
 def make_app(case: unittest.TestCase):

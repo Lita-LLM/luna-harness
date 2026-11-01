@@ -43,6 +43,17 @@ FULL_KINDS = ("main", "satellite")  # кто вправе звать детей
 _STOP = object()
 
 
+def cell_guard_decision(tool_name: str, allowed_tools) -> str | None:
+    """Точка решения для ячеек роя (ЗАДАЧА-15, РОЙ.md §2): «вне профиля —
+    отказ, а не вопрос». Ячейка не полноценный агент и человека не дёргает:
+    тул из профиля — None (решай дальше по режиму записи), чужой тул —
+    "deny" без всякого guard.ask. Движок роя (luna/starfall/engine.py)
+    спрашивает это перед каждым вызовом ячейки."""
+    if tool_name not in allowed_tools:
+        return "deny"
+    return None
+
+
 class SpawnError(Exception):
     """Ребёнка создать нельзя: права, глубина, бюджет, имя или настройки."""
 

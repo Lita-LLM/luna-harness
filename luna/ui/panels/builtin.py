@@ -19,6 +19,7 @@ import time
 from ..disc import _smooth01
 from . import PanelContent, register_panel
 from .crewdata import CrewData
+from .swarmdata import SwarmData
 
 _MAX_ENTRIES = 120        # записей в «Обратной стороне»
 _MAX_BODY = 20000         # символов результата тула храним целиком, дальше — пометка
@@ -65,6 +66,7 @@ class PanelData:
         self.files: dict = {}            # путь → {reads, writes, plus, minus, diff}
         self.nibbler: list[dict] = []    # {severity, text}
         self.crew = CrewData()           # команда детей (ЗАДАЧА-11): panels/crewdata.py
+        self.swarm = SwarmData()         # рой ячеек (ЗАДАЧА-15): panels/swarmdata.py
         self._calls: dict = {}           # id вызова → (имя, args, запись журнала)
         self._thinking = ""
         # ЗАДАЧА-16: фоновые bash, диагностика, MCP-активность, время хода.
@@ -79,6 +81,13 @@ class PanelData:
 
     def observe(self, ev: dict) -> None:
         kind = ev.get("type")
+        # События роя (ЗАДАЧА-15) агрегирует SwarmData; в «Обратную сторону»
+        # и расход главного агента они не идут.
+        if str(kind or "").startswith("swarm."):
+            self.swarm.observe(ev)
+            return
+        if kind == "agent.message":
+            self.swarm.observe(ev)
         # События детей (ЗАДАЧА-11) агрегирует CrewData; расход ребёнка не
         # должен двигать контекст и стоимость главного агента в «Луне».
         if ev.get("agent_id") or str(kind or "").startswith("agent.") \
@@ -358,6 +367,9 @@ class MoonPanel(PanelContent):
         budget = data.crew.budget_line()
         if budget:
             out.append(budget)
+        swarm = data.swarm.line()
+        if swarm:
+            out.append(swarm)
         return out
 
     def _disc_rows(self, width: int, avail: int) -> int:

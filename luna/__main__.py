@@ -52,6 +52,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try undo             откат на фальшивой модели: пишет → /undo → прежние → /redo
   luna try compact          прилив на фальшивой модели: длинная беседа сжимается в сводку
   luna try crew             команда на фальшивой модели: спутники, лидер, почта, бюджет
+  luna try starfall [N]     звездопад на фальшивой модели: рой ячеек, смета, сводка, замеры
   luna update [--check]     обновление git-копии программы (--check — только проверить)
   luna setup                настройка провайдера и моделей (ключ — скрытым вводом)
   luna models               что из моделей настроено и живо ли
@@ -391,6 +392,10 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.crew_try import run_crew_try
 
                 return run_crew_try()
+            if what == "starfall":
+                from .devtools.starfall_try import run_starfall_try
+
+                return run_starfall_try(rest[1:])
             if what == "compat":
                 from pathlib import Path as _Path
 
@@ -400,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(report(_Path.cwd(), Settings()))
                 return 0
             raise HumanError("usage", f"Не знаю такого try: {what}",
-                             "Есть: render, splash, chat, measure, snapshot, brain, prompt, undo, compact, crew, compat.")
+                             "Есть: render, splash, chat, measure, snapshot, brain, prompt, undo, compact, crew, starfall, compat.")
         raise HumanError("usage", f"Неизвестная команда: {cmd}", "Справка: luna --help.")
     except HumanError as err:
         return _print_error(err)

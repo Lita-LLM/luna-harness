@@ -164,6 +164,9 @@ class FakeAgent:
         if "экипаж" in low or "crew" in low:
             self._crew_scenario(t, turn)
             return
+        if "звездопад" in low or "starfall" in low or "рой" in low:
+            self._starfall_scenario(t, turn)
+            return
         self._plain_scenario(t, turn, long_output="долго" in low)
 
     def _crew_scenario(self, t: float, turn: int) -> None:
@@ -197,6 +200,36 @@ class FakeAgent:
                      "Экипаж на связи: Тимлид и Кодер1 видны в панели «Экипаж» "
                      "(/panel crew), письма и бюджет — там же и в панели «Луна».")
         self._finish_at(t + 2.2, "done")
+
+    def _starfall_scenario(self, t: float, turn: int) -> None:
+        """Маленький поток роя для панели «Созвездие» (ЗАДАЧА-15)."""
+        cells = []
+        states = (["run"] * 4 + ["wait"] * 6 + ["done"] * 12 + ["failed"] * 1 +
+                  ["skipped"] * 1)
+        for i, state in enumerate(states):
+            link, idx = divmod(i, 8)
+            cells.append(["leo/cls." + str(link) + "." + str(idx), state])
+        self._at(t + 0.2, {"type": "swarm.start", "swarm": "leo-fake", "stream": "leo",
+                           "total": 24, "links": 3, "profiles": ["cls"],
+                           "budget_usd": 1.0, "mail": "tree", "host": "leo/0"})
+        self._at(t + 0.5, {"type": "swarm.cells", "swarm": "leo-fake",
+                           "cells": cells, "links": False})
+        self._at(t + 0.8, {"type": "agent.message", "agent_id": "leo/cls.1.0",
+                           "parent_id": "leo/cls.1.3", "kind": "cell",
+                           "name": "leo/cls.1.0", "from": "leo/cls.1.3",
+                           "to": "leo/cls.1.0", "from_id": "leo/cls.1.3",
+                           "to_id": "leo/cls.1.0", "text": "разметил, сдаю"})
+        self._at(t + 1.1, {"type": "swarm.progress", "swarm": "leo-fake", "done": 12,
+                           "failed": 1, "skipped": 0, "total": 24,
+                           "spent_usd": 0.0042, "eta_sec": 6.0})
+        self._at(t + 1.5, {"type": "swarm.done", "swarm": "leo-fake", "done": 23,
+                           "failed": 1, "skipped": 0, "total": 24,
+                           "spent_usd": 0.0081, "seconds": 2.4, "stopped_reason": ""})
+        self._stream(t + 1.8, "agent.text",
+                     "Звездопад отработал: 23 из 24 ячеек сдали, рой виден в "
+                     "панели «Созвездие» (/panel constellation), строка потока — "
+                     "в панелях «Луна» и «Экипаж».")
+        self._finish_at(t + 2.1, "done")
 
     def _loop_scenario(self, t: float, turn: int) -> None:
         """Петля правок одного файла: Ниблер такое замечает (ЗАДАЧА-14)."""

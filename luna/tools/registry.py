@@ -198,6 +198,7 @@ def _load_mcp_tools() -> tuple:
 def build_registry() -> dict[str, Tool]:
     """Все встроенные тулы вехи 1; MCP-тулы догружаются лениво (LazyRegistry)."""
     from ..agents.tools import assistant_tool, crew_tool
+    from ..starfall.tools import cells_tool, starfall_tool
     from .files import edit_tool, glob_tool, grep_tool, read_tool, write_tool
     from .luna_tool import luna_tool, skill_tool
     from .manner import manner_tool
@@ -206,5 +207,6 @@ def build_registry() -> dict[str, Tool]:
 
     tools = [bash_tool(), read_tool(), write_tool(), edit_tool(), glob_tool(),
              grep_tool(), web_fetch_tool(), web_search_tool(), todo_tool(), ask_user_tool(),
-             manner_tool(), luna_tool(), skill_tool(), assistant_tool(), crew_tool()]
+             manner_tool(), luna_tool(), skill_tool(), assistant_tool(), crew_tool(),
+             cells_tool(), starfall_tool()]
     return LazyRegistry({tool.name: tool for tool in tools})

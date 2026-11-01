@@ -454,3 +454,4 @@ from . import models as _models_panel  # noqa: E402,F401
 from . import processes as _processes_panel  # noqa: E402,F401
 from . import tree as _tree_panel  # noqa: E402,F401
 from . import crew as _crew_panel  # noqa: E402,F401 — панель «Экипаж» (ЗАДАЧА-11)
+from . import constellation as _constellation_panel  # noqa: E402,F401 — «Созвездие» (ЗАДАЧА-15)

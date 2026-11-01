@@ -143,14 +143,17 @@ class RestoreTest(unittest.TestCase):
         self.assertIsNone(app2.pending_guard)  # экран не ждёт ответа в пустоту
 
     def test_sessions_command_lists_disk(self):
+        # ЗАДАЧА-10: /sessions больше не печатает список, а открывает
+        # выбиралку; сессии в ней — с каталогом и числом ходов.
         journal = SessionJournal.create(self.data, "/work/proj")
         journal.close()
-        app = ChatApp(source=StubSource(), cwd="/work/proj")
-        with mock.patch.dict(os.environ, {"LUNA_HOME": str(self.data.root)}):
-            app.submit_text("/sessions")
-        help_entry = next(e for e in app.entries if e.kind == "help")
-        self.assertIn("/work/proj", help_entry.text)
-        self.assertIn("записей:", help_entry.text)
+        app = ChatApp(source=StubSource(), cwd="/work/proj", data=self.data)
+        app.submit_text("/sessions")
+        self.assertIsNotNone(app.picker)
+        self.assertEqual(len(app.picker.items), 1)
+        item = app.picker.items[0]
+        self.assertIn("/work/proj", item.detail)
+        self.assertEqual(item.mark, "·")  # этот каталог отмечен
 
 
 if __name__ == "__main__":

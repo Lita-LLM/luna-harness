@@ -1,4 +1,4 @@
-"""Снимки экранов в HTML: `luna try snapshot <splash|render|main>`.
+"""Снимки экранов в HTML: `luna try snapshot <splash|render|main|chat|sessions>`.
 
 Экраны рисуются без живого терминала: часы подменяются вымышленным
 временем, готовый буфер превращается в HTML-страницу — моноширинный
@@ -22,7 +22,7 @@ from ..ui import color as _color
 from ..ui import phrases
 from ..ui.screen import Buffer
 
-SCREENS = ("splash", "render", "main", "chat")
+SCREENS = ("splash", "render", "main", "chat", "sessions")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -144,6 +144,39 @@ def _render_chat_state(state: str, cols: int, rows: int, caps, settings) -> Buff
     return buf
 
 
+def _render_sessions(cols: int, rows: int, caps, settings) -> Buffer:
+    """Выбиралка сессий поверх ленты: вымышленные сессии, без диска."""
+    import time as _time
+
+    from ..core.bus import EventBus
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+    from ..ui.picker import Picker, session_items
+
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Почини сборку и поставь зависимости")
+    now = _time.time()
+    fake = [
+        {"id": "a1b2c3d4", "cwd": "/home/user/project", "started": now - 3600,
+         "records": 42, "path": "a1b2c3d4.jsonl", "title": "",
+         "first": "Почини сборку и поставь зависимости", "turns": 3},
+        {"id": "d4e5f6a7", "cwd": "/home/user/project", "started": now - 86400,
+         "records": 17, "path": "d4e5f6a7.jsonl", "title": "Разбор логов",
+         "first": "Глянь логи за вчера", "turns": 2},
+        {"id": "a7b8c9d0", "cwd": "/home/user/other", "started": now - 2 * 86400,
+         "records": 9, "path": "a7b8c9d0.jsonl", "title": "",
+         "first": "Напиши скрипт бэкапа", "turns": 1},
+    ]
+    app.picker = Picker("Сессии", session_items(fake, "/home/user/project"),
+                        hint="Enter — переключиться · Esc — закрыть",
+                        preview_lines=0, now=_FAKE_NOW)
+    app._picker_kind = "sessions"
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
+    return buf
+
+
 def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -> list:
     """Список (подпись, буфер) для экрана name в моменты times (секунды от старта)."""
     from ..core.settings import Settings
@@ -163,6 +196,8 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
         # У чата кадры — не моменты времени, а именованные состояния ленты.
         return [(state, _render_chat_state(state, cols, rows, caps, settings))
                 for state in _CHAT_STATES]
+    if name == "sessions":
+        return [("выбиралка сессий", _render_sessions(cols, rows, caps, settings))]
     frames = []
     for at in times:
         if name == "splash":

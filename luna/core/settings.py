@@ -54,7 +54,10 @@ _f("ui.hemisphere", "choice", "north",
    ("north", "south"))
 _f("ui.panels", "bool", True, "Панели-тайлинг в чате (по умолчанию скрыты, открываются по Ctrl+T)")
 _f("chat.session_log", "bool", True,
-   "Журнал сессий чата: события и команды JSONL в LUNA_HOME/sessions (нужен для luna --continue и /sessions)")
+   "Журнал сессий чата: события и команды JSONL в папке sessions каталога данных (нужен для luna --continue и /sessions)")
+_f("chat.sessions_scope", "choice", "all",
+   "Выбиралка сессий (/sessions): all — все сессии, сессии этого каталога отмечены; cwd — только этот каталог",
+   ("all", "cwd"))
 
 # Модели и провайдеры (веха 1). Роль — строка вида «провайдер:модель»;
 # пустая роль означает «как main». Провайдер по умолчанию задаётся тремя
@@ -76,7 +79,7 @@ _f("model.price_out", "float", 0.0, "Цена главной модели за �
 _f("agent.max_steps", "int", 30, "Максимум шагов модели в одном ходе")
 _f("agent.mode", "choice", "normal", "Режим Предохранителя по умолчанию",
    ("normal", "plan", "review", "auto", "yolo"))
-_f("agent.manner", "str", "luna", "Манера речи: имя из luna manners (встроенные, LUNA_HOME/manners, .luna/manners проекта); пусто — без манеры")
+_f("agent.manner", "str", "luna", "Манера речи: имя из luna manners (встроенные, свои в папке manners каталога данных, .luna/manners проекта); пусто — без манеры")
 _f("guard.enabled", "bool", True, "Предохранитель включён (выключение ослабляет безопасность)")
 _f("guard.rules", "str", "", "Правила allow/ask/deny по строкам: «шаблон=действие», шаблон — тул или тул:подстрока аргументов")
 _f("tools.bash_timeout", "int", 120, "Таймаут команды bash, секунд")

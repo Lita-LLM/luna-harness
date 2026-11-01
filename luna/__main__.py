@@ -38,20 +38,23 @@ _note_start_marker()
 USAGE = """Лунапарк — сессионный ИИ-агент.
 
   luna                      чат с агентом (заставка, затем полноэкранный чат)
-  luna --continue           продолжить последнюю сессию этого каталога (журнал — LUNA_HOME/sessions)
+  luna --continue           продолжить последнюю сессию этого каталога
+  luna --resume [id]        выбрать сессию из списка до чата; с id или его началом — сразу в неё
   luna doctor               самопроверка: Python, терминал, каталоги, настройки
   luna settings             список настроек со значениями и источниками
   luna set <ключ> <значение>  изменить настройку (например: luna set ui.splash off)
   luna try render           витрина рендерера: палитра, градиенты, фазы луны
   luna try splash           заставка ещё раз
   luna try chat             чат-экран с фальшивым агентом (сценарии событий)
-  luna try snapshot <экран> снимок экрана в HTML: splash | render | main | chat
+  luna try snapshot <экран> снимок экрана в HTML: splash | render | main | chat | sessions
   luna try measure [--json] замеры: старт, память и ЦП в простое
   luna try brain            мозг на фальшивой модели: ход с тулом, без сети
   luna update [--check]     обновление git-копии программы (--check — только проверить)
   luna setup                настройка провайдера и моделей (ключ — скрытым вводом)
   luna models               что из моделей настроено и живо ли
-  luna manners              манеры речи: список; show <имя> — текст, use <имя> — включить, off — свой голос
+  luna manners              манеры речи: в терминале — выбиралка; list — список текстом,
+                            show <имя> — текст, use <имя> — включить, off — свой голос,
+                            new <имя> — создать свою из шаблона, edit <имя> — открыть в редакторе
   luna try prompt           показать собранный системный промпт для текущего каталога
   luna mcp list             MCP-серверы из mcp.json: статус и число тулов
   luna mcp add <имя> -- <команда …> | --url <адрес>   добавить MCP-сервер
@@ -112,31 +115,97 @@ def _cmd_set(argv: list[str]) -> int:
     return 0
 
 
+def _manners_list(settings) -> int:
+    """Текстовый список манер с настоящими путями (пайп и list)."""
+    from .mind import manners
+
+    current_id = str(settings.get("agent.manner", "") or "")
+    items = manners.library(settings)
+    if not items:
+        print("Манер нет: ни встроенных, ни своих.")
+        return 0
+    for item in items:
+        mark = "→ " if item["id"] == current_id else "• "
+        line = mark + item["name"] + " (" + item["id"] + ", " + manners.SOURCE_NAMES[item["source"]] + ")"
+        if item["description"]:
+            line += " — " + item["description"]
+        if item["source"] != "builtin":
+            line += " · " + str(item["path"])
+        print(line)
+    print()
+    if current_id:
+        print("Сейчас: " + current_id)
+    else:
+        print("Сейчас: свой голос (манера не выбрана)")
+    print("Встроенные манеры живут в программе: " + str(manners.BUILTIN_DIR))
+    print("Свои кладутся файлами .md в " + str(manners.home_dir(settings))
+          + " или в " + str(manners.project_dir(settings)) + " (проект).")
+    print("Новая своя: luna manners new <имя> — создаст файл из шаблона и покажет путь.")
+    return 0
+
+
+def _manners_picker(settings) -> int:
+    """luna manners без аргументов в живом терминале — та же выбиралка, что в чате."""
+    from .core.errors import HumanError
+    from .mind import manners
+    from .ui.picker import Picker, manners_items, run_picker
+
+    def refresh():
+        return manners_items(settings)
+
+    picker = Picker("Манеры речи", refresh(),
+                    hint=("Enter — включить · n — новая · N — копия выбранной · "
+                          "e — открыть в редакторе · Esc — закрыть"),
+                    extra={"n": "new", "N": "copy", "e": "edit"})
+
+    def dispatch(action, pk, term=None):
+        try:
+            if action[0] == "pick" and action[1] is not None:
+                entry = manners.choose(settings, action[1].key)
+                print("Манера «" + entry["name"] + "» включена.")
+                return "close"
+            if action[0] == "action" and action[1] == "new":
+                pk.ask_input("Новая манера, имя латиницей: ", ("new", None))
+            elif action[0] == "action" and action[1] == "copy" and action[2] is not None:
+                pk.ask_input("Копия манеры " + action[2].key + ", имя латиницей: ",
+                             ("copy", action[2].key))
+            elif action[0] == "input":
+                text, ctx = action[1], action[2]
+                if text and ctx is not None:
+                    entry = manners.create_from_template(settings, text, ctx[1] or "")
+                    print("Манера создана: " + str(entry["path"]))
+            elif action[0] == "action" and action[1] == "edit" and action[2] is not None:
+                from .ui.extedit import run_editor
+
+                path = manners.editable_path(settings, action[2].key)
+                if term is not None:
+                    term.suspend()
+                    try:
+                        run_editor(path)
+                    finally:
+                        term.resume()
+                else:
+                    run_editor(path)
+        except HumanError as err:
+            print(err.title + (" " + err.hint if err.hint else ""))
+        return None
+
+    run_picker(picker, dispatch, refresh=refresh)
+    return 0
+
+
 def _cmd_manners(argv: list[str]) -> int:
     from .core.errors import HumanError
     from .core.settings import Settings
     from .mind import manners
 
     settings = Settings()
-    if not argv or argv[0] == "list":
-        current_id = str(settings.get("agent.manner", "") or "")
-        items = manners.library(settings)
-        if not items:
-            print("Манер нет: ни встроенных, ни своих.")
-            return 0
-        for item in items:
-            mark = "→ " if item["id"] == current_id else "• "
-            line = mark + item["name"] + " (" + item["id"] + ", " + manners.SOURCE_NAMES[item["source"]] + ")"
-            if item["description"]:
-                line += " — " + item["description"]
-            print(line)
-        print()
-        if current_id:
-            print("Сейчас: " + current_id)
-        else:
-            print("Сейчас: свой голос (манера не выбрана)")
-        print("Свои манеры кладутся файлами .md в LUNA_HOME/manners или .luna/manners проекта.")
-        return 0
+    if not argv:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return _manners_picker(settings)
+        return _manners_list(settings)
+    if argv[0] == "list":
+        return _manners_list(settings)
     if argv[0] == "show" and len(argv) == 2:
         item = manners.resolve(settings, argv[1])
         print("«" + item["name"] + "» (" + item["id"] + ", " + manners.SOURCE_NAMES[item["source"]] + ")")
@@ -153,8 +222,24 @@ def _cmd_manners(argv: list[str]) -> int:
         manners.choose(settings, "")
         print("Манера выключена: Луна говорит своим голосом.")
         return 0
-    raise HumanError("usage", "Нужно: luna manners [list | show <имя> | use <имя> | off]",
-                     "Без аргументов — список манер и текущая.")
+    if argv[0] == "new" and len(argv) == 2:
+        item = manners.create_from_template(settings, argv[1])
+        print("Манера «" + item["name"] + "» создана из шаблона: " + str(item["path"]))
+        print("Отредактируй файл под себя, включить — luna manners use " + item["id"])
+        return 0
+    if argv[0] == "edit" and len(argv) == 2:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise HumanError("usage", "Редактору нужен живой терминал",
+                             "Открой файл руками: luna manners show " + argv[1]
+                             + " покажет текст и источник.")
+        from .ui.extedit import run_editor
+
+        path = manners.editable_path(settings, argv[1])
+        run_editor(path)
+        print("Манера обновлена: " + str(path))
+        return 0
+    raise HumanError("usage", "Нужно: luna manners [list | show <имя> | use <имя> | off | new <имя> | edit <имя>]",
+                     "Без аргументов в терминале — выбиралка, в пайпе — список.")
 
 
 def settings_value_type(key: str) -> str:
@@ -171,17 +256,32 @@ def main(argv: list[str] | None = None) -> int:
 
     continue_last = "--continue" in argv
     argv = [a for a in argv if a != "--continue"]
+    resume: str | None = None
+    if "--resume" in argv:
+        idx = argv.index("--resume")
+        resume = ""
+        rest_argv = argv[:idx]
+        tail = argv[idx + 1:]
+        if tail and not tail[0].startswith("-"):
+            resume = tail[0]
+            tail = tail[1:]
+        argv = rest_argv + tail
     try:
         if not argv:
             from .ui.app import run_fullscreen
 
-            return run_fullscreen(started_at=_T0, continue_last=continue_last)
+            return run_fullscreen(started_at=_T0, continue_last=continue_last,
+                                  resume=resume)
         cmd, rest = argv[0], argv[1:]
         if cmd in ("--version", "-V", "version"):
             print(f"Лунапарк {__version__}")
             return 0
         if cmd in ("--help", "-h", "help"):
+            from .core.paths import luna_home
+
             print(USAGE)
+            print("Каталог данных: " + str(luna_home())
+                  + " (переменная окружения LUNA_HOME; там настройки, секреты, сессии и свои манеры)")
             return 0
         if cmd in ("-p", "--prompt"):
             from .headless import run_headless

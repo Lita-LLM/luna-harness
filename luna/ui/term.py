@@ -189,6 +189,16 @@ class Terminal:
         self._cleanup()
         return False
 
+    def suspend(self) -> None:
+        """Пауза полноэкранного режима: вернуть терминал обычному миру
+        (внешний редактор из чата). После — resume()."""
+        self._cleanup()
+
+    def resume(self) -> None:
+        """Вернуться в полноэкранный режим после suspend()."""
+        if not self._in_session:
+            self.__enter__()
+
     def _cleanup(self) -> None:
         if not self._in_session:
             return

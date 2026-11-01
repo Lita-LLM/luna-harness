@@ -40,8 +40,14 @@ class FakeAgent:
         self._waiting_guard: dict | None = None
         self._waiting_ask: dict | None = None
         self._started = False
+        self.history: list = []       # принятая история прошлой сессии
 
     # --- интерфейс источника ------------------------------------------------
+
+    def load_history(self, messages) -> None:
+        """История прошлой сессии: фальшивому агенту она нужна только для
+        проверок интерфейса источника (сценарии от неё не зависят)."""
+        self.history = [dict(m) for m in messages]
 
     def start(self) -> None:
         if self._started:

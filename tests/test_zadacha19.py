@@ -443,6 +443,10 @@ class DeleteCurrentSessionTest(unittest.TestCase):
         journal.append_command({"type": "user.message", "text": "текущая"})
         self.current_path = journal.path
         self.app.journal = journal
+        # Журнал на момент уборки может быть уже другим (новая сессия):
+        # закрываем актуальный, иначе Windows не удалит открытый файл.
+        self.addCleanup(lambda: self.app.journal
+                        and self.app.journal.close())
 
     def test_delete_command_double_confirm(self):
         app = self.app

@@ -291,7 +291,11 @@ class SessionsPickerTest(unittest.TestCase):
         data = self.app._data_dir()
         self.current = make_session(data, self.app.cwd, text="текущая")
         self.app.journal = SessionJournal.resume(data, self.current)[0]
-        self.addCleanup(self.app.journal.close)
+        # Закрывать журнал приложения на момент уборки, а не исходный
+        # объект: ЗАДАЧА-19 умеет менять журнал (удаление текущей сессии
+        # создаёт новый), а Windows не удаляет открытый файл (WinError 32).
+        self.addCleanup(lambda: self.app.journal
+                        and self.app.journal.close())
         self.other = make_session(data, self.app.cwd, text="другая",
                                   title="Другая сессия")
         self.third = make_session(data, self.app.cwd, text="третья")

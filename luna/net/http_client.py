@@ -119,6 +119,13 @@ class HttpClient:
         for resp in actives:
             _force_close(resp)
 
+    def cancel_generation(self) -> int:
+        """Текущее поколение отмены: сравнив до и после, вызывающий
+        понимает, что стрим умер именно от отмены, а не от ошибки, —
+        и не уходит в неотменяемые повторы (полный запрос без стрима)."""
+        with self._lock:
+            return self._cancel_gen
+
     def _request(self, url: str, data: bytes | None, headers: dict, timeout: float | None):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
         try:
@@ -167,9 +174,16 @@ class HttpClient:
         hdrs.update(headers or {})
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         read_timeout = timeout or self.timeout
-        resp = self._request(url, body, hdrs, timeout)
+        # Поколение захватываем ДО запроса, а не после подключения:
+        # отмена, пришедшая, пока шёл коннект и заголовки, иначе не
+        # видна — стрим стартовал «после» неё и ждал молчащий сервер
+        # до read_timeout (гонка, пойманная CI ЗАДАЧИ-21 на Windows и
+        # воспроизведённая локально дампом потоков: ячейка висела в
+        # lines.get уже после остановки роя).
         with self._lock:
             gen = self._cancel_gen
+        resp = self._request(url, body, hdrs, timeout)
+        with self._lock:
             self._active.add(resp)
         # Сокет читает отдельный поток обычным блокирующим чтением, а здесь
         # ждём строки из очереди и между ними проверяем отмену. Короткий

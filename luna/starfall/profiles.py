@@ -11,6 +11,13 @@ cells на агенте матери, сюда они приходят слов�
 Модель профиля: роль (fast/main/…), конкретная ссылка «провайдер:модель»
 или пул — поле pool списком адресов одной модели через запятую, модель
 при этом задаётся полем model.
+
+Адрес пула может нести имя секрета и тип (ЗАДАЧА-21): запись вида
+`http://узел/v1 | secret: pool:узел1 | kind: openai` (в словаре профиля —
+{"url": …, "secret": "pool:узел1", "kind": "openai"}). Значение ключа
+живёт только в сейфе под именем pool:<имя>; в профиль пишется лишь имя.
+Поле net: true разрешает bash ячейки сеть (по умолчанию изоляции сеть
+выключена).
 """
 
 from __future__ import annotations
@@ -32,6 +39,51 @@ MAX_PROMPT = 8000
 SOURCE_NAMES = {"builtin": "встроенный", "home": "свой", "session": "сессии"}
 
 
+def parse_pool_entry(raw) -> dict:
+    """Один адрес пула → {"url", "secret", "kind", "provider"}.
+
+    Принимает строку (адрес, дальше через «|» или пробелом: secret:
+    pool:<имя>, kind: <тип>, provider: <имя>) и словарь с ключами
+    url/address, secret, kind, provider. Имя секрета нормализуется к
+    виду pool:<имя> — именно так ключ лежит в сейфе.
+    """
+    out = {"url": "", "secret": "", "kind": "", "provider": ""}
+    if isinstance(raw, dict):
+        out["url"] = str(raw.get("url") or raw.get("address") or
+                         raw.get("base_url") or "").strip()
+        out["secret"] = str(raw.get("secret") or raw.get("secret_name") or "").strip()
+        out["kind"] = str(raw.get("kind") or raw.get("type") or "").strip()
+        out["provider"] = str(raw.get("provider") or "").strip()
+    else:
+        text = str(raw or "").strip()
+        head = text.split("|", 1)[0].strip()
+        out["url"] = head.split()[0] if head else ""
+        for key, field in (("secret", "secret"), ("kind", "kind"),
+                           ("type", "kind"), ("provider", "provider")):
+            match = re.search(key + r"\s*[:=]\s*([^\s|,]+)", text)
+            if match and not out[field]:
+                out[field] = match.group(1)
+    secret = out["secret"]
+    if secret.startswith("secret:"):
+        secret = secret[len("secret:"):].strip()
+    if secret and not secret.startswith("pool:"):
+        secret = "pool:" + secret
+    out["secret"] = secret
+    return out
+
+
+def render_pool_entry(spec: dict) -> str:
+    """Адрес пула обратно в строку шапки профиля (имя секрета, не значение)."""
+    text = str(spec.get("url") or "")
+    if spec.get("secret"):
+        text += " | secret: " + str(spec["secret"])
+    if spec.get("kind"):
+        text += " | kind: " + str(spec["kind"])
+    if spec.get("provider"):
+        text += " | provider: " + str(spec["provider"])
+    return text
+
+
 @dataclass
 class CellProfile:
     caste: str
@@ -39,6 +91,9 @@ class CellProfile:
     description: str = ""
     model: str = "fast"            # роль или ссылка «провайдер:модель»
     pool: list = field(default_factory=list)  # адреса одной модели (пул, §7)
+    pool_specs: list = field(default_factory=list)  # те же адреса словарями:
+    # {"url", "secret", "kind", "provider"} — secret только ИМЯ (pool:<имя>)
+    net: bool = False              # сеть для bash ячейки (изоляция, ЗАДАЧА-21)
     prompt: str = ""
     tools: list = field(default_factory=list)
     write_mode: str = "none"       # none | sandbox | worktree | project
@@ -54,9 +109,16 @@ class CellProfile:
     path: str = ""
 
     def to_dict(self) -> dict:
+        pool = []
+        specs = self.pool_specs or [parse_pool_entry(u) for u in self.pool]
+        for spec in specs:
+            if spec.get("secret") or spec.get("kind") or spec.get("provider"):
+                pool.append(dict(spec))
+            else:
+                pool.append(spec.get("url", ""))
         return {"caste": self.caste, "name": self.name,
                 "description": self.description, "model": self.model,
-                "pool": list(self.pool), "prompt": self.prompt,
+                "pool": pool, "net": bool(self.net), "prompt": self.prompt,
                 "tools": list(self.tools), "write_mode": self.write_mode,
                 "input_hint": self.input_hint, "output_hint": self.output_hint,
                 "ttl_s": self.ttl_s, "budget_usd": self.budget_usd,
@@ -73,7 +135,15 @@ class CellProfile:
         pool = data.get("pool") or []
         if isinstance(pool, str):
             pool = [p.strip() for p in pool.split(",") if p.strip()]
-        prof.pool = [str(p) for p in pool]
+        specs = [parse_pool_entry(p) for p in pool]
+        specs = [s for s in specs if s.get("url")]
+        prof.pool_specs = specs
+        prof.pool = [s["url"] for s in specs]
+        raw_net = data.get("net")
+        if isinstance(raw_net, str):
+            prof.net = raw_net.strip().lower() in ("true", "1", "yes", "да")
+        else:
+            prof.net = bool(raw_net)
         prof.prompt = str(data.get("prompt") or "")
         tools = data.get("tools") or []
         if isinstance(tools, str):
@@ -130,7 +200,10 @@ def render_profile(prof: CellProfile) -> str:
         lines.append("description: " + prof.description)
     lines.append("model: " + prof.model)
     if prof.pool:
-        lines.append("pool: " + ", ".join(prof.pool))
+        specs = prof.pool_specs or [parse_pool_entry(u) for u in prof.pool]
+        lines.append("pool: " + ", ".join(render_pool_entry(s) for s in specs))
+    if prof.net:
+        lines.append("net: true")
     lines.append("tools: " + ", ".join(prof.tools))
     lines.append("write: " + prof.write_mode)
     if prof.input_hint:

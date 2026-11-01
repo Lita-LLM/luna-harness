@@ -8,10 +8,45 @@
 from __future__ import annotations
 
 import getpass as getpass_module
+import re
 
 from .core.errors import HumanError
 from .router.catalog import PROVIDER_PRESETS, preset
 from .router.core import LOCAL_PROVIDERS, Router, secret_name
+
+_POOL_NAME_RULE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def pool_secret_name(name: str) -> str:
+    """Имя секрета ключа пула: pool:<имя>. Имя — латиница/цифры/._-,
+    без двоеточий и пробелов, чтобы ссылка из профиля была однозначной."""
+    name = (name or "").strip()
+    if not _POOL_NAME_RULE.fullmatch(name):
+        raise HumanError("pool_key_name",
+                         "Плохое имя пула: " + (name or "(пусто)"),
+                         "Имя — латиницей, до 64 знаков: буквы, цифры, точки, "
+                         "дефисы, подчёркивания (например: luna pool key node-1).")
+    return "pool:" + name
+
+
+def run_pool_key(name: str, *, secrets, getpass_fn=None, out=None) -> int:
+    """luna pool key <имя>: ключ адреса пула — скрытым вводом в сейф.
+
+    Ключи кладёт только человек; значение не печатается и не возвращается.
+    """
+    ensure = out or print
+    secret_input = getpass_fn or getpass_module.getpass
+    full = pool_secret_name(name)
+    value = secret_input("Ключ пула «" + name.strip() +
+                         "» (ввод скрыт, не покажется и не залогируется): ").strip()
+    if not value:
+        raise HumanError("pool_key_empty", "Ключ пустой — ничего не записал",
+                         "Запусти luna pool key " + name.strip() + " ещё раз.")
+    secrets.set(full, value)
+    ensure("Ключ пула сохранён в сейф именем " + full +
+           " (значение не показываю). В профиле ячейки адрес пишется: "
+           "secret: " + full + ".")
+    return 0
 
 
 def _pick(input_fn, out, prompt: str, options: list[str]) -> str:
@@ -34,7 +69,8 @@ SEARCH_KEY_PROVIDERS = (("exa", "Exa"), ("brave", "Brave Search"),
 
 def run_setup(*, settings, secrets, input_fn=None, getpass_fn=None,
               router: Router | None = None, out=None,
-              ask_search_keys: bool = False) -> int:
+              ask_search_keys: bool = False,
+              ask_pool_keys: bool = False) -> int:
     """Интерактивная настройка. Ввод и вывод подменяются в тестах."""
     ensure = out or print
     ask = input_fn or input
@@ -114,6 +150,20 @@ def run_setup(*, settings, secrets, input_fn=None, getpass_fn=None,
             if value:
                 secrets.set("search:" + name, value)
                 ensure("  " + label + ": ключ сохранён в сейф.")
+    if ask_pool_keys:
+        # Ключи адресов пула роя (ЗАДАЧА-21): по одному за прогон setup,
+        # остальные — командой luna pool key <имя>. Только имя в сейфе
+        # pool:<имя>; агенты и ячейки значение не видят.
+        ensure("Ключ адреса пула роя (необязательно): если у узлов роя "
+               "есть ключи, дай одному имя — например node-1. Enter — пропустить.")
+        pool_name = ask("Имя пула: ").strip()
+        if pool_name:
+            value = secret_input("Ключ пула «" + pool_name +
+                                 "» (ввод скрыт): ").strip()
+            if value:
+                secrets.set(pool_secret_name(pool_name), value)
+                ensure("  Ключ сохранён в сейф: pool:" + pool_name +
+                       ". Остальные — luna pool key <имя>.")
     return 0
 
 

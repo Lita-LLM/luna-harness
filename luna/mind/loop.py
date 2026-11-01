@@ -456,6 +456,11 @@ class Agent:
         max_steps = 30
         if self.settings is not None:
             max_steps = int(self.settings.get("agent.max_steps", 30) or 30)
+        # Явный потолок клиента на один ход (luna -p --max-turns,
+        # ЗАДАЧА-21): атрибут ставит клиент, настройку не трогаем.
+        override = int(getattr(self, "max_steps_override", 0) or 0)
+        if override > 0:
+            max_steps = override
         reason = "end"
         try:
             reason = self._steps(max_steps)
@@ -625,8 +630,12 @@ class Agent:
         if not isinstance(answer, dict):
             return ("deny", "human", "Человек не ответил", args)
         choice = answer.get("decision", "no")
+        # Клиент без человека (headless, ЗАДАЧА-21) объясняет вердикт
+        # своей причиной: «разрешено шаблоном --allow», «hard_block не
+        # разрешается» — она честнее общей фразы и уходит в guard.verdict.
+        own_reason = str(answer.get("reason") or "")
         if choice == "yes":
-            return ("allow", "human", "Человек разрешил", args)
+            return ("allow", "human", own_reason or "Человек разрешил", args)
         if choice == "always":
             self.guard.remember_always(decision.risk)
             return ("allow", "human", "Человек разрешил и сказал «дальше без вопросов»", args)
@@ -643,8 +652,8 @@ class Agent:
                         hard.reason, args)
             return ("allow", "human", "Человек отредактировал и разрешил", new_args)
         if choice == "stop":
-            return ("deny", "human-stop", "Человек отменил весь ход", args)
-        return ("deny", "human", "Человек отказал", args)
+            return ("deny", "human-stop", own_reason or "Человек отменил весь ход", args)
+        return ("deny", "human", own_reason or "Человек отказал", args)
 
     # --- откат: /undo, /rewind, /redo (ЗАДАЧА-13) ---
 

@@ -77,6 +77,54 @@ def kill_tree(proc) -> None:
             pass
 
 
+def _sandbox_preexec(spec, timeout: int):
+    """rlimit для процесса ячейки (POSIX): память и число процессов —
+    жёстко, время — ещё и RLIMIT_CPU поверх опроса по таймауту тула.
+    Контейнерам не нужно: у них свои --memory/--pids-limit."""
+    memory = int(getattr(spec, "memory_mb", 0) or 0)
+    procs = int(getattr(spec, "max_processes", 0) or 0)
+    cpu = max(1, int(timeout) + 5)
+
+    def apply() -> None:
+        import resource
+
+        if memory:
+            limit = memory * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+        if procs:
+            resource.setrlimit(resource.RLIMIT_NPROC, (procs, procs))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
+
+    return apply
+
+
+def _spawn(ctx, command: str, timeout: int, **popen_kw):
+    """Запуск команды с учётом ctx.sandbox (изоляция ячеек, ЗАДАЧА-21).
+
+    Возвращает (Popen, None) или (None, текст отказа): явно выбранный,
+    но недоступный бэкенд не подменяется обычным запуском молча.
+    """
+    spec = getattr(ctx, "sandbox", None)
+    kwargs = dict(popen_kw)
+    kwargs.update(_group_kwargs())
+    if spec is not None and getattr(spec, "unavailable", False):
+        return None, ("Изоляция bash недоступна: " +
+                      str(getattr(spec, "reason", "") or "бэкенд не найден") +
+                      ". Команда НЕ выполнена без изоляции.")
+    if spec is not None and getattr(spec, "backend", "none") in ("bwrap", "podman", "docker"):
+        argv, env = spec.wrap(command)
+        if env is not None:
+            kwargs["env"] = env
+        proc = subprocess.Popen(argv, shell=False, cwd=str(ctx.cwd),
+                                stdin=subprocess.DEVNULL, **kwargs)
+        return proc, None
+    if spec is not None and not IS_WINDOWS and getattr(spec, "limits", False):
+        kwargs["preexec_fn"] = _sandbox_preexec(spec, timeout)
+    proc = subprocess.Popen(command, shell=True, cwd=str(ctx.cwd),
+                            stdin=subprocess.DEVNULL, **kwargs)
+    return proc, None
+
+
 def _bash(ctx, args) -> ToolResult:
     command = args.get("command", "")
     if not command.strip():
@@ -90,8 +138,13 @@ def _bash(ctx, args) -> ToolResult:
         log = log_dir / ("bg-" + time.strftime("%Y%m%d-%H%M%S") + ".log")
         # Вывод фона — в файл: непрочитанный PIPE рано или поздно повесит процесс.
         with open(log, "wb") as fh:
-            proc = subprocess.Popen(command, shell=True, cwd=str(ctx.cwd), stdin=subprocess.DEVNULL,
-                                    stdout=fh, stderr=subprocess.STDOUT, **_group_kwargs())
+            try:
+                proc, error = _spawn(ctx, command, timeout, stdout=fh,
+                                     stderr=subprocess.STDOUT)
+            except OSError as exc:
+                return ToolResult(False, "Не удалось запустить команду: " + str(exc))
+        if proc is None:
+            return ToolResult(False, error or "Не удалось запустить команду.")
         ctx.background[proc.pid] = proc
         return ToolResult(True, "Фоновая команда запущена, pid " + str(proc.pid) +
                           ". Вывод пишется в " + str(log) + " (читай тулом read).")
@@ -100,11 +153,12 @@ def _bash(ctx, args) -> ToolResult:
     # Цикл ожидания — опросом по 0,05 с: прерывание хода (ctx.cancel_event)
     # и таймаут убивают всё дерево сразу, а не ждут конца команды.
     try:
-        proc = subprocess.Popen(command, shell=True, cwd=str(ctx.cwd),
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, **_group_kwargs())
+        proc, error = _spawn(ctx, command, timeout, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
     except OSError as exc:
         return ToolResult(False, "Не удалось запустить команду: " + str(exc))
+    if proc is None:
+        return ToolResult(False, error or "Не удалось запустить команду.")
     cancel = getattr(ctx, "cancel_event", None)
     deadline = time.monotonic() + timeout
     out_b = b""

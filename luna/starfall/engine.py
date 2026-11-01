@@ -27,10 +27,12 @@ from pathlib import Path
 
 from ..core.fsutil import atomic_write_text
 from ..core.ids import new_id
+from ..core.secrets import redact
 from ..tools.registry import WRITE_TOOLS, ToolContext
 from .addressing import address as cell_address
 from .addressing import host_address, link_address
-from .modelpool import ModelPool, is_rate_limited
+from .modelpool import (ModelPool, PoolEndpointError, is_auth_error,
+                        is_rate_limited)
 from .profiles import CellProfile
 
 DENIED_PREFIX = "НЕ ВЫПОЛНЕНО"
@@ -38,6 +40,11 @@ DENIED_PREFIX = "НЕ ВЫПОЛНЕНО"
 FORBIDDEN_TOOLS = ("assistant", "crew", "starfall", "cells", "luna", "skill", "manner")
 ROLES = ("main", "fast", "guard", "vision")
 _PROGRESS_EVERY = 25
+
+
+class CellCancelled(Exception):
+    """Рой остановлен до или во время запроса ячейки: не ошибка адреса,
+    а общий стоп — попытка не должна уходить в повторы и повторы пула."""
 
 
 class SwarmError(Exception):
@@ -99,6 +106,16 @@ def resolve_inputs(spec, cwd: Path) -> list:
 # --- исполнитель одной ячейки на роутере матери ------------------------------
 
 
+class _AnyEvent:
+    """Событие-сумма: установлено, если установлено хоть одно из событий."""
+
+    def __init__(self, *events) -> None:
+        self._events = [e for e in events if e is not None]
+
+    def is_set(self) -> bool:
+        return any(e.is_set() for e in self._events)
+
+
 class RouterCellRunner:
     """Одна ячейка: короткий цикл роутера с тулами профиля и жёсткими воротами."""
 
@@ -113,8 +130,21 @@ class RouterCellRunner:
         self.project_dir = Path(project_dir) if project_dir else Path.cwd()
         self.project_confirmed = bool(project_confirmed)
         # Прерывание матери (ЗАДАЧА-18): долгий bash ячейки рвётся вместе
-        # со всем роем, а не доживает до своего таймаута.
-        self.cancel_event = cancel_event
+        # со всем роем, а не доживает до своего таймаута. Свой флаг —
+        # остановка именно этого роя (SwarmRun.stop): гасит стримы
+        # роутера матери и bash ячеек через общий cancel_event контекста.
+        self._local_cancel = threading.Event()
+        self.cancel_event = _AnyEvent(cancel_event, self._local_cancel)
+
+    def stop_swarm(self) -> None:
+        """Остановка роя: флаг контекстам ячеек + отмена идущих стримов."""
+        self._local_cancel.set()
+        cancel = getattr(self.router, "cancel_active", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 — остановка не падает
+                pass
 
     # --- ворота ------------------------------------------------------------
 
@@ -142,6 +172,14 @@ class RouterCellRunner:
             return (DENIED_PREFIX + ": профиль " + profile.caste +
                     " только читает (write: none), а " + call.name + " пишет.")
         if call.name == "bash":
+            # Изоляция bash (ЗАДАЧА-21): рецепт кладём в meta, контекст
+            # ячейки подхватит. Явно выбранный, но недоступный бэкенд —
+            # отказ, а не тихий запуск без изоляции.
+            spec = self._sandbox_for(profile, meta)
+            if spec is not None and spec.unavailable:
+                return (DENIED_PREFIX + ": изоляция bash (" +
+                        str(spec.requested) + ") недоступна: " +
+                        str(spec.reason) + " Без изоляции не выполняю.")
             return None  # каталог исполнения выставит ctx; жёсткое — выше по списку
         root = self._write_root(profile, meta)
         if root is None:
@@ -170,6 +208,31 @@ class RouterCellRunner:
             return self.project_dir if self.project_confirmed else None
         return None
 
+    def _sandbox_for(self, profile: CellProfile, meta: dict):
+        """Рецепт изоляции bash этой ячейки (кэш в meta на время ячейки).
+
+        Рабочий каталог — тот же, что у контекста: папка ячейки в
+        sandbox, worktree звена в worktree, проект в project/none.
+        Профилям без bash рецепт не нужен — не считаем вовсе.
+        """
+        if "bash" not in (profile.tools or []):
+            return None
+        spec = meta.get("sandbox_spec")
+        if spec is not None:
+            return spec
+        mode = profile.write_mode
+        if mode == "sandbox":
+            cwd = Path(meta["cell_dir"])
+        elif mode == "worktree":
+            cwd = Path(meta["write_dir"])
+        else:
+            cwd = self.project_dir
+        from .sandbox import resolve_spec
+
+        spec = resolve_spec(self.settings, cwd, net=profile.net)
+        meta["sandbox_spec"] = spec
+        return spec
+
     def _cell_ctx(self, profile: CellProfile, meta: dict) -> ToolContext:
         mode = profile.write_mode
         if mode == "sandbox":
@@ -184,7 +247,8 @@ class RouterCellRunner:
             cwd = self.project_dir
         return ToolContext(cwd=cwd, settings=self.settings, secrets=self.secrets,
                            output_dir=Path(meta["cell_dir"]), agent=None,
-                           cancel_event=self.cancel_event)
+                           cancel_event=self.cancel_event,
+                           sandbox=self._sandbox_for(profile, meta))
 
     # --- прогон ---------------------------------------------------------------
 
@@ -204,8 +268,9 @@ class RouterCellRunner:
         ctx = self._cell_ctx(profile, meta)
         total_in = total_out = 0
         endpoint = meta.get("endpoint") or ""
+        endpoint_spec = meta.get("endpoint_spec") or None
         for _step in range(max(1, profile.steps)):
-            result = self._chat(profile, messages, specs, endpoint)
+            result = self._chat(profile, messages, specs, endpoint, endpoint_spec)
             total_in += result.usage.input
             total_out += result.usage.output
             if not result.tool_calls:
@@ -231,18 +296,48 @@ class RouterCellRunner:
                                  "name": call.name, "content": content})
         return "(лимит шагов ячейки исчерпан)", total_in, total_out
 
-    def _chat(self, profile: CellProfile, messages, specs, endpoint: str):
+    def _chat(self, profile: CellProfile, messages, specs, endpoint: str,
+              endpoint_spec: dict | None = None):
+        # Стоп, пришедший ПОСЛЕ проверки попытки в движке, но ДО старта
+        # стрима: новый стрим захватил бы уже новое поколение отмены
+        # роутера и не отменился бы ничем (гонка, пойманная CI на
+        # Windows). Проверяем общий флаг ячейки прямо перед запросом.
+        if self.cancel_event.is_set():
+            raise CellCancelled("рой остановлен")
         ref = profile.model or "fast"
         if endpoint:
             # Пул: конкретный адрес одной модели — свой ProviderConfig.
-            from ..router.core import ProviderConfig, parse_ref
+            # Ключ (ЗАДАЧА-21): только по имени секрета pool:<имя> из
+            # сейфа матери, в момент запроса; в события, журналы и
+            # окружение процессов значение не попадает. Схема заголовка —
+            # по типу адреса: kind из профиля или kind провайдера
+            # каталога роутера; адаптер сам знает свой заголовок
+            # (Bearer / x-api-key / x-goog-api-key).
+            from ..router.core import KNOWN_PROVIDERS, ProviderConfig, parse_ref
 
             _prov, model = parse_ref(ref if ref not in ROLES else
                                      (self.router.role_ref(ref) if self.router else ref))
-            cfg = ProviderConfig(name="pool", kind="openai", base_url=endpoint,
-                                 api_key=None)
+            spec = endpoint_spec or {}
+            kind = str(spec.get("kind") or "")
+            provider_name = str(spec.get("provider") or "")
+            if provider_name and self.router is not None and not kind:
+                kind = self.router.provider_config(provider_name).kind
+            if kind in KNOWN_PROVIDERS:
+                kind = KNOWN_PROVIDERS[kind][0]
+            kind = kind or "openai"
+            secret_name = str(spec.get("secret") or "")
+            api_key = None
+            if secret_name:
+                api_key = self.secrets.get(secret_name) if self.secrets else None
+                if not api_key:
+                    raise PoolEndpointError(
+                        "ключ " + secret_name + " не найден в сейфе: адрес " +
+                        endpoint + " выведен из пула (ключ кладёт человек: "
+                        "luna pool key <имя>)")
+            cfg = ProviderConfig(name=provider_name or "pool", kind=kind,
+                                 base_url=endpoint, api_key=api_key)
             return self.router._chat_once(cfg, model, messages, specs,
-                                          lambda kind, text: None)
+                                          lambda kind2, text: None)
         if ref in ROLES:
             return self.router.chat(messages, specs, role=ref,
                                     on_event=lambda kind, text: None)
@@ -260,7 +355,8 @@ class SwarmRun:
                  output_dir: Path, settings=None, publish=None, runner=None,
                  parallel: int = 8, link_size: int = 8, budget_usd: float = 1.0,
                  mail: str = "tree", collapse: str = "auto", max_attempts: int = 3,
-                 interrupt_check=None, wallet=None, swarm_id: str = "") -> None:
+                 interrupt_check=None, wallet=None, swarm_id: str = "",
+                 secrets=None) -> None:
         if not profiles:
             raise SwarmError("рою нужен хотя бы один профиль ячейки")
         if not inputs:
@@ -280,6 +376,7 @@ class SwarmRun:
         self.max_attempts = max(1, int(max_attempts))
         self.interrupt_check = interrupt_check
         self.wallet = wallet
+        self.secrets = secrets  # только для вычистки значений из результатов
         self.swarm_id = swarm_id or (stream + "-" + new_id()[:6])
         self.dir = Path(output_dir) / self.swarm_id
         self.results_dir = self.dir / "results"
@@ -304,7 +401,8 @@ class SwarmRun:
         self._pools: dict = {}
         for prof in self.profiles:
             if prof.pool:
-                self._pools[prof.caste] = ModelPool(prof.pool, base_parallel=2)
+                self._pools[prof.caste] = ModelPool(
+                    prof.pool_specs or prof.pool, base_parallel=2)
         self.stopped_reason = ""
 
     # --- адреса и раскладка -----------------------------------------------------
@@ -346,6 +444,10 @@ class SwarmRun:
         self._write_meta(finished=False)
 
     def _write_result(self, index: int, ok: bool, text: str, error: str = "") -> None:
+        # Результаты лежат на диске: значения секретов (например, ключ
+        # пула, который узел вдруг эхом вернул в ответе) сюда не пишем.
+        text = redact(text, self.secrets)
+        error = redact(error, self.secrets)
         data = {"index": index, "address": self.address_of(index),
                 "link": self.link_of(index), "caste": self.profile_of(index).caste,
                 "ok": bool(ok), "text": text, "error": error,
@@ -453,6 +555,7 @@ class SwarmRun:
         task_text = render_task(self.template, self.inputs[index])
         pool = self._pools.get(profile.caste)
         last_error = ""
+        pool_wait = 0.0
         while self.attempts[index] < self.max_attempts:
             if self._stop.is_set() or self._budget_out.is_set():
                 return
@@ -460,17 +563,44 @@ class SwarmRun:
             if pool is not None:
                 ep = pool.acquire()
                 if ep is None:
+                    if pool.all_disabled():
+                        last_error = ("все адреса пула выведены из пула: " +
+                                      "; ".join(pool.disabled_reasons()))
+                        break
+                    pool_wait += 0.05
+                    if pool_wait > 15.0:
+                        last_error = "пул занят или отдыхает по 429 дольше 15 с"
+                        break
                     time.sleep(0.05)
                     continue
                 meta["endpoint"] = ep.url
+                meta["endpoint_spec"] = ep.spec()
             self.attempts[index] += 1
             started = time.monotonic()
             try:
                 text, tin, tout = self.runner(profile, task_text, meta)
+            except CellCancelled:
+                # Общий стоп роя: не ошибка и не повтор — выходим, внешняя
+                # уборка пометит ячейку пропущенной.
+                if pool is not None and ep is not None:
+                    pool.release(ep, ok=False)
+                return
             except Exception as exc:  # noqa: BLE001 — ячейка упала: повтор по лимиту
                 if pool is not None and ep is not None:
-                    pool.release(ep, rate_limited=is_rate_limited(exc), ok=False)
-                last_error = str(exc)
+                    if is_auth_error(exc) or getattr(exc, "pool_disable", False):
+                        # 401/403 (или нет ключа): адрес — из пула совсем,
+                        # с причиной; повторов на нём не будет.
+                        reason = redact(str(exc), self.secrets)
+                        pool.disable(ep, reason)
+                        last_error = ("адрес пула " + ep.url +
+                                      " выведен из пула: " + reason)
+                        self._emit({"type": "swarm.pool", "url": ep.url,
+                                    "action": "disabled", "reason": reason})
+                    else:
+                        pool.release(ep, rate_limited=is_rate_limited(exc), ok=False)
+                        last_error = str(exc)
+                else:
+                    last_error = str(exc)
                 continue
             if pool is not None and ep is not None:
                 pool.release(ep, ok=True)
@@ -534,14 +664,26 @@ class SwarmRun:
         elif self.mail == "board":
             with self._lock:
                 self.board.append({"address": self.address_of(index),
-                                   "ok": ok, "text": text[:300]})
+                                   "ok": ok,
+                                   "text": redact(text, self.secrets)[:300]})
         self._emit_progress()
 
     # --- главный прогон ----------------------------------------------------------------
 
     def stop(self) -> None:
-        """Esc хозяина: весь поток останавливается, недоделанное — skipped."""
+        """Esc хозяина: весь поток останавливается, недоделанное — skipped.
+
+        Исполнителю тоже говорим стоп (RouterCellRunner.stop_swarm):
+        идущие стримы моделей отменяются, bash ячеек получает свой
+        cancel_event — рой гаснет сразу, а не по таймаутам ячеек.
+        """
         self._stop.set()
+        stopper = getattr(self.runner, "stop_swarm", None)
+        if callable(stopper):
+            try:
+                stopper()
+            except Exception:  # noqa: BLE001 — остановка не падает
+                pass
 
     def run(self) -> dict:
         if self.runner is None:
@@ -807,7 +949,8 @@ def unfinished_from_records(records: list) -> dict | None:
 
 
 def resume(swarm_dir: Path, *, settings=None, publish=None, runner=None,
-           parallel: int | None = None, interrupt_check=None, wallet=None) -> dict:
+           parallel: int | None = None, interrupt_check=None, wallet=None,
+           secrets=None) -> dict:
     """Докрутить поток из его папки: готовые результаты не переделываются."""
     swarm_dir = Path(swarm_dir)
     meta = json.loads((swarm_dir / "state.json").read_text(encoding="utf-8"))
@@ -828,5 +971,6 @@ def resume(swarm_dir: Path, *, settings=None, publish=None, runner=None,
                    collapse=str(meta.get("collapse") or "auto"),
                    max_attempts=int(meta.get("max_attempts") or 3),
                    interrupt_check=interrupt_check, wallet=wallet,
+                   secrets=secrets,
                    swarm_id=str(meta.get("swarm") or swarm_dir.name))
     return run.run()

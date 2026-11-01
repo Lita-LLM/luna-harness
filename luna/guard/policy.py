@@ -162,14 +162,27 @@ class Guard:
             from ..starfall.profiles import get_profile
         except Exception:  # noqa: BLE001 — без модуля роя судить не о чем
             return None
+        write_override = str(args.get("write_mode", "") or "")
         for caste in castes:
             prof = get_profile(caste, self.settings)
             if prof is None:
                 return "Рой с профилем «" + caste + "» из памяти сессии: его права не проверить заранее"
-            if "bash" in prof.tools:
-                return "Рой с оболочкой (профиль " + caste + "): ячейки выполнят команды без вопросов"
-            if prof.write_mode == "project":
+            if prof.write_mode == "project" or write_override == "project":
                 return "Рой с записью прямо в проект (профиль " + caste + ")"
+            if "bash" in prof.tools:
+                # Изоляция bash (ЗАДАЧА-21): вопрос снимает только бэкенд,
+                # который есть И проверен пробным запуском (ячейка не
+                # смогла выйти за свою папку и в сеть без net). Без
+                # изоляции — как раньше: спрашиваем всегда.
+                try:
+                    from ..starfall.sandbox import isolation_verified
+
+                    verified, _desc = isolation_verified(self.settings)
+                except Exception:  # noqa: BLE001 — модуль изоляции упал: честнее спросить
+                    verified = False
+                if not verified:
+                    return ("Рой с оболочкой (профиль " + caste + "): ячейки выполнят "
+                            "команды без вопросов, а проверенной изоляции bash нет")
         return None
 
     def _is_luna_config(self, raw: str) -> bool:

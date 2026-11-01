@@ -155,7 +155,42 @@ class FakeAgent:
         if "петля" in low:
             self._loop_scenario(t, turn)
             return
+        if "экипаж" in low or "crew" in low:
+            self._crew_scenario(t, turn)
+            return
         self._plain_scenario(t, turn, long_output="долго" in low)
+
+    def _crew_scenario(self, t: float, turn: int) -> None:
+        """Команда детей для панели «Экипаж» (ЗАДАЧА-11): спутники, письма, бюджет."""
+        lead = {"agent_id": "fake-crew-lead", "parent_id": "main", "kind": "satellite",
+                "name": "Тимлид"}
+        coder = {"agent_id": "fake-crew-coder", "parent_id": "main", "kind": "satellite",
+                 "name": "Кодер1"}
+        self._at(t + 0.2, dict({"type": "agent.spawn", "role": "координатор",
+                                "model": "fake:echo", "leader": True}, **lead))
+        self._at(t + 0.3, dict({"type": "agent.spawn", "role": "пишет код",
+                                "model": "fake:echo", "leader": False}, **coder))
+        self._at(t + 0.5, dict({"type": "agent.state", "state": "думает"}, **lead))
+        self._at(t + 0.7, dict({"type": "agent.message", "from": "Тимлид", "to": "Кодер1",
+                                "from_id": "fake-crew-lead", "to_id": "fake-crew-coder",
+                                "text": "Сделай фичу X и отчитайся"}, **coder))
+        self._at(t + 0.9, dict({"type": "agent.state", "state": "действует"}, **coder))
+        self._at(t + 1.1, dict({"type": "usage", "model": "fake:echo", "input": 1200,
+                                "output": 300, "cost": 0.0015, "context_pct": 1.0}, **coder))
+        self._at(t + 1.2, {"type": "budget.update", "agent_id": "fake-crew-coder",
+                           "parent_id": "main", "kind": "satellite", "name": "Кодер1",
+                           "spent_usd": 0.0015, "limit_usd": 5.0, "remaining_usd": 4.9985,
+                           "tokens": 1500, "rate_per_min_usd": 0.09, "eta_sec": 3330.0,
+                           "forecast_min_usd": 0.09, "exhausted": False})
+        self._at(t + 1.4, dict({"type": "agent.state", "state": "спит"}, **coder))
+        self._at(t + 1.5, dict({"type": "agent.message", "from": "Кодер1", "to": "Тимлид",
+                                "from_id": "fake-crew-coder", "to_id": "fake-crew-lead",
+                                "text": "Фича X готова"}, **lead))
+        self._at(t + 1.7, dict({"type": "agent.state", "state": "спит"}, **lead))
+        self._stream(t + 1.9, "agent.text",
+                     "Экипаж на связи: Тимлид и Кодер1 видны в панели «Экипаж» "
+                     "(/panel crew), письма и бюджет — там же и в панели «Луна».")
+        self._finish_at(t + 2.2, "done")
 
     def _loop_scenario(self, t: float, turn: int) -> None:
         """Петля правок одного файла: Ниблер такое замечает (ЗАДАЧА-14)."""

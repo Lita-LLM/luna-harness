@@ -27,7 +27,8 @@ class Agent:
     def __init__(self, *, settings, secrets=None, router, cwd,
                  bus=None, session_id: str = "", mode: str = "",
                  model_ref: str = "", guard: Guard | None = None,
-                 ask_guard_fn=None, ask_user_fn=None, tools: dict | None = None):
+                 ask_guard_fn=None, ask_user_fn=None, tools: dict | None = None,
+                 system_suffix: str = ""):
         self.settings = settings
         self.secrets = secrets
         self.router = router
@@ -41,7 +42,8 @@ class Agent:
         self.ask_guard_fn = ask_guard_fn  # (event) -> {decision, args?} | None
         self.ctx = ToolContext(cwd=self.cwd, settings=settings, secrets=secrets,
                                ask_user_fn=self._ask_user,
-                               output_dir=self._output_dir())
+                               output_dir=self._output_dir(), agent=self)
+        self._system_suffix = system_suffix  # роль ребёнка (ЗАДАЧА-11): хвост промпта
         self._ask_user_fn = ask_user_fn  # (id, question, options) -> str | None
         self._listeners: list = []
         self._active = False
@@ -102,6 +104,13 @@ class Agent:
         kind = command.get("type")
         if kind == "user.message":
             text = command.get("text", "")
+            # Почта команды (ЗАДАЧА-11): письма и отчёты детей — пометками
+            # в начало хода хозяина, как замечания Ниблера.
+            host = getattr(self, "_agents_host", None)
+            if host is not None:
+                notes = host.take_owner_notes()
+                if notes:
+                    text = notes + ("\n\n" + text if text else "")
             if self._turn_active:
                 self._queue.append({"text": text, "attachments": command.get("attachments") or []})
                 return None
@@ -131,6 +140,10 @@ class Agent:
 
     def interrupt(self) -> None:
         self._interrupt.set()
+        # Esc хозяина гасит и всех его детей (ЗАДАЧА-11), а те — своих.
+        host = getattr(self, "_agents_host", None)
+        if host is not None:
+            host.interrupt_all()
 
     @property
     def _turn_active(self) -> bool:
@@ -307,6 +320,8 @@ class Agent:
         if self._started and sig == self._prompt_sig:
             return
         content = build_system_prompt(self.cwd, self.mode, settings=self.settings)
+        if self._system_suffix:
+            content = content + "\n\n" + self._system_suffix
         if self._history and self._history[0].get("role") == "system":
             self._history[0] = {"role": "system", "content": content}
         else:

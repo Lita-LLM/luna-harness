@@ -746,9 +746,12 @@ class ChatApp:
             entry.items = list(self.todos)
             entry.born = self._clock()
         elif kind == "usage":
-            self.model = str(ev.get("model") or self.model)
-            self.cost = float(ev.get("cost") or 0.0)
-            self.context_pct = int(round(float(ev.get("context_pct") or 0)))
+            # Расход детей (agent_id, ЗАДАЧА-11) не двигает модель, стоимость
+            # и контекст главного агента в статус-баре: их место — «Экипаж».
+            if not ev.get("agent_id"):
+                self.model = str(ev.get("model") or self.model)
+                self.cost = float(ev.get("cost") or 0.0)
+                self.context_pct = int(round(float(ev.get("context_pct") or 0)))
         elif kind == "mode.changed":
             self.mode = str(ev.get("mode") or self.mode)
         elif kind == "notice":

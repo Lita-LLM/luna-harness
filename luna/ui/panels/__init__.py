@@ -358,3 +358,4 @@ class LayoutTree:
 # Встроенные панели с наполнением: регистрация — импортом модуля.
 from . import builtin as _builtin  # noqa: E402,F401
 from .builtin import PanelData, panel_data  # noqa: E402,F401
+from . import crew as _crew_panel  # noqa: E402,F401 — панель «Экипаж» (ЗАДАЧА-11)

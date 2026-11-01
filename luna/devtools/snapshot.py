@@ -226,9 +226,31 @@ def _render_panels(cols: int, rows: int, caps, settings) -> Buffer:
     app.on_agent_event({"type": "nibbler.say", "severity": "serious", "to": "agent",
                         "text": "app.py правится уже третий раз за сессию — пахнет петлёй."})
     app.on_agent_event({"type": "turn.done", "turn": 1, "reason": "end"})
+    # Команда детей (ЗАДАЧА-11): спутники, письмо и кошелёк — панель «Экипаж».
+    app.on_agent_event({"type": "agent.spawn", "agent_id": "snap-crew-1",
+                        "parent_id": "main", "kind": "satellite", "name": "Кодер1",
+                        "role": "пишет код", "model": "fake:echo", "leader": False})
+    app.on_agent_event({"type": "agent.state", "agent_id": "snap-crew-1",
+                        "parent_id": "main", "kind": "satellite", "name": "Кодер1",
+                        "state": "действует"})
+    app.on_agent_event({"type": "usage", "agent_id": "snap-crew-1",
+                        "parent_id": "main", "kind": "satellite", "name": "Кодер1",
+                        "model": "fake:echo", "input": 1200, "output": 300,
+                        "cost": 0.0015, "context_pct": 1.0})
+    app.on_agent_event({"type": "agent.message", "agent_id": "snap-crew-1",
+                        "parent_id": "main", "kind": "satellite", "name": "Кодер1",
+                        "from": "Луна", "to": "Кодер1",
+                        "from_id": "main", "to_id": "snap-crew-1",
+                        "text": "Почини сборку"})
+    app.on_agent_event({"type": "budget.update", "agent_id": "snap-crew-1",
+                        "parent_id": "main", "kind": "satellite", "name": "Кодер1",
+                        "spent_usd": 0.0015, "limit_usd": 5.0, "remaining_usd": 4.9985,
+                        "tokens": 1500, "rate_per_min_usd": 0.09, "eta_sec": 3330.0,
+                        "forecast_min_usd": 0.09, "exhausted": False})
     app.layout.open("moon")
     app.layout.open("files")
     app.layout.open("backside")
+    app.layout.open("crew")
     # Снимок живёт в вымышленном времени (_FAKE_NOW), а срок строки Ниблера
     # приложение ставит по своим часам — для кадра продлеваем её жизнь.
     app._nibbler_until = _FAKE_NOW + 60.0

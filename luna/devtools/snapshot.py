@@ -22,8 +22,8 @@ from ..ui import color as _color
 from ..ui import phrases
 from ..ui.screen import Buffer
 
-SCREENS = ("splash", "render", "main", "chat", "sessions", "panels",
-           "help", "tiles", "constellation")
+SCREENS = ("splash", "render", "main", "chat", "thinking", "sessions",
+           "panels", "help", "tiles", "constellation")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -144,6 +144,60 @@ def _render_chat_state(state: str, cols: int, rows: int, caps, settings) -> Buff
                             "question": "Какой формат отчёта нужен?",
                             "options": ["Короткий", "Подробный", "Только цифры"]})
     buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
+    return buf
+
+
+def _render_thinking(cols: int, rows: int, at: float, caps, settings) -> Buffer:
+    """Экран мышления (ЗАДАЧА-19): модель думает, луна наливается светом,
+    пересказы быстрой роли проявляются строками под шапкой «думает».
+
+    Время сцены поставлено вручную от _FAKE_NOW: начало раздумья — за
+    20 секунд до эпохи снимка, пересказы — на 7-й и 14-й секундах;
+    кадр рисуется в _FAKE_NOW + at, поэтому по кадрам видно и налив
+    луны, и вспышки звёзд, и градиент свежих строк.
+    """
+    import tempfile
+
+    from ..core.bus import EventBus
+    from ..core.settings import Settings
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    # Настройки сцены — во временной папке: снимок не должен писать
+    # в настоящий settings.json человека.
+    tmp_settings = Settings(home=Path(tempfile.mkdtemp(prefix="luna-snap-")),
+                            cwd=Path.cwd())
+    tmp_settings.set("ui.thinking", "summary")
+    tmp_settings.set("ui.show_thinking", True)
+    tmp_settings.set("model.effort", "high")
+    app = ChatApp(EventBus(), tmp_settings, Scheduler(), caps.glyph_mode)
+    base = _FAKE_NOW - 20.0
+    app._clock = lambda: base
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Разберись, почему падает сборка на Windows")
+    app.on_agent_event({"type": "turn.start", "turn": 1})
+    app.on_agent_event({"type": "agent.thinking",
+                        "text": "Смотрю логи сборки и сравниваю с прошлой "
+                                "неделей. Падение только на Windows, значит "
+                                "ищу различия в путях и кодировках. "})
+    app._clock = lambda: base + 7.0
+    app.on_agent_event({"type": "thinking.summary",
+                        "text": "Смотрит логи сборки и ищет, чем Windows "
+                                "отличается от остальных платформ",
+                        "seconds": 7})
+    app.on_agent_event({"type": "agent.thinking",
+                        "text": "Нашёл подозрительное место в чтении "
+                                "конфига: путь собирается через os.path, "
+                                "а дальше режется по прямому слешу. "})
+    app._clock = lambda: base + 14.0
+    app.on_agent_event({"type": "thinking.summary",
+                        "text": "Проверяет сборку путей в чтении конфига — "
+                                "похоже, слеши режут путь не на той платформе",
+                        "seconds": 14})
+    app.on_agent_event({"type": "agent.thinking",
+                        "text": "Сверяю с тестами на разделители путей…"})
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + at)
     return buf
 
 
@@ -382,6 +436,10 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
         # У чата кадры — не моменты времени, а именованные состояния ленты.
         return [(state, _render_chat_state(state, cols, rows, caps, settings))
                 for state in _CHAT_STATES]
+    if name == "thinking":
+        # Мышление — наоборот, чистая функция времени кадра.
+        return [(str(at) + " с", _render_thinking(cols, rows, at, caps, settings))
+                for at in times]
     if name == "sessions":
         return [("выбиралка сессий", _render_sessions(cols, rows, caps, settings))]
     if name == "panels":

@@ -19,6 +19,7 @@ from ..core.secrets import redact, redact_obj
 from ..guard.policy import Guard, denied_text
 from ..tools.registry import WRITE_TOOLS, ToolContext, build_registry, truncate_output
 from .prompt import build_system_prompt
+from .thinking import ThinkingSummarizer
 
 LOOP_LIMIT = 3  # одинаковых вызовов подряд — и стоп
 
@@ -70,6 +71,11 @@ class Agent:
         self.journal = None
         self._checkpoints = self._make_checkpoints()
         self.ctx.checkpoint = self._checkpoints
+        # Пересказ рассуждений быстрой ролью (ЗАДАЧА-19): отдельный поток,
+        # основной стрим не задерживает; выключен настройкой ui.thinking.
+        self._summarizer = ThinkingSummarizer(
+            settings=settings, router=router, publish=self.publish,
+            usage=self._summary_usage)
 
     def _make_checkpoints(self):
         """Стор чекпоинтов сессии; None — выключен настройкой или сломался."""
@@ -283,9 +289,25 @@ class Agent:
 
     def _emit(self, kind: str, text: str) -> None:
         if kind == "thinking":
+            self._summarizer.feed(text)
             self.publish({"type": "agent.thinking", "text": text})
         else:
             self.publish({"type": "agent.text", "text": text})
+
+    def _summary_usage(self, result) -> None:
+        """Учёт расхода пересказа: в общие итоги, но процент контекста —
+        главного вызова, пересказ его не двигает."""
+        self._total_in += result.usage.input
+        self._total_out += result.usage.output
+        price_in = price_out = 0.0
+        if self.settings is not None:
+            price_in = float(self.settings.get("model.price_in", 0.0) or 0.0)
+            price_out = float(self.settings.get("model.price_out", 0.0) or 0.0)
+        cost = (self._total_in * price_in + self._total_out * price_out) / 1_000_000.0
+        self.publish({"type": "usage", "model": result.model or "fast",
+                      "input": result.usage.input, "output": result.usage.output,
+                      "cost": round(cost, 6),
+                      "context_pct": round(self._context_pct, 2)})
 
     def _usage_event(self, result) -> None:
         self._total_in += result.usage.input
@@ -464,6 +486,11 @@ class Agent:
                     self.publish({"type": "agent.text.done"})
                     return "interrupted"
                 raise
+            self._summarizer.flush()
+            for note in result.notes:
+                self.publish({"type": "effort.note",
+                              "model": result.model or self._model_label(),
+                              "text": note})
             self._usage_event(result)
             if self._interrupt.is_set():
                 # Стрим оборвали посреди ответа: частичный текст остаётся

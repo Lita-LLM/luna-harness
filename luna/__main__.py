@@ -321,7 +321,8 @@ def main(argv: list[str] | None = None) -> int:
 
             data = DataDir()
             data.ensure()
-            return run_setup(settings=Settings(), secrets=Secrets(data.secrets))
+            return run_setup(settings=Settings(), secrets=Secrets(data.secrets),
+                             ask_search_keys=True)
         if cmd == "mcp":
             from .mcp.cli import run_mcp
 

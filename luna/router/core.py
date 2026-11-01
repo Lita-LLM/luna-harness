@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from ..core.errors import HumanError
 from ..net.http_client import HttpClient
+from . import effort as effort_mod
 from .adapters import adapter_for
 from .errors import is_retryable
 from .types import ChatResult
@@ -121,27 +122,44 @@ class Router:
 
     # --- вызовы ---
 
-    def _chat_once(self, cfg: ProviderConfig, model: str, messages, tools, emit) -> ChatResult:
+    def _effort_value(self, role: str) -> str:
+        """Уровень усилия для роли: свой model.effort_<роль> или общий
+        model.effort; пустой — auto (провайдер решает сам, ничего не шлём)."""
+        if self.settings is None:
+            return ""
+        specific = effort_mod.normalize(self.settings.get("model.effort_" + role, ""))
+        if specific:
+            return specific
+        return effort_mod.normalize(self.settings.get("model.effort", ""))
+
+    def _chat_once(self, cfg: ProviderConfig, model: str, messages, tools, emit,
+                   role: str = "main") -> ChatResult:
         if cfg.kind == "fake":
             from ..devtools.fake_llm import FakeModelClient
 
             client = FakeModelClient()
             return client.chat(model, messages, tools, emit)
         adapter = adapter_for(cfg.kind, cfg.base_url)
-        body = adapter.body(model, messages, tools, True)
+        fields, note = effort_mod.body_fields(
+            cfg.kind, cfg.name, model, self._effort_value(role))
+        body = adapter.body(model, messages, tools, True, extra=fields)
         if cfg.kind == "gemini":
             url = adapter.url(model)
         else:
             url = adapter.url()
         lines = self.http.stream_lines(url, body, adapter.headers(cfg.api_key))
         try:
-            return adapter.parse_stream(lines, model, emit)
+            result = adapter.parse_stream(lines, model, emit)
         except Exception:
             # Стрим мог не поддерживаться провайдером: пробуем одним ответом.
             data = self.http.post_json(url if cfg.kind != "gemini" else adapter.full_url(model),
-                                       adapter.body(model, messages, tools, False),
+                                       adapter.body(model, messages, tools, False,
+                                                    extra=fields),
                                        adapter.headers(cfg.api_key))
-            return adapter.parse_full(data, model)
+            result = adapter.parse_full(data, model)
+        if note:
+            result.notes.append(note)
+        return result
 
     def chat(self, messages, tools=None, *, role: str = "main", ref: str = "",
              on_event=None) -> ChatResult:
@@ -159,7 +177,7 @@ class Router:
         for candidate in chain:
             cfg, model = self.resolve(candidate)
             try:
-                result = self._chat_once(cfg, model, messages, tools, emit)
+                result = self._chat_once(cfg, model, messages, tools, emit, role=role)
                 result.model = candidate
                 return result
             except Exception as exc:  # noqa: BLE001 — решает классификация ниже

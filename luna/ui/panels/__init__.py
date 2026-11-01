@@ -31,9 +31,43 @@ class PanelContent:
     height_hint ставит экран перед lines(): сколько строк влезет в панель
     (для панелей-журналов, показывающих хвост). handle_key — клавиши
     панели в режиме фокуса (F6): True — клавиша съедена панелью.
+
+    Место по содержимому (ЗАДАЧА-17): min_height — меньше панель не
+    сжимают, desired_height (метод height_hint_for) — сколько строк ей
+    по-настоящему нужно; движок отдаёт остаток тем, кому есть что
+    показать. Ручной размер (←→ в режиме панелей) побеждает автоматику:
+    экран просто не передаёт hint для таких панелей.
     """
 
     height_hint: int = 0
+    min_height: int = 3
+    desired_height: int | None = None
+
+    def height_hint_for(self, app, width: int):
+        """(минимум, желаемая высота) панели — для раскладки стопки.
+
+        По умолчанию: короткое содержимое (до 6 строк) получает ровно
+        свои строки + заголовок, длинное — без желания, делит остаток
+        по весам. Панели с особенной геометрией (Луна) перекрывают.
+        """
+        if self.desired_height is not None:
+            return (self.min_height, self.desired_height)
+        try:
+            count = len(self.lines(app, width))
+        except Exception:  # noqa: BLE001 — hint не имеет права ронять экран
+            return (self.min_height, None)
+        if count <= 6:
+            return (self.min_height, max(2, count + 1))
+        return (self.min_height, None)
+
+    def draw_into(self, buf, app, x: int, y: int, w: int, h: int) -> bool:
+        """Особенная отрисовка содержимого в буфер вместо строк lines().
+
+        True — панель нарисовала себя сама (Луна — диском ui/disc.py:
+        строкам-тексту его цвета и полублоки не передать). По умолчанию
+        не умеем — экран рисует lines().
+        """
+        return False
 
     def __init__(self, title: str, lines_provider=None):
         self.title = title
@@ -67,14 +101,19 @@ def registered_panels() -> dict:
 
 
 def find_panel(query: str):
-    """Панель по id, названию или алиасу (без учёта регистра) — для /panel <имя>."""
-    q = (query or "").strip().lower()
+    """Панель по id, названию, алиасу — и по названию в чужой раскладке.
+
+    kbvbns находится как «Лимиты», дшьшеы — как limits (ЗАДАЧА-17).
+    """
+    q = (query or "").strip()
     if not q:
         return None
-    for spec in _REGISTRY.values():
-        if q == spec.panel_id or q == spec.title.lower() or q in spec.aliases:
-            return spec
-    return None
+    from ..layout import match_name
+
+    names = {spec.panel_id: (spec.panel_id, spec.title, *spec.aliases)
+             for spec in _REGISTRY.values()}
+    found = match_name(q, names)
+    return _REGISTRY.get(found) if found else None
 
 
 def create_panel(panel_id: str):
@@ -144,6 +183,7 @@ class LayoutTree:
         self.focused: str | None = None
         self.maximized: str | None = None
         self.saved: dict = {}
+        self.manual: set = set()  # панели с ручным размером: hint не действует
 
     def clone(self) -> "LayoutTree":
         """Независимая копия дерева (для анимации закрытия колонки)."""
@@ -152,6 +192,7 @@ class LayoutTree:
         other.focused = self.focused
         other.maximized = self.maximized
         other.saved = dict(self.saved)
+        other.manual = set(self.manual)
         return other
 
     # --- запросы -------------------------------------------------------------
@@ -205,6 +246,7 @@ class LayoutTree:
     def close(self, panel_id: str) -> bool:
         if panel_id not in self:
             return False
+        self.manual.discard(panel_id)
         if self.maximized == panel_id:
             self.maximized = None
         self.root = self._remove(self.root, panel_id)
@@ -294,6 +336,7 @@ class LayoutTree:
         if new_w < 0.2 or new_o < 0.2:
             return False
         parent.weights[idx], parent.weights[other] = new_w, new_o
+        self.manual.add(panel_id)  # ручной размер побеждает автоматический
         return True
 
     def toggle_maximize(self, panel_id: str) -> bool:
@@ -330,18 +373,24 @@ class LayoutTree:
 
     # --- геометрия -----------------------------------------------------------------
 
-    def rects(self, x: int, y: int, w: int, h: int) -> dict:
-        """Прямоугольники видимых панелей: {panel_id: (x, y, w, h)}."""
+    def rects(self, x: int, y: int, w: int, h: int, hints: dict | None = None) -> dict:
+        """Прямоугольники видимых панелей: {panel_id: (x, y, w, h)}.
+
+        hints — {panel_id: (минимум, желаемая высота)} для стопок:
+        панель получает желаемую высоту, остаток делят остальные по
+        весам. Если места на желания всех не хватает — обычные веса.
+        """
         out: dict = {}
         if self.root is None or w <= 0 or h <= 0:
             return out
         if self.maximized is not None and self.maximized in self:
             out[self.maximized] = (x, y, w, h)
             return out
-        self._place(self.root, x, y, w, h, out)
+        self._place(self.root, x, y, w, h, out, hints or {})
         return out
 
-    def _place(self, node: Node, x: int, y: int, w: int, h: int, out: dict) -> None:
+    def _place(self, node: Node, x: int, y: int, w: int, h: int, out: dict,
+               hints: dict) -> None:
         if node.kind == "leaf":
             out[node.panel_id] = (x, y, w, h)
             return
@@ -352,16 +401,44 @@ class LayoutTree:
                 cw = int(w * weight / total)
                 if child is node.children[-1]:
                     cw = x + w - cx
-                self._place(child, cx, y, max(1, cw), h, out)
+                self._place(child, cx, y, max(1, cw), h, out, hints)
                 cx += cw
         else:
+            heights = self._heights(node, h, total, hints)
             cy = y
-            for child, weight in zip(node.children, node.weights):
-                ch = int(h * weight / total)
-                if child is node.children[-1]:
-                    ch = y + h - cy
-                self._place(child, x, cy, w, max(1, ch), out)
+            for child, ch in zip(node.children, heights):
+                self._place(child, x, cy, w, max(1, ch), out, hints)
                 cy += ch
+
+    def _heights(self, node: Node, h: int, total: float, hints: dict) -> list:
+        """Высоты детей вертикального сплита с учётом height_hint."""
+        weights = node.weights
+        heights = [max(1, int(h * weight / total)) for weight in weights]
+        fixed: dict = {}
+        for i, child in enumerate(node.children):
+            if child.kind == "leaf" and child.panel_id in hints:
+                minimum, desired = hints[child.panel_id]
+                if desired is not None:
+                    fixed[i] = max(int(minimum), min(int(desired), h))
+        if fixed:
+            rest = [i for i in range(len(node.children)) if i not in fixed]
+            rest_h = h - sum(fixed.values())
+            if rest and rest_h >= len(rest):
+                wsum = sum(weights[i] for i in rest) or 1.0
+                for i in rest:
+                    heights[i] = max(1, int(rest_h * weights[i] / wsum))
+                for i, value in fixed.items():
+                    heights[i] = value
+            elif not rest:
+                for i, value in fixed.items():
+                    heights[i] = value
+        # Остаток от округлений добирает последний ребёнок без жёсткого hint.
+        diff = h - sum(heights)
+        if diff:
+            idx = next((i for i in range(len(heights) - 1, -1, -1)
+                        if i not in fixed), len(heights) - 1)
+            heights[idx] = max(1, heights[idx] + diff)
+        return heights
 
 
 # Встроенные панели с наполнением: регистрация — импортом модуля.

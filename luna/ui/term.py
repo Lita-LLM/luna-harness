@@ -430,6 +430,22 @@ def _windows_read(timeout, parser) -> list:
             kev = rec.Event.KeyEvent
             if not kev.bKeyDown:
                 continue
+            state = kev.dwControlKeyState
+            vk = kev.wVirtualKeyCode
+            if (state & 0x000F) and 0x41 <= vk <= 0x5A:
+                # Ctrl/Alt + буква: сочетание — по виртуальному коду, то есть
+                # по физической клавише, а не по раскладке (ЗАДАЧА-17):
+                # Alt+д русской раскладки приходит как Alt+L.
+                mods = set()
+                if state & 0x0010:
+                    mods.add("shift")
+                if state & 0x000C:
+                    mods.add("ctrl")
+                if state & 0x0003:
+                    mods.add("alt")
+                events.append(_keys.Key(chr(ord("a") + vk - 0x41),
+                                        mods=frozenset(mods)))
+                continue
             ch = kev.UnicodeChar
             if ch and ch != "\x00":
                 events.extend(parser.feed(ch.encode("utf-8")))

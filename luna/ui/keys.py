@@ -63,6 +63,21 @@ _TILDE = {1: "home", 2: "insert", 3: "delete", 4: "end", 5: "pageup", 6: "pagedo
 _PASTE_END = "\x1b[201~"
 
 
+def _physical_letter(name: str) -> str:
+    """Имя клавиши сочетания — по физическому месту (ЗАДАЧА-17).
+
+    В русской раскладке POSIX-терминал отдаёт Alt+д как букву «д», хотя
+    физически это клавиша L: сочетание — про место, а не про язык.
+    """
+    if len(name) == 1 and "\u0400" <= name <= "\u04ff":
+        from .layout import to_latin
+
+        lat = to_latin(name.lower())
+        if len(lat) == 1:
+            return lat
+    return name
+
+
 def _mods_from(param: int) -> frozenset:
     return frozenset(_MOD_BITS.get(param, ()))
 
@@ -152,12 +167,13 @@ class KeyParser:
             if name:
                 return Key(name), 3
             return Unknown(s[:3]), 3
-        # Alt + клавиша
+        # Alt + клавиша: имя — по физической клавише, не по раскладке
         sub = KeyParser()
         sub._buf = s[1:]
         ev, consumed = sub._parse_one(final)
         if isinstance(ev, Key):
-            return Key(ev.name, char=ev.char, mods=ev.mods | {"alt"}), 1 + consumed
+            return Key(_physical_letter(ev.name), char=ev.char,
+                       mods=ev.mods | {"alt"}), 1 + consumed
         return Unknown(s[:1 + max(consumed, 1)]), 1 + max(consumed, 1)
 
     def _parse_csi(self, final: bool):

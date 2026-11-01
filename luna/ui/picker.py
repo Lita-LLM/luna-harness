@@ -91,9 +91,14 @@ class Picker:
     def filtered(self) -> list:
         if not self.filter:
             return list(self.items)
-        needle = self.filter.lower()
+        # Поиск — и в чужой раскладке: «kbvbns» находит «Лимиты»
+        # (ui.layout, ЗАДАЧА-17); варианты включают саму строку.
+        from .layout import variants
+
+        needles = {v.lower() for v in variants(self.filter)}
         return [it for it in self.items
-                if needle in (it.title + " " + it.detail + " " + it.key).lower()]
+                if any(n in (it.title + " " + it.detail + " " + it.key).lower()
+                       for n in needles)]
 
     def current(self) -> PickerItem | None:
         items = self.filtered()

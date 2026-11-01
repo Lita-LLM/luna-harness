@@ -1,4 +1,4 @@
-"""Снимки экранов в HTML: `luna try snapshot <splash|render|main|chat|sessions|panels>`.
+"""Снимки экранов в HTML: `luna try snapshot <splash|render|main|chat|sessions|panels|help|tiles>`.
 
 Экраны рисуются без живого терминала: часы подменяются вымышленным
 временем, готовый буфер превращается в HTML-страницу — моноширинный
@@ -22,7 +22,8 @@ from ..ui import color as _color
 from ..ui import phrases
 from ..ui.screen import Buffer
 
-SCREENS = ("splash", "render", "main", "chat", "sessions", "panels")
+SCREENS = ("splash", "render", "main", "chat", "sessions", "panels",
+           "help", "tiles")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -236,6 +237,69 @@ def _render_panels(cols: int, rows: int, caps, settings) -> Buffer:
     return buf
 
 
+def _render_help(cols: int, rows: int, caps, settings) -> Buffer:
+    """Выбиралка команд /help поверх ленты (ЗАДАЧА-16)."""
+    from ..core.bus import EventBus
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # проявление — от вымышленного «сейчас»
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Почини сборку и поставь зависимости")
+    app.open_help_picker()
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
+    return buf
+
+
+def _render_tiles(cols: int, rows: int, caps, settings) -> Buffer:
+    """Новые тайлы ЗАДАЧИ-16: Контекст, MCP, Процессы, Диагностика."""
+    from ..core.bus import EventBus
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # проявление — от вымышленного «сейчас»
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Почини сборку и запусти тесты в фоне")
+    app.on_agent_event({"type": "turn.start", "turn": 1})
+    app.on_agent_event({"type": "agent.thinking",
+                        "text": "Сверяюсь со звёздами и смотрю, что уже есть под рукой. "})
+    app.on_agent_event({"type": "agent.text",
+                        "text": "Ставлю зависимость и гоняю тесты."})
+    app.on_agent_event({"type": "tool.call", "id": "t1", "name": "bash",
+                        "args": {"command": "python -m unittest -q"},
+                        "intent": "Прогоняю тесты"})
+    app.on_agent_event({"type": "tool.result", "id": "t1", "ok": True,
+                        "summary": "зелёные",
+                        "output": "Ran 312 tests in 4.1s\nOK\n"})
+    app.on_agent_event({"type": "tool.call", "id": "t2", "name": "bash",
+                        "args": {"command": "python server.py", "background": True},
+                        "intent": "Сервер в фоне"})
+    app.on_agent_event({"type": "tool.result", "id": "t2", "ok": True,
+                        "summary": "Фоновая команда запущена, pid 4242. "
+                                   "Вывод пишется в bg-4242.log",
+                        "output": "Фоновая команда запущена, pid 4242. "
+                                  "Вывод пишется в bg-4242.log"})
+    app.on_agent_event({"type": "tool.call", "id": "t3",
+                        "name": "mcp__files__read",
+                        "args": {"path": "notes.md"}, "intent": "Читаю через MCP"})
+    app.on_agent_event({"type": "tool.result", "id": "t3", "ok": True,
+                        "summary": "прочитано", "output": "заметки\n"})
+    app.on_agent_event({"type": "usage", "model": "fake-agent", "input": 4200,
+                        "output": 860, "cost": 0.0061, "context_pct": 47})
+    app.on_agent_event({"type": "agent.text.done"})
+    app.on_agent_event({"type": "turn.done", "turn": 1, "reason": "end"})
+    app.layout.open("context")
+    app.layout.open("mcp")
+    app.layout.open("processes")
+    app.layout.open("diag")
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
+    return buf
+
+
 def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -> list:
     """Список (подпись, буфер) для экрана name в моменты times (секунды от старта)."""
     from ..core.settings import Settings
@@ -259,6 +323,11 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
         return [("выбиралка сессий", _render_sessions(cols, rows, caps, settings))]
     if name == "panels":
         return [("панели открыты", _render_panels(cols, rows, caps, settings))]
+    if name == "help":
+        return [("выбиралка команд", _render_help(cols, rows, caps, settings))]
+    if name == "tiles":
+        return [("тайлы: контекст, mcp, процессы, диагностика",
+                 _render_tiles(cols, rows, caps, settings))]
     frames = []
     for at in times:
         if name == "splash":

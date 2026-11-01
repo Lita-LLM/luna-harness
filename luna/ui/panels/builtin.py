@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from ..disc import _smooth01
 from . import PanelContent, register_panel
@@ -64,6 +65,13 @@ class PanelData:
         self.nibbler: list[dict] = []    # {severity, text}
         self._calls: dict = {}           # id вызова → (имя, args, запись журнала)
         self._thinking = ""
+        # ЗАДАЧА-16: фоновые bash, диагностика, MCP-активность, время хода.
+        self.jobs: list[dict] = []       # {pid, command, log, ts} фоновых bash
+        self._bg_calls: dict = {}        # id вызова → команда (ждём pid из результата)
+        self.diag: dict | None = None    # {title, body, ok, ts} последнего линтера/тестов
+        self.mcp_stats: dict = {}        # сервер → {calls, errors}
+        self.turn_started: float | None = None
+        self.last_turn_sec: float | None = None
 
     # --- вход событий ---------------------------------------------------------
 
@@ -94,12 +102,17 @@ class PanelData:
         elif kind == "agent.thinking":
             self._thinking += str(ev.get("text", ""))
         elif kind == "turn.done":
+            if self.turn_started is not None:
+                self.last_turn_sec = max(0.0, time.time() - self.turn_started)
+                self.turn_started = None
             if self._thinking.strip():
                 self._push("thinking", "Рассуждения", self._thinking.strip())
             self._thinking = ""
         elif kind == "nibbler.say":
             self.nibbler.append({"severity": str(ev.get("severity", "minor")),
                                  "text": str(ev.get("text", ""))})
+        elif kind == "turn.start":
+            self.turn_started = time.time()
         limits = ev.get("limits")
         if isinstance(limits, dict) and limits:
             self.limits = dict(limits)
@@ -132,6 +145,15 @@ class PanelData:
             body = json.dumps(args, ensure_ascii=False, indent=1, default=str)
         entry = self._push("tool", title, body, ok=None)
         self._calls[str(ev.get("id", ""))] = (name, args, entry)
+        if name.startswith("mcp__"):
+            # Активность MCP-серверов для панели «MCP»: имя тула — mcp__сервер__тул.
+            parts = name.split("__")
+            if len(parts) > 1 and parts[1]:
+                stat = self.mcp_stats.setdefault(parts[1], {"calls": 0, "errors": 0})
+                stat["calls"] += 1
+        if name == "bash" and args.get("background"):
+            # Фоновый bash: pid и файл лога придут текстом результата.
+            self._bg_calls[str(ev.get("id", ""))] = str(args.get("command") or "")
         path = str(args.get("path") or "")
         if name == "read" and path:
             rec = self._file(path)
@@ -154,6 +176,12 @@ class PanelData:
         if call is None:
             return
         name, args, _entry = call
+        self._track_job(ev, name)
+        self._track_diag(name, args, ev)
+        if name.startswith("mcp__") and not ev.get("ok"):
+            parts = name.split("__")
+            if len(parts) > 1 and parts[1] in self.mcp_stats:
+                self.mcp_stats[parts[1]]["errors"] += 1
         path = str(args.get("path") or "")
         if name in ("edit", "write") and path:
             rec = self._file(path)
@@ -164,6 +192,38 @@ class PanelData:
                 rec["minus"] += counts[1]
             if out:
                 rec["diff"] = out
+
+    # Команды, чей вывод — «диагностика» проекта: тесты, линтеры, компиляторы.
+    _DIAG_HINTS = ("pytest", "unittest", "ruff", "mypy", "flake8", "eslint",
+                   "tsc", "cargo", "go build", "go vet", "npm run", "make",
+                   "gcc", "clang", "compileall", "pyright")
+
+    def _track_job(self, ev: dict, name: str) -> None:
+        """Фоновый bash завершился запуском: вытащить pid и лог из текста."""
+        call_id = str(ev.get("id", ""))
+        command = self._bg_calls.pop(call_id, None)
+        if command is None or name != "bash":
+            return
+        text = str(ev.get("output", "")) + " " + str(ev.get("summary", ""))
+        pid_match = re.search(r"pid\D{0,4}(\d+)", text)
+        log_match = re.search(r"(\S+\.log)\b", text)
+        self.jobs.append({
+            "pid": int(pid_match.group(1)) if pid_match else 0,
+            "command": command,
+            "log": log_match.group(1) if log_match else "",
+            "ts": time.time(),
+        })
+
+    def _track_diag(self, name: str, args: dict, ev: dict) -> None:
+        """Последний вывод линтера/компилятора/тестов — для панели «Диагностика»."""
+        if name != "bash":
+            return
+        command = str(args.get("command") or "")
+        if not any(hint in command for hint in self._DIAG_HINTS):
+            return
+        body = str(ev.get("output", "") or ev.get("summary", ""))
+        self.diag = {"title": command, "body": body[-6000:],
+                     "ok": bool(ev.get("ok")), "ts": time.time()}
 
     def _entry_of(self, call_id):
         call = self._calls.get(str(call_id))

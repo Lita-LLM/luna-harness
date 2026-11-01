@@ -296,7 +296,11 @@ class QueueAndModesTest(unittest.TestCase):
     def test_slash_commands(self):
         app = make_app()
         app.submit_text("/help")
-        self.assertTrue(any(e.kind == "help" for e in app.entries))
+        # ЗАДАЧА-16: /help — выбиралка с поиском, а не запись-простыня.
+        self.assertIsNotNone(app.picker)
+        self.assertEqual(app._picker_kind, "help")
+        app.handle_key(Key("esc"))
+        self.assertIsNone(app.picker)
         app.submit_text("/clear")
         self.assertTrue(all(e.kind == "notice" for e in app.entries))
         app.submit_text("/mode auto")
@@ -798,11 +802,15 @@ class CopyTest(unittest.TestCase):
         self.assertTrue(any("недоступен" in t for t in notes))
 
     def test_help_mentions_shift_drag(self):
+        # Справка переехала в выбиралку /help (ЗАДАЧА-16); текст справки —
+        # HELP_TEXT, собранный из реестра команд: подсказки в нём живут.
+        from luna.ui.chat import HELP_TEXT
+
         app = make_app()
         app.submit_text("/help")
-        help_entry = next(e for e in app.entries if e.kind == "help")
-        self.assertIn("Shift+протяжка", help_entry.text)
-        self.assertIn("/copy err", help_entry.text)
+        self.assertIsNotNone(app.picker)
+        self.assertIn("Shift+протяжка", HELP_TEXT)
+        self.assertIn("/copy err", HELP_TEXT)
 
 
 class ChatSnapshotTest(unittest.TestCase):

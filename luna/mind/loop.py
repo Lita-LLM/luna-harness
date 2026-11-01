@@ -198,14 +198,43 @@ class Agent:
                       "input": result.usage.input, "output": result.usage.output,
                       "cost": round(cost, 6), "context_pct": round(pct, 2)})
 
-    # --- системный промпт ---
+    # --- история и системный промпт ---
+
+    def load_history(self, messages) -> None:
+        """Принять историю прошлой сессии (продолжение, luna --continue).
+
+        Сообщения — как их собрал core.sessions.build_history: без
+        системного промпта, его _ensure_system_prompt вставит первым.
+        Счётчик ходов продолжается с числа реплик пользователя.
+        """
+        self._history = [dict(m) for m in messages]
+        self._turn = sum(1 for m in self._history if m.get("role") == "user")
+        self._queue = []
+        self._last_sig = ""
+        self._same_count = 0
+        self._prompt_sig = None  # промпт вставится в новую историю заново
 
     def _current_prompt_sig(self) -> tuple:
-        """От чего зависит промпт вне истории: режим и выбранная манера."""
+        """От чего зависит промпт вне истории: режим, манера и её текст.
+
+        Хэш текста — чтобы правка файла активной манеры (тулом или в
+        редакторе из чата) подхватывалась со следующего хода, а не только
+        переключение на другую манеру.
+        """
         manner = ""
+        digest = ""
         if self.settings is not None:
             manner = str(self.settings.get("agent.manner", "") or "")
-        return (self.mode, manner)
+            if manner:
+                try:
+                    from .manners import active
+
+                    entry = active(self.settings, self.cwd)
+                    if entry is not None:
+                        digest = str(hash(entry["text"]))
+                except Exception:  # noqa: BLE001 — подпись не должна ронять ход
+                    digest = ""
+        return (self.mode, manner, digest)
 
     def _ensure_system_prompt(self) -> None:
         """Собрать промпт к первому ходу; дальше — пересобрать, если сменились

@@ -23,12 +23,16 @@ class AgentSource:
         self._worker: threading.Thread | None = None
         self._lock = threading.Lock()
         self._waits: dict[str, tuple[threading.Event, list]] = {}
+        self._pending_history: list | None = None
 
     # --- интерфейс источника ------------------------------------------------
 
     def start(self) -> None:
         if self._agent is None:
             self._agent = self._build_agent()
+        if self._pending_history is not None:
+            self._agent.load_history(self._pending_history)
+            self._pending_history = None
         self._agent.listen(self._events.put)
         model = getattr(self._agent, "_model_label", lambda: "")()
         if not model:
@@ -63,6 +67,31 @@ class AgentSource:
                 self._agent.handle_command(cmd)  # во время хода — в очередь агента
                 return
             self._run_in_worker(cmd)
+
+    def load_history(self, messages) -> None:
+        """История прошлой сессии для агента (продолжение и переключение).
+
+        Агент ещё не построен — запомнить и отдать при start(). Агент жив —
+        пересобрать его: ход старой сессии мог ещё крутиться в потоке, и
+        подменять историю под ним нельзя. Очередь событий при пересборке
+        очищается: события прошлой сессии новой ленте не нужны.
+        """
+        self._pending_history = [dict(m) for m in messages]
+        if self._agent is None:
+            return
+        self._agent.interrupt()
+        self._release_all({"decision": "stop", "text": ""})
+        if self._busy():
+            self._worker.join(timeout=2.0)
+        while True:
+            try:
+                self._events.get_nowait()
+            except queue.Empty:
+                break
+        self._agent = self._build_agent()
+        self._agent.load_history(self._pending_history)
+        self._pending_history = None
+        self._agent.listen(self._events.put)
 
     # --- внутреннее ---------------------------------------------------------
 

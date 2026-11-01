@@ -30,7 +30,11 @@ MAX_NAME = 80
 MAX_DESCRIPTION = 400
 ID_RULE = re.compile(r"[a-z0-9_-]{1,40}")
 
-SOURCE_NAMES = {"builtin": "встроенная", "home": "своя (LUNA_HOME)", "project": "своя (проект)"}
+SOURCE_NAMES = {"builtin": "встроенная", "home": "своя", "project": "своя (проект)"}
+
+TEMPLATE_TEXT = """Говори спокойно и по делу. Здесь опиши свою манеру: тон, длину ответов, что можно и чего не надо.
+
+Например: короткие фразы, без шуток и без лишних извинений; сначала результат, потом пояснения."""
 
 FRAME = """# Манера речи: «{name}»
 
@@ -242,3 +246,30 @@ def edit(settings, query: str, cwd=None, *, name=None, description=None, text=No
     target.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(target, render_manner(clean["name"], clean["description"], clean["text"]))
     return get(settings, entry["id"], cwd)
+
+
+def create_from_template(settings, mid: str, copy_from: str = "") -> dict:
+    """Новая своя манера из шаблона или копией существующей (luna manners new).
+
+    Папка своих манер создаётся здесь же, по требованию: до первой своей
+    манеры её может не существовать вовсе.
+    """
+    if copy_from:
+        src = resolve(settings, copy_from)
+        return create(settings, mid, src["name"] + " (копия)",
+                      src["description"], src["text"])
+    return create(settings, mid, mid, "Своя манера — отредактируй текст под себя",
+                  TEMPLATE_TEXT)
+
+
+def editable_path(settings, query: str, cwd=None) -> Path:
+    """Файл, который можно открыть в редакторе и править руками.
+
+    Своя манера правится на месте. Встроенную трогать нельзя — сначала
+    создаётся своя копия поверх неё (как в edit), открывается уже копия.
+    """
+    entry = resolve(settings, query, cwd)
+    if entry["source"] in ("home", "project"):
+        return Path(entry["path"])
+    edit(settings, query, cwd)
+    return home_dir(settings) / (entry["id"] + ".md")

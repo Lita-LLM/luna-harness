@@ -28,6 +28,7 @@ from .editor import TextEditor
 from .keys import Key, Mouse, Paste, Resize
 from .markdown import Span, render_markdown, wrap_spans, wrap_text
 from .panels import LayoutTree, create_panel
+from .picker import PICKER_BG, SELECT_BG, Picker, manners_items, session_items
 from .screen import Buffer, Screen
 from .term import Terminal
 from .width import char_width, str_width
@@ -65,7 +66,9 @@ HELP_TEXT = """Команды и клавиши Луны
 /mode [режим] — режим по кругу или по имени (normal plan review auto yolo)
 /clear — очистить ленту · /help — эта справка · /exit — выход
 /copy — скопировать последний ответ · /copy err — последнюю ошибку целиком
-/sessions — сессии этого каталога на диске (LUNA_HOME/sessions)
+/sessions — выбиралка сессий на диске: Enter — переключиться на сессию
+/new — начать новую сессию · /rename <имя> — имя текущей сессии
+/manners — выбиралка манер речи: Enter — включить, n — новая, e — открыть в редакторе
 Выделение мышью: протяжка по ленте копирует текст, двойной клик — слово
 Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
 /panels или Ctrl+T — панель плана (todo) · /layout save|load|list <имя> — раскладки
@@ -168,7 +171,7 @@ class ChatApp:
 
     def __init__(self, bus=None, settings=None, scheduler=None,
                  glyph_mode="emoji", source=None, cwd=None, trap=None,
-                 copy_hook=None, journal=None):
+                 copy_hook=None, journal=None, data=None):
         self.bus = bus or EventBus()
         self.settings = settings or Settings()
         self.scheduler = scheduler or Scheduler()
@@ -176,6 +179,15 @@ class ChatApp:
         self.cwd = cwd or os.getcwd()
         self.trap = trap  # ErrorTrap полноэкранного сеанса: ошибки потоков — в ленту
         self.journal = journal  # SessionJournal: события и команды на диск (п. 5)
+        self._data = data  # DataDir каталога данных (по умолчанию — настоящий)
+        # Выбиралка поверх ленты (/sessions, /manners) и её дела (ЗАДАЧА-10):
+        self.picker: Picker | None = None
+        self._picker_kind = ""
+        self.edit_request = None      # путь файла, который run_chat откроет в редакторе
+        self._edit_manner_id = ""
+        self._pending_switch = None   # путь сессии: переключиться по концу хода
+        self._pending_new = False     # новая сессия по концу хода
+        self._want_journal = False    # журнал создать при закрытии выбиралки (--resume)
         self._restoring = False
         self.source = source if source is not None else create_source(self.settings)
         self.editor = TextEditor()
@@ -287,6 +299,249 @@ class ChatApp:
             handler(cmd)
         self.bus.publish({"type": "agent.command", "command": dict(cmd)})
         self.poll_source()
+
+    # --- сессии: память, переключение, новая (ЗАДАЧА-10) -------------------------
+
+    def _data_dir(self) -> DataDir:
+        if self._data is None:
+            self._data = DataDir()
+        return self._data
+
+    def attach_history(self, records: list) -> None:
+        """Отдать источнику историю прошлой сессии из журнала.
+
+        Память модели, а не только лента: build_history собирает реплики,
+        ответы, вызовы и результаты тулов; источник без load_history
+        (старые подмены) просто пропускается.
+        """
+        from ..core.sessions import build_history
+
+        loader = getattr(self.source, "load_history", None)
+        if callable(loader):
+            loader(build_history(records))
+
+    def switch_session(self, path) -> bool:
+        """Переключиться на сессию с диска: лента, память и журнал — её.
+
+        Идущий ход перед этим прерывается обычной командой interrupt
+        (текущая сессия уже на диске). Дальше пишем в файл выбранной.
+        """
+        if self.journal is not None and str(self.journal.path) == str(path):
+            self._add(Entry("notice", text="Это текущая сессия."))
+            return False
+        if self.busy:
+            # Флаг — до interrupt: turn.done у фальшивого источника приходит
+            # синхронно внутри send_command и сразу выполняет переключение.
+            self._pending_switch = str(path)
+            self.send_command({"type": "interrupt"})
+            if self._pending_switch is not None:
+                self._add(Entry("notice", text="Прерываю ход — и переключаюсь на выбранную сессию."))
+            return True
+        return self._do_switch(path)
+
+    def _do_switch(self, path) -> bool:
+        from ..core.sessions import SessionJournal, load_records
+
+        records = load_records(path)
+        if not records:
+            self._add(Entry("notice", text="Не выходит прочитать сессию: " + str(path)))
+            return False
+        old = self.journal
+        journal, _records = SessionJournal.resume(self._data_dir(), path)
+        self.journal = journal
+        self._want_journal = False
+        if old is not None:
+            old.close()
+        self.entries.clear()
+        self.queue.clear()
+        self.todos = []
+        self.context_pct = 0
+        self.cost = 0.0
+        self.restore(records)
+        self.attach_history(records)
+        # Режим восстановленной сессии — и агенту (mode.changed из журнала
+        # обновил только экран).
+        self.send_command({"type": "mode.set", "mode": self.mode})
+        title = ""
+        started = 0.0
+        for rec in records:
+            if rec.get("kind") == "title":
+                title = str(rec.get("title") or title)
+            elif rec.get("kind") == "meta":
+                started = float(rec.get("started") or 0)
+        if title:
+            label = "«" + title + "»"
+        elif started:
+            label = "от " + time.strftime("%d.%m %H:%M", time.localtime(started))
+        else:
+            label = ""
+        self._add(Entry("notice", text="Сессия переключена " + label
+                                       + " — модель помнит разговор."))
+        return True
+
+    def start_new_session(self) -> bool:
+        """Новая сессия, не выходя из чата (/new)."""
+        if not self.settings.get("chat.session_log"):
+            self._add(Entry("notice", text="Журнал сессий выключен настройкой "
+                                           "chat.session_log — новая сессия неотличима."))
+            return False
+        if self.busy:
+            self._pending_new = True
+            self.send_command({"type": "interrupt"})
+            if self._pending_new:
+                self._add(Entry("notice", text="Прерываю ход — и начинаю новую сессию."))
+            return True
+        return self._do_new_session()
+
+    def _do_new_session(self) -> bool:
+        from ..core.sessions import SessionJournal
+
+        old = self.journal
+        self.journal = SessionJournal.create(self._data_dir(), self.cwd)
+        if old is not None:
+            old.close()
+        self.entries.clear()
+        self.queue.clear()
+        self.todos = []
+        self.context_pct = 0
+        self.cost = 0.0
+        self.busy = False
+        loader = getattr(self.source, "load_history", None)
+        if callable(loader):
+            loader([])  # память модели — с чистого листа
+        self._add(Entry("notice", text="Новая сессия. Прошлая осталась на диске — "
+                                       "/sessions вернёт к ней."))
+        return True
+
+    def rename_session(self, title: str) -> None:
+        """/rename <имя> — имя текущей сессии, в журнал и в выбиралку."""
+        title = title.strip()
+        if not title:
+            self._add(Entry("notice", text="Нужно имя: /rename <имя>"))
+            return
+        if self.journal is None:
+            self._add(Entry("notice", text="Журнал выключен — имя сессии хранить негде."))
+            return
+        self.journal.set_title(title)
+        self._add(Entry("notice", text="Сессия теперь называется «" + title + "»."))
+
+    # --- выбиралка: сессии и манеры (ЗАДАЧА-10) --------------------------------
+
+    def open_sessions_picker(self) -> None:
+        """/sessions и luna --resume: выбиралка сессий поверх ленты."""
+        from ..core.sessions import list_sessions
+
+        scope = str(self.settings.get("chat.sessions_scope", "all") or "all")
+        sessions = list_sessions(self._data_dir())
+        if scope == "cwd":
+            sessions = [s for s in sessions if s["cwd"] == self.cwd]
+        current = str(self.journal.path) if self.journal is not None else None
+        hint = ("Enter — переключиться · Esc — закрыть · каталог: "
+                + str(self._data_dir().sessions))
+        self.picker = Picker("Сессии", session_items(sessions, self.cwd, current),
+                             hint=hint, preview_lines=0, now=self._clock())
+        self._picker_kind = "sessions"
+        self._last_change = self._clock()
+
+    def open_manners_picker(self) -> None:
+        """/manners: выбиралка манер с превью, новая и редактор — клавишами."""
+        hint = ("Enter — включить · n — новая · N — копия выбранной · "
+                "e — открыть в редакторе · Esc — закрыть")
+        self.picker = Picker("Манеры речи", manners_items(self.settings, self.cwd),
+                             hint=hint, extra={"n": "new", "N": "copy", "e": "edit"},
+                             now=self._clock())
+        self._picker_kind = "manners"
+        self._last_change = self._clock()
+
+    def _picker_key(self, key: Key) -> None:
+        picker = self.picker
+        if picker is None:
+            return
+        self._last_change = self._clock()
+        action = picker.handle_key(key)
+        if action is None:
+            return
+        kind = action[0]
+        if kind == "close":
+            self.picker = None
+            if self.journal is None and self._want_journal:
+                # --resume без выбора: обычная новая сессия с журналом.
+                from ..core.sessions import SessionJournal
+
+                self.journal = SessionJournal.create(self._data_dir(), self.cwd)
+                self._want_journal = False
+            return
+        if self._picker_kind == "sessions":
+            self._sessions_picker_action(action)
+        elif self._picker_kind == "manners":
+            self._manners_picker_action(action)
+
+    def _sessions_picker_action(self, action) -> None:
+        if action[0] == "confirmed":
+            inner = action[1]
+            if inner and inner[0] == "pick":
+                self.picker = None
+                self.switch_session(inner[1].payload["path"])
+            return
+        if action[0] != "pick" or action[1] is None:
+            return
+        item = action[1]
+        if self.busy:
+            self.picker.ask_confirm(
+                "Идёт ход. Прервать его и переключиться на эту сессию?",
+                ("pick", item))
+            return
+        self.picker = None
+        self.switch_session(item.payload["path"])
+
+    def _manners_picker_action(self, action) -> None:
+        from ..core.errors import HumanError
+        from ..mind import manners
+
+        picker = self.picker
+        try:
+            if action[0] == "pick" and action[1] is not None:
+                entry = manners.choose(self.settings, action[1].key, self.cwd)
+                self.picker = None
+                name = entry["name"] if entry else ""
+                self._add(Entry("notice", text="Манера включена: «" + name
+                                               + "» — со следующего хода."))
+            elif action[0] == "action" and action[1] == "new":
+                picker.ask_input("Новая манера, имя латиницей: ", ("new", None))
+            elif action[0] == "action" and action[1] == "copy":
+                item = action[2]
+                if item is not None:
+                    picker.ask_input("Копия манеры " + item.key + ", имя латиницей: ",
+                                     ("copy", item.key))
+            elif action[0] == "input":
+                text, ctx = action[1], action[2]
+                if text and ctx is not None:
+                    entry = manners.create_from_template(
+                        self.settings, text, ctx[1] or "")
+                    picker.set_items(manners_items(self.settings, self.cwd))
+                    self._add(Entry("notice", text="Манера «" + entry["name"]
+                                                   + "» создана: " + str(entry["path"])
+                                                   + " — e откроет её в редакторе."))
+            elif action[0] == "action" and action[1] == "edit":
+                item = action[2]
+                if item is not None:
+                    path = manners.editable_path(self.settings, item.key, self.cwd)
+                    self._edit_manner_id = item.key
+                    self.edit_request = path  # run_chat поставит терминал на паузу
+        except HumanError as err:
+            text = err.title
+            if err.hint:
+                text += " " + err.hint
+            self._add(Entry("notice", text=text))
+
+    def after_edit(self, path) -> None:
+        """run_chat вернулся из внешнего редактора: подхватить правки."""
+        if self._picker_kind == "manners" and self.picker is not None:
+            self.picker.set_items(manners_items(self.settings, self.cwd))
+        self._add(Entry("notice", text="Файл обновлён из редактора: " + str(path)
+                                       + " — манера подхватится со следующего хода."))
+        self._edit_manner_id = ""
+        self._last_change = self._clock()
 
     def needs_frame(self, now: float) -> bool:
         """Кадры нужны, пока идёт ход, есть события или что-то затухает."""
@@ -417,7 +672,13 @@ class ChatApp:
             self.busy = False
             for entry in self.entries:
                 entry.streaming = False
-            if self._after_interrupt:
+            if self._pending_switch is not None:
+                path, self._pending_switch = self._pending_switch, None
+                self._do_switch(path)
+            elif self._pending_new:
+                self._pending_new = False
+                self._do_new_session()
+            elif self._after_interrupt:
                 text, self._after_interrupt = self._after_interrupt, ""
                 self._send_user_message(text)
             elif self.queue:
@@ -478,7 +739,13 @@ class ChatApp:
         elif cmd == "/copy":
             self._copy_command(parts[1:])
         elif cmd == "/sessions":
-            self._sessions_command()
+            self.open_sessions_picker()
+        elif cmd == "/manners":
+            self.open_manners_picker()
+        elif cmd == "/new":
+            self.start_new_session()
+        elif cmd == "/rename":
+            self.rename_session(text[len("/rename"):])
         elif cmd in ("/panels", "/todo"):
             self.toggle_panel("todo")
         elif cmd == "/layout":
@@ -505,22 +772,6 @@ class ChatApp:
             self._add(Entry("notice", text="Сохранённые раскладки: " + names))
         else:
             self._add(Entry("notice", text="Нужно: /layout save|load|list <имя>"))
-
-    def _sessions_command(self) -> None:
-        """/sessions — сессии на диске, свежие сверху; этот каталог помечен."""
-        from ..core.sessions import list_sessions
-
-        items = list_sessions(DataDir())
-        if not items:
-            self._add(Entry("notice", text="Сессий на диске пока нет."))
-            return
-        lines = ["Сессии на диске (свежие сверху, «·» — этот каталог):"]
-        for s in items[:10]:
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["started"]))
-            mark = "· " if s["cwd"] == self.cwd else "  "
-            lines.append(mark + when + " · записей: " + str(s["records"])
-                         + " · " + s["cwd"])
-        self._add(Entry("help", text="\n".join(lines)))
 
     def _copy_command(self, args: list) -> None:
         """/copy — последний ответ агента; /copy err — последняя ошибка целиком."""
@@ -652,6 +903,9 @@ class ChatApp:
         ask = self.pending_ask
         if ask is not None:
             self._ask_key(key, ask)
+            return
+        if self.picker is not None:
+            self._picker_key(key)
             return
         if self.panel_focus:
             self._panel_key(key)
@@ -802,6 +1056,8 @@ class ChatApp:
         self._update_completions()
 
     def handle_mouse(self, mouse: Mouse) -> None:
+        if self.picker is not None:
+            return  # под выбиралкой лента мышью не выделяется
         if mouse.kind == "wheel_up":
             self.scroll = min(self.scroll + 3, 100000)
         elif mouse.kind == "wheel_down":
@@ -1177,6 +1433,27 @@ class ChatApp:
                     buf.text(px + 1, row, visual, fg=_color.SILVER, bg=PANEL_BG)
                     row += 1
 
+    _PICKER_STYLES = {"title": "bold", "text": "text", "dim": "dim",
+                      "accent": "cyan", "mark": "amber", "hint": "dim"}
+
+    def _draw_picker(self, buf: Buffer, width: int, height: int, now: float) -> None:
+        """Выбиралка поверх ленты: мягкий блок без рамок, появление затуханием."""
+        picker = self.picker
+        if picker is None:
+            return
+        alpha = 1.0
+        if self.settings.get("ui.animations"):
+            alpha = ease_in_out((now - picker.born) / 0.25)
+        lines, sel_row = picker.render_block(max(10, width - 2), max(3, height - 1))
+        for row, spans in enumerate(lines[:height]):
+            bg = SELECT_BG if row == sel_row else PICKER_BG
+            buf.fill_rect(0, row, width, 1, " ", bg=bg)
+            painted = self._paint([(text, self._PICKER_STYLES.get(role, "text"))
+                                   for text, role in spans], alpha)
+            x = 1
+            for text, fg, attrs in painted:
+                x += buf.text(x, row, text, fg=fg, bg=bg, attrs=attrs)
+
     def _status_line(self, buf: Buffer, y: int, cols: int, now: float) -> None:
         buf.fill_rect(0, y, cols, 1, " ", bg=STATUS_BG)
         phase = _moon.context_phase(self.context_pct, self.glyph_mode)
@@ -1256,6 +1533,9 @@ class ChatApp:
             buf.text(0, iy + i, prefix, fg=fg, bg=_color.SPACE_BG, attrs=_color.BOLD)
             buf.text(2, iy + i, line, fg=_color.SILVER, bg=_color.SPACE_BG, attrs=attrs)
         self._status_line(buf, rows - 1, cols, now)
+        if self.picker is not None:
+            self._draw_picker(buf, chat_w, feed_h, now)
+            return buf, None
         if guard is not None and not self.guard_editing:
             return buf, None
         if ask is not None and not self.editor.text:
@@ -1271,29 +1551,44 @@ def _copy_to_clipboard(text: str, term: Terminal) -> str:
     return copy_text(text, write=term.write)
 
 
-def _open_session(settings, data, continue_last: bool, fake: bool):
-    """(журнал, записи для восстановления) сеанса чата (п. 5).
+def _open_session(settings, data, continue_last: bool, fake: bool,
+                  resume: str | None = None):
+    """(журнал, записи, открыть_выбиралку, пометка) сеанса чата.
 
     Журнал ведётся, если включён настройкой chat.session_log; витрина
     `luna try chat` (фальшивый агент) историю не пишет. При --continue
-    берём последнюю сессию этого каталога и дописываем в тот же файл.
+    берём последнюю сессию этого каталога и дописываем в тот же файл;
+    resume — сессия по id/префиксу (--resume <id>) или выбиралка до чата
+    (resume == ""). Не нашлась — новая сессия и пометка об этом.
     """
-    if fake and not continue_last:
-        return None, []
+    if fake and not continue_last and resume is None:
+        return None, [], False, None
     if not settings.get("chat.session_log"):
-        return None, []
-    from ..core.sessions import SessionJournal, find_last
+        return None, [], False, None
+    from ..core.sessions import SessionJournal, find_by_prefix, find_last
 
     cwd = os.getcwd()
+    if resume:
+        found = find_by_prefix(data, resume)
+        if found is not None:
+            journal, records = SessionJournal.resume(data, found["path"])
+            return journal, records, False, None
+        return (SessionJournal.create(data, cwd), [], False,
+                "Сессии с id «" + resume + "» на диске нет — начинаю новую.")
+    if resume == "":
+        # Выбиралка до чата: журнала пока нет (пустой файл не плодим);
+        # ChatApp создаст его, когда выбиралку закроют без выбора.
+        return None, [], True, None
     if continue_last:
         path = find_last(data, cwd)
         if path is not None:
-            return SessionJournal.resume(data, path)
-    return SessionJournal.create(data, cwd), []
+            journal, records = SessionJournal.resume(data, path)
+            return journal, records, False, None
+    return SessionJournal.create(data, cwd), [], False, None
 
 
 def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
-             continue_last: bool = False) -> int:
+             continue_last: bool = False, resume: str | None = None) -> int:
     """Полноэкранный чат: терминал, цикл ввода, источник событий."""
     from .errtrap import ErrorTrap
     from .splash import play_splash
@@ -1309,10 +1604,12 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
     # Пока экран наш, ошибки потоков и stderr уходят в лог, а не поверх
     # ленты (ЗАДАЧА-06, п. 2): лог — LUNA_HOME/logs/chat-<время>.log.
     trap = ErrorTrap(data.logs / ("chat-" + time.strftime("%Y%m%d-%H%M%S") + ".log"))
-    journal, restored = _open_session(settings, data, continue_last, fake)
+    journal, restored, picker_first, open_note = _open_session(
+        settings, data, continue_last, fake, resume)
     with RunLock(data.root):
         with term:
             trap.install()
+            app = None
             try:
                 cols, rows = term.size()
                 screen = Screen(term.write, term.caps.color_level, cols, rows)
@@ -1321,10 +1618,16 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                 app = ChatApp(bus, settings, Scheduler(), term.caps.glyph_mode,
                               source=create_source(settings, fake=fake), trap=trap,
                               copy_hook=lambda text: _copy_to_clipboard(text, term),
-                              journal=journal)
+                              journal=journal, data=data)
                 if restored:
                     app.restore(restored)
-                elif continue_last:
+                    app.attach_history(restored)
+                elif picker_first:
+                    app._want_journal = True
+                    app.open_sessions_picker()
+                elif open_note:
+                    app._add(Entry("notice", text=open_note))
+                elif continue_last or resume:
                     if journal is None:
                         note = "Журнал сессий выключен настройкой chat.session_log."
                     else:
@@ -1346,11 +1649,42 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                         elif isinstance(ev, Resize):
                             screen.resize(ev.cols, ev.rows)
                     app.poll_source()
+                    if app.edit_request is not None:
+                        _run_external_editor(app, term, screen, trap)
                     buf, cursor = app.draw(size[0], size[1], time.monotonic())
                     screen.present(buf, cursor=cursor)
             finally:
                 trap.uninstall()
-                if journal is not None:
-                    journal.close()
+                current = app.journal if app is not None else journal
+                if current is not None:
+                    current.close()
     print(phrases.event_phrase("end") or "Орёл сел.")
     return 0
+
+
+def _run_external_editor(app: ChatApp, term: Terminal, screen: Screen,
+                         trap) -> None:
+    """Пауза чата ради внешнего редактора (манера по клавише e в выбиралке).
+
+    Терминал и ловушка ошибок отдаются редактору как обычному миру;
+    после — полноэкранный режим заново, кадр перерисовывается целиком,
+    правки подхватывает app.after_edit.
+    """
+    from .extedit import run_editor
+
+    path = app.edit_request
+    app.edit_request = None
+    error = None
+    trap.uninstall()
+    term.suspend()
+    try:
+        run_editor(path)
+    except OSError as exc:
+        error = "Не вышло открыть редактор: " + str(exc)
+    finally:
+        term.resume()
+        trap.install()
+        screen.resize(*term.size())  # _prev сброшен — кадр целиком
+    app.after_edit(path)
+    if error:
+        app._add(Entry("error", text=error))

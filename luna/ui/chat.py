@@ -66,6 +66,8 @@ HELP_TEXT = """Команды и клавиши Луны
 /clear — очистить ленту · /help — эта справка · /exit — выход
 /copy — скопировать последний ответ · /copy err — последнюю ошибку целиком
 /sessions — сессии этого каталога на диске (LUNA_HOME/sessions)
+/undo — откатить последний ход · /rewind [N] [files|talk|both] — откат к ходу N · /redo — вернуть откат
+/compact [что сохранить] — сжать контекст («прилив»: старые ходы заменит сводка)
 Выделение мышью: протяжка по ленте копирует текст, двойной клик — слово
 Не выделяется? В большинстве терминалов Shift+протяжка выделяет в обход приложения
 /panels или Ctrl+T — панель плана (todo) · /layout save|load|list <имя> — раскладки
@@ -479,6 +481,15 @@ class ChatApp:
             self._copy_command(parts[1:])
         elif cmd == "/sessions":
             self._sessions_command()
+        elif cmd == "/undo":
+            self.send_command({"type": "undo"})
+        elif cmd == "/rewind":
+            self._rewind_command(parts[1:])
+        elif cmd == "/redo":
+            self.send_command({"type": "redo"})
+        elif cmd == "/compact":
+            hint = text[len("/compact"):].strip()
+            self.send_command({"type": "compact", "hint": hint})
         elif cmd in ("/panels", "/todo"):
             self.toggle_panel("todo")
         elif cmd == "/layout":
@@ -505,6 +516,18 @@ class ChatApp:
             self._add(Entry("notice", text="Сохранённые раскладки: " + names))
         else:
             self._add(Entry("notice", text="Нужно: /layout save|load|list <имя>"))
+
+    def _rewind_command(self, args: list) -> None:
+        """/rewind [N] [files|talk|both] — список ходов или откат к ходу N."""
+        scopes = {"files": "files", "talk": "talk", "both": "both",
+                  "файлы": "files", "разговор": "talk", "оба": "both"}
+        command: dict = {"type": "rewind"}
+        for arg in args:
+            if arg.isdigit():
+                command["turn"] = int(arg)
+            elif arg in scopes:
+                command["scope"] = scopes[arg]
+        self.send_command(command)
 
     def _sessions_command(self) -> None:
         """/sessions — сессии на диске, свежие сверху; этот каталог помечен."""

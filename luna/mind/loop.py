@@ -55,6 +55,28 @@ class Agent:
         self._total_out = 0
         self._last_sig = ""
         self._same_count = 0
+        # Откат и сжатие (ЗАДАЧА-13): отметки ходов в истории — пары
+        # (номер хода, индекс его сообщения user); журнал сессии может
+        # поставить клиент (agent.journal = SessionJournal), тогда откат
+        # и сжатие пишут в него записи своих видов (kind: rewind/compact).
+        self._context_pct = 0.0
+        self._turn_marks: list = []
+        self._redo_stack: list = []
+        self._compact_pending: str | None = None
+        self.journal = None
+        self._checkpoints = self._make_checkpoints()
+        self.ctx.checkpoint = self._checkpoints
+
+    def _make_checkpoints(self):
+        """Стор чекпоинтов сессии; None — выключен настройкой или сломался."""
+        if self.settings is not None and not self.settings.get("checkpoints.enabled", True):
+            return None
+        try:
+            from ..core.checkpoints import CheckpointStore
+
+            return CheckpointStore(self.session_id, cwd=self.cwd, settings=self.settings)
+        except Exception:  # noqa: BLE001 — чекпоинты не должны мешать агенту жить
+            return None
 
     # --- события ---
 
@@ -92,6 +114,14 @@ class Agent:
             return None
         if kind == "shell":
             return self.run_shell(command.get("command", ""))
+        if kind == "undo":
+            return self.undo()
+        if kind == "rewind":
+            return self.rewind_command(command.get("turn"), command.get("scope", "both"))
+        if kind == "redo":
+            return self.redo()
+        if kind == "compact":
+            return self.compact_now(str(command.get("hint", "") or ""))
         return None
 
     def set_mode(self, mode: str) -> None:
@@ -111,6 +141,8 @@ class Agent:
         tool = self.tools.get("bash")
         if tool is None:
             return None
+        if self._checkpoints is not None:
+            self._checkpoints.begin_turn(self._turn)
         return self._execute_tool(tool, {"command": command}, "команда человека мимо модели",
                                   call_id="shell-" + uuid.uuid4().hex[:6])
 
@@ -194,6 +226,7 @@ class Agent:
             price_out = float(self.settings.get("model.price_out", 0.0) or 0.0)
         cost = (self._total_in * price_in + self._total_out * price_out) / 1_000_000.0
         pct = min(100.0, 100.0 * result.usage.input / context_tokens) if context_tokens else 0.0
+        self._context_pct = pct
         self.publish({"type": "usage", "model": result.model or self._model_label(),
                       "input": result.usage.input, "output": result.usage.output,
                       "cost": round(cost, 6), "context_pct": round(pct, 2)})
@@ -226,6 +259,9 @@ class Agent:
         self._interrupt.clear()
         self._turn += 1
         turn = self._turn
+        self._redo_stack.clear()  # новый ход хоронит отмену отката
+        if self._checkpoints is not None:
+            self._checkpoints.begin_turn(turn)
         if not self._started:
             try:
                 self._ensure_system_prompt()
@@ -255,6 +291,7 @@ class Agent:
                     parts.append({"type": "image", "data": item["data"],
                                   "media_type": item.get("media_type", "image/png")})
             user_msg = {"role": "user", "content": parts}
+        self._turn_marks.append((turn, len(self._history)))
         self._history.append(user_msg)
         max_steps = 30
         if self.settings is not None:
@@ -270,6 +307,7 @@ class Agent:
             reason = "error"
         self.publish({"type": "turn.done", "turn": turn, "reason": reason})
         self._active = False
+        self._after_turn()
         return reason
 
     def _steps(self, max_steps: int) -> str:
@@ -358,7 +396,14 @@ class Agent:
             if decision.decision == "deny":
                 self._deny(call_id, tool.name, decision.reason)
                 return None
+        if tool.name == "bash" and self._checkpoints is not None:
+            self._checkpoints.note_bash(self.cwd)  # git-пометка хода до команды
         result = tool.run(self.ctx, final_args)
+        if result.ok and tool.name in ("write", "edit") and self._checkpoints is not None:
+            raw = final_args.get("path", "")
+            path = Path(raw) if raw else None
+            if path is not None:
+                self._checkpoints.note_after(path if path.is_absolute() else self.cwd / path)
         limit = 8000
         if self.settings is not None:
             limit = int(self.settings.get("tools.output_limit", 8000) or 8000)
@@ -416,3 +461,296 @@ class Agent:
         if choice == "stop":
             return ("deny", "human-stop", "Человек отменил весь ход", args)
         return ("deny", "human", "Человек отказал", args)
+
+    # --- откат: /undo, /rewind, /redo (ЗАДАЧА-13) ---
+
+    def _journal(self, kind: str, data: dict) -> None:
+        """Запись своего вида в журнал сессии, если клиент его поставил."""
+        if self.journal is not None:
+            try:
+                self.journal.append({"kind": kind, "data": data, "ts": time.time()})
+            except Exception:  # noqa: BLE001 — журнал не роняет откат
+                pass
+
+    def turns_overview(self) -> list:
+        """[(номер хода, первая строка сообщения человека)] — список для /rewind."""
+        out = []
+        for turn, idx in self._turn_marks:
+            text = ""
+            if 0 <= idx < len(self._history):
+                content = self._history[idx].get("content")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = " ".join(str(p.get("text", "")) for p in content
+                                    if isinstance(p, dict))
+            out.append((turn, text.split("\n")[0][:60]))
+        return out
+
+    def undo(self):
+        """Откатить последний ход целиком: файлы и разговор."""
+        return self.rewind_to(self._turn - 1, "both")
+
+    def rewind_command(self, turn=None, scope: str = "both"):
+        """Команда rewind: без номера — список ходов, с номером — откат."""
+        if turn is None:
+            overview = self.turns_overview()
+            if not overview:
+                self.publish({"type": "notice", "level": "info",
+                              "text": "Ходов пока не было — откатывать нечего."})
+                return None
+            lines = ["Ходы сессии ( /rewind N — вернуть состояние после хода N;"
+                     " можно добавить files, talk или both ):"]
+            for number, preview in overview:
+                lines.append("  " + str(number) + " · " + preview)
+            self.publish({"type": "notice", "level": "info", "text": "\n".join(lines)})
+            return None
+        try:
+            target = int(turn)
+        except (TypeError, ValueError):
+            self.publish({"type": "notice", "level": "warn",
+                          "text": "Не понял номер хода: " + str(turn)})
+            return None
+        if scope not in ("files", "talk", "both"):
+            scope = "both"
+        return self.rewind_to(target, scope)
+
+    def rewind_to(self, target: int, scope: str = "both"):
+        """Откат к состоянию после хода target: файлы, разговор или оба.
+
+        Файл, который человек правил руками после хода (содержимое не
+        сошлось с записанным «после»), молча не затирается: спрашиваем
+        через ask_user, а без канала — пропускаем и честно докладываем.
+        """
+        if self._active:
+            self.publish({"type": "notice", "level": "warn",
+                          "text": "Идёт ход — откат возможен, когда он закончится."})
+            return None
+        if target < 0 or target >= self._turn:
+            note = "Откатывать нечего." if self._turn < 1 else \
+                "Уже на ходе " + str(self._turn) + " — откат не нужен."
+            self.publish({"type": "notice", "level": "info", "text": note})
+            return None
+        from_turn = self._turn
+        report = {"restored": [], "failed": [], "no_snapshot": [],
+                  "conflicts": [], "previous": {}, "notes": []}
+        if scope in ("files", "both"):
+            if self._checkpoints is None:
+                report["notes"].append("чекпоинты выключены — файлы не откатываю")
+            else:
+                plan = self._checkpoints.plan_restore(target)
+                overwrite = False
+                if plan["conflicts"]:
+                    overwrite = self._ask_conflicts([c["path"] for c in plan["conflicts"]])
+                    if overwrite is None:
+                        self.publish({"type": "notice", "level": "info",
+                                      "text": "Откат отменён — ничего не трогаю."})
+                        return None
+                report = self._checkpoints.restore_to(target, overwrite_conflicts=overwrite)
+        removed_history: list = []
+        removed_marks: list = []
+        cut_index = None
+        if scope in ("talk", "both"):
+            for turn_no, idx in self._turn_marks:
+                if turn_no > target:
+                    cut_index = idx
+                    break
+            if cut_index is not None:
+                removed_history = self._history[cut_index:]
+                removed_marks = [(t, i) for t, i in self._turn_marks if t > target]
+                self._history = self._history[:cut_index]
+                self._turn_marks = [(t, i) for t, i in self._turn_marks if t <= target]
+                self._turn = target
+                self._last_sig = ""
+                self._same_count = 0
+        if self._checkpoints is not None:
+            # Линия времени раздвоилась: записи мёртвых ходов в манифесте
+            # сбрасываем, иначе переиспользованные номера ходов смешают
+            # снимки разных линий. Redo держит шаг в памяти агента.
+            self._checkpoints.forget_after(target)
+        changed = bool(report["restored"] or removed_history)
+        if changed:
+            self._redo_stack.append({
+                "to_turn": target, "from_turn": from_turn, "scope": scope,
+                "history_tail": removed_history, "marks_tail": removed_marks,
+                "cut_index": cut_index,
+                "file_prev": report["previous"],
+                "file_restored": {p: self._checkpoints_state(p) for p in report["restored"]},
+            })
+            if len(self._redo_stack) > 5:
+                self._redo_stack.pop(0)
+        self._journal("rewind", {"to_turn": target, "from_turn": from_turn,
+                                 "scope": scope, "files": report["restored"],
+                                 "skipped": report["conflicts"] + report["failed"]})
+        self.publish({"type": "session.rewound", "turn": target, "scope": scope,
+                      "files": len(report["restored"])})
+        parts = ["Откат к состоянию после хода " + str(target) +
+                 " (был ход " + str(from_turn) + ")."]
+        if scope in ("talk", "both") and removed_history:
+            parts.append("Разговор: модель забыла ходы после " + str(target) + ".")
+        if report["restored"]:
+            parts.append("Файлов возвращено: " + str(len(report["restored"])) + ".")
+        if report["conflicts"]:
+            parts.append("Пропущены как правленые вручную: " +
+                         ", ".join(report["conflicts"]) + ".")
+        if report["failed"]:
+            parts.append("Не удалось вернуть: " + ", ".join(report["failed"]) + ".")
+        if report["no_snapshot"]:
+            parts.append("Без снимка (файл больше лимита): " +
+                         ", ".join(report["no_snapshot"]) + ".")
+        for note in report["notes"]:
+            parts.append(note + ".")
+        if changed:
+            parts.append("/redo — вернуть откат.")
+        self.publish({"type": "notice", "level": "info", "text": " ".join(parts)})
+        return None
+
+    def _checkpoints_state(self, path):
+        if self._checkpoints is None:
+            return None
+        return self._checkpoints.state_of(path)
+
+    def _ask_conflicts(self, paths: list):
+        """Спросить про файлы, правленые вручную. True — затирать, False —
+        пропустить, None — отменить откат. Без канала — False (безопасно)."""
+        if self._ask_user_fn is None:
+            return False
+        question = ("Файлы изменены вручную после хода агента: " +
+                    ", ".join(paths) + ". Перезаписать их при откате?")
+        options = ["Пропустить эти файлы", "Перезаписать и их", "Отменить откат"]
+        answer = self._ask_user(question, options)
+        if answer is None:
+            return False
+        if answer == options[1]:
+            return True
+        if answer == options[2]:
+            return None
+        return False
+
+    def redo(self):
+        """Вернуть последний откат (хотя бы на шаг): файлы и разговор."""
+        if self._active:
+            self.publish({"type": "notice", "level": "warn",
+                          "text": "Идёт ход — redo возможен, когда он закончится."})
+            return None
+        if not self._redo_stack:
+            self.publish({"type": "notice", "level": "info",
+                          "text": "Возвращать нечего: отката не было."})
+            return None
+        entry = self._redo_stack[-1]
+        scope = entry["scope"]
+        restored_files: list = []
+        skipped_files: list = []
+        if scope in ("files", "both") and self._checkpoints is not None:
+            todo = {}
+            for path, prev in entry["file_prev"].items():
+                left = entry["file_restored"].get(path)
+                current = self._checkpoints.state_of(path)
+                if left is not None and not self._same_state(current, left):
+                    skipped_files.append(path)  # после отката файл трогали
+                    continue
+                todo[path] = prev
+            done, failed = self._checkpoints.apply_states(todo)
+            restored_files = done
+            skipped_files += failed
+        if scope in ("talk", "both") and entry["history_tail"]:
+            cut = entry["cut_index"]
+            if cut is not None and len(self._history) == cut:
+                self._history = self._history + entry["history_tail"]
+                self._turn_marks = self._turn_marks + entry["marks_tail"]
+                self._turn = entry["from_turn"]
+            else:
+                skipped_files.append("(разговор изменился после отката)")
+        self._redo_stack.pop()
+        self._journal("redo", {"turn": entry["from_turn"], "scope": scope,
+                               "files": restored_files})
+        parts = ["Откат возвращён: снова состояние после хода " +
+                 str(entry["from_turn"]) + "."]
+        if restored_files:
+            parts.append("Файлов переписано: " + str(len(restored_files)) + ".")
+        if skipped_files:
+            parts.append("Пропущено: " + ", ".join(skipped_files) + ".")
+        self.publish({"type": "notice", "level": "info", "text": " ".join(parts)})
+        return None
+
+    @staticmethod
+    def _same_state(a, b) -> bool:
+        from ..core.checkpoints import same_state
+
+        return same_state(a, b)
+
+    # --- сжатие контекста: «прилив» (ЗАДАЧА-13) ---
+
+    def _after_turn(self) -> None:
+        """После хода: отложенное ручное сжатие или автопорог."""
+        try:
+            if self._compact_pending is not None:
+                hint, self._compact_pending = self._compact_pending, None
+                self._do_compact(hint)
+                return
+            if self.settings is None or not self.settings.get("compact.enabled", True):
+                return
+            threshold = int(self.settings.get("compact.threshold_pct", 80) or 80)
+            if self._context_pct >= threshold:
+                self._do_compact("")
+        except Exception:  # noqa: BLE001 — сжатие не роняет агента
+            pass
+
+    def compact_now(self, hint: str = ""):
+        """Команда /compact: вручную; во время хода — отложенно до его конца."""
+        if self._active:
+            self._compact_pending = hint
+            self.publish({"type": "notice", "level": "info",
+                          "text": "Прилив будет после хода."})
+            return None
+        self._do_compact(hint)
+        return None
+
+    def _do_compact(self, hint: str) -> None:
+        if self.settings is not None and not self.settings.get("compact.enabled", True):
+            self.publish({"type": "notice", "level": "info",
+                          "text": "Сжатие выключено настройкой compact.enabled."})
+            return
+        from .compact import compact_history, history_chars
+
+        keep = 2
+        template = ""
+        if self.settings is not None:
+            keep = int(self.settings.get("compact.keep_turns", 2) or 2)
+            template = str(self.settings.get("compact.prompt", "") or "")
+        before_chars = history_chars(self._history)
+        before_count = len(self._history)
+        before_pct = round(self._context_pct, 1)
+        try:
+            outcome = compact_history(self.router, self._history, self._turn_marks,
+                                      keep_turns=keep, hint=hint,
+                                      prompt_template=template,
+                                      todos=list(self.ctx.todos))
+        except Exception as exc:  # noqa: BLE001 — модель сводки упала: история цела
+            self.publish({"type": "notice", "level": "warn",
+                          "text": "Прилив не удался (" + str(exc)[:120] +
+                                  ") — история не тронута."})
+            return
+        if outcome is None:
+            self.publish({"type": "notice", "level": "info",
+                          "text": "Сжимать пока нечего: история короткая."})
+            return
+        self._history = outcome["history"]
+        self._turn_marks = outcome["marks"]
+        self._redo_stack.clear()
+        after_chars = history_chars(self._history)
+        after_pct = round(before_pct * after_chars / before_chars, 1) if before_chars else 0.0
+        self._context_pct = after_pct
+        self._journal("compact", {"before_pct": before_pct, "after_pct": after_pct,
+                                  "summary": outcome["summary"],
+                                  "summarized_turns": outcome["summarized"],
+                                  "kept_turns": outcome["kept"]})
+        self.publish({"type": "context.compacted", "before_pct": before_pct,
+                      "after_pct": after_pct,
+                      "before_messages": before_count,
+                      "after_messages": len(self._history),
+                      "summarized_turns": outcome["summarized"]})
+        self.publish({"type": "notice", "level": "info",
+                      "text": "Прилив: контекст сжат — было ~" + str(before_pct) +
+                              "%, стало ~" + str(after_pct) + "% (сводкой заменено ходов: " +
+                              str(len(outcome["summarized"])) + ")."})

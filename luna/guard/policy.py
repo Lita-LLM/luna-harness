@@ -122,6 +122,31 @@ class Guard:
     def remember_always(self, risk: str) -> None:
         self._always_rank = max(self._always_rank, _RISK_ORDER.get(risk, 0))
 
+    def remember_always_project(self, risk: str) -> None:
+        """«Больше не спрашивать для такого в этом проекте» (ЗАДАЧА-20):
+        уровень риска — в проектные настройки, переживает перезапуск."""
+        rank = _RISK_ORDER.get(risk, 0)
+        self._always_rank = max(self._always_rank, rank)
+        if self.settings is not None:
+            try:
+                current = int(self.settings.get("guard.always_rank_project", -1))
+            except (TypeError, ValueError):
+                current = -1
+            if rank > current:
+                self.settings.set("guard.always_rank_project", rank,
+                                  layer="project")
+
+    def _always_rank_effective(self) -> int:
+        """Уровень «без вопросов»: сессионный и проектный — больший."""
+        rank = self._always_rank
+        if self.settings is not None:
+            try:
+                rank = max(rank, int(self.settings.get(
+                    "guard.always_rank_project", -1)))
+            except (TypeError, ValueError):
+                pass
+        return rank
+
     def _rule(self, tool_name: str, args_text: str) -> str | None:
         raw = self.settings.get("guard.rules", "") if self.settings else ""
         for tool_pattern, needle, action in _parse_rules(raw):
@@ -257,7 +282,7 @@ class Guard:
             return Decision(hard.decision, hard.by, hard.reason, hard.risk)
         rule = self._rule(tool_name, args_text)
 
-        if _RISK_ORDER[risk] <= self._always_rank:
+        if _RISK_ORDER[risk] <= self._always_rank_effective():
             return Decision("allow", "human", "Человек разрешил «дальше без вопросов» на этом уровне", risk)
 
         if mode == "plan":

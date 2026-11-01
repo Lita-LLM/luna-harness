@@ -215,15 +215,39 @@ class Agent:
         return getattr(self, "_active", False)
 
     def run_shell(self, command: str):
-        """!команда мимо модели, но через Предохранитель, как любой bash."""
+        """!команда — действие самого человека (ЗАДАЧА-20): Предохранитель
+        НЕ спрашивает и не блокирует (ни режимный ask, ни hard_block) —
+        человек и так сидит за терминалом. Команда и вывод уходят в
+        контекст парой «вызов — результат», а по настройке
+        chat.bang_triggers следом запускается ход модели по этому выводу.
+        """
         tool = self.tools.get("bash")
         if tool is None:
             return None
         self._interrupt.clear()  # флаг прошлого хода не должен убивать эту команду
         if self._checkpoints is not None:
             self._checkpoints.begin_turn(self._turn)
-        return self._execute_tool(tool, {"command": command}, "команда человека мимо модели",
-                                  call_id="shell-" + uuid.uuid4().hex[:6])
+        call_id = "shell-" + uuid.uuid4().hex[:6]
+        args = {"command": command}
+        # Пара call/result в истории не должна быть сиротой: вызов пишем
+        # как от ассистента, результат допишет _execute_tool.
+        self._history.append({"role": "assistant", "content": "",
+                              "tool_calls": [{"id": call_id, "name": "bash",
+                                              "arguments": args,
+                                              "intent": "команда человека из терминала"}]})
+        outcome = self._execute_tool(tool, args, "команда человека мимо модели",
+                                     call_id=call_id, human=True)
+        if outcome == "stop":
+            return outcome
+        triggers = True
+        if self.settings is not None:
+            triggers = bool(self.settings.get("chat.bang_triggers", True))
+        if triggers:
+            return self.run_turn(
+                "Я сам выполнил в терминале команду `" + command + "` — "
+                "её вывод в результате тула выше. Учти его и ответь по делу: "
+                "что видно из вывода и что делать дальше, если это нужно.")
+        return outcome
 
     # --- охранник режима review ---
 
@@ -291,6 +315,10 @@ class Agent:
         if kind == "thinking":
             self._summarizer.feed(text)
             self.publish({"type": "agent.thinking", "text": text})
+        elif kind == "retry":
+            # Автоповтор сети из роутера: отсчёт — уведомлением, не текстом
+            # ответа (ЗАДАЧА-20).
+            self.publish({"type": "notice", "level": "warn", "text": text})
         else:
             self.publish({"type": "agent.text", "text": text})
 
@@ -565,10 +593,32 @@ class Agent:
                 return "interrupted"
         return None
 
-    def _execute_tool(self, tool, args: dict, intent: str, call_id: str) -> str | None:
-        """Предохранитель + исполнение одного вызова; события tool.* и guard.*."""
+    def _execute_tool(self, tool, args: dict, intent: str, call_id: str,
+                      human: bool = False) -> str | None:
+        """Предохранитель + исполнение одного вызова; события tool.* и guard.*.
+
+        human=True — вызов самого человека (!команда): Предохранитель не
+        спрашивает и не блокирует, вердикт — allow by human (ЗАДАЧА-20).
+        """
         self.publish({"type": "tool.call", "id": call_id, "name": tool.name,
                       "args": args, "intent": intent})
+        if human:
+            self.publish({"type": "guard.verdict", "id": call_id,
+                          "decision": "allow", "by": "human",
+                          "reason": "Команда самого человека: Предохранитель не спрашивает"})
+            result = tool.run(self.ctx, args)
+            limit = 8000
+            if self.settings is not None:
+                limit = int(self.settings.get("tools.output_limit", 8000) or 8000)
+            output, _path = truncate_output(result.text, limit, self.ctx.output_dir,
+                                            tool.name)
+            output = redact(output, self.secrets)
+            summary = output.splitlines()[0][:200] if output else ""
+            self.publish({"type": "tool.result", "id": call_id, "ok": result.ok,
+                          "summary": summary, "output": output})
+            self._history.append({"role": "tool", "tool_call_id": call_id,
+                                  "name": tool.name, "content": output})
+            return None
         decision = self.guard.decide(tool.name, tool.is_mutating(args), args, intent, self.mode)
         final_args = args
         if decision.decision == "ask":
@@ -617,7 +667,8 @@ class Agent:
     def _ask_human(self, call_id: str, tool_name: str, args: dict, intent: str,
                    decision) -> tuple[str, str, str, dict]:
         """guard.ask → ответ клиента. Нет канала — отказ с понятной причиной."""
-        choices = ["yes", "no", "edit", "always", "stop"]
+        choices = ["yes", "no", "edit", "always", "always_project",
+                   "no_replace", "stop"]
         self.publish({"type": "guard.ask", "id": call_id, "tool": tool_name, "args": args,
                       "intent": intent, "risk": decision.risk, "reason": decision.reason,
                       "choices": choices})
@@ -639,6 +690,21 @@ class Agent:
         if choice == "always":
             self.guard.remember_always(decision.risk)
             return ("allow", "human", "Человек разрешил и сказал «дальше без вопросов»", args)
+        if choice == "always_project":
+            # «Больше не спрашивать для такого в этом проекте»: уровень
+            # риска пишется в проектные настройки (guard.always_rank_project).
+            self.guard.remember_always_project(decision.risk)
+            return ("allow", "human", "Человек разрешил и сказал «в этом "
+                    "проекте для такого больше не спрашивать»", args)
+        if choice == "no_replace":
+            # «Нет, и вот что вместо»: текст человека уходит модели в
+            # причине отказа — она обязана следовать ему, а не повторять вызов.
+            text = str(answer.get("text") or
+                       (answer.get("args") or {}).get("text") or "").strip()
+            reason = "Человек отказал"
+            if text:
+                reason += ". Вместо этого человек велит: " + text
+            return ("deny", "human", reason, args)
         if choice == "edit":
             new_args = answer.get("args")
             if not isinstance(new_args, dict):
@@ -891,7 +957,22 @@ class Agent:
                 return
             threshold = int(self.settings.get("compact.threshold_pct", 80) or 80)
             if self._context_pct >= threshold:
+                self._compact_warned = False
                 self._do_compact("")
+            elif self._context_pct >= threshold - 10 \
+                    and not getattr(self, "_compact_warned", False):
+                # Предупреждение заранее: до автосжатия осталось ≤10% окна
+                # сверх порога — один раз, пока порог не сработает (ЗАДАЧА-20).
+                self._compact_warned = True
+                self.publish({"type": "notice", "level": "warn",
+                              "text": "До автосжатия осталось около "
+                                      + str(max(0, threshold - int(self._context_pct)))
+                                      + "% окна (порог «прилива» — "
+                                      + str(threshold) + "%). Что важно не "
+                                      "потерять — скажи /compact с фокусом "
+                                      "или допиши в AGENTS.md (#…)."})
+            elif self._context_pct < threshold - 15:
+                self._compact_warned = False
         except Exception:  # noqa: BLE001 — сжатие не роняет агента
             pass
 

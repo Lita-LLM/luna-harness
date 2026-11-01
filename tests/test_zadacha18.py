@@ -355,16 +355,17 @@ class SendModesChatTest(unittest.TestCase):
         sent = [c for c in app.sent_commands if c["type"] == "user.message"]
         self.assertEqual(sent[-1]["text"], "разово")
 
-    def test_ctrl_s_cycles_modes(self):
+    def test_alt_s_cycles_modes(self):
+        # ЗАДАЧА-20: Ctrl+S переехал на заначку промпта, смена режима — Alt+S.
         app = make_app()
         app.settings.set("chat.send_mode", "inject")
         self.addCleanup(app.settings.set, "chat.send_mode", "inject")
         self.assertEqual(app._send_mode(), "inject")
-        app.handle_key(key("s", ("ctrl",)))
+        app.handle_key(key("s", ("alt",)))
         self.assertEqual(app._send_mode(), "queue")
-        app.handle_key(key("s", ("ctrl",)))
+        app.handle_key(key("s", ("alt",)))
         self.assertEqual(app._send_mode(), "interrupt")
-        app.handle_key(key("s", ("ctrl",)))
+        app.handle_key(key("s", ("alt",)))
         self.assertEqual(app._send_mode(), "inject")
 
     def test_queue_visible_and_recallable(self):
@@ -374,7 +375,7 @@ class SendModesChatTest(unittest.TestCase):
         self.assertEqual(app.queue, ["подождёт"])
         meta = app._meta_lines(time.monotonic())
         self.assertTrue(any("подождёт" in line for line in meta))
-        self.assertTrue(any("Ctrl+S" in line for line in meta))
+        self.assertTrue(any("Alt+S" in line for line in meta))
         app.handle_key(key("up"))          # пустое поле + очередь — отозвать
         self.assertEqual(app.queue, [])
         self.assertEqual(app.editor.text, "подождёт")

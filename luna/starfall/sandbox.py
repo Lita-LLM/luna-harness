@@ -134,6 +134,7 @@ class SandboxSpec:
                     "--ro-bind", "/", "/",
                     "--dev", "/dev", "--proc", "/proc",
                     "--tmpfs", "/tmp",
+                    *_hide_secrets_args(cwd),
                     "--bind", cwd, cwd,
                     "--chdir", cwd,
                     "--clearenv"]
@@ -163,6 +164,35 @@ class SandboxSpec:
             argv += [self.image, "/bin/sh", "-c", command]
             return argv, dict(os.environ)
         return [command], None  # вызывающий использует shell=True сам
+
+
+# «/ только для чтения» всё ещё даёт ячейке ЧИТАТЬ сейф Луны и ключи
+# хозяина — а прочитанное уйдёт модели в выводе bash. Прячем их поверх.
+_SECRET_DIRS = (".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker",
+                ".config/gh", ".config/gcloud", ".password-store")
+_SECRET_FILES = (".netrc", ".git-credentials", ".pgpass", ".npmrc", ".pypirc")
+
+
+def _hide_secrets_args(cwd: str) -> list:
+    home = Path(os.path.expanduser("~"))
+    dirs = [home / d for d in _SECRET_DIRS]
+    luna_home = os.environ.get("LUNA_HOME")
+    lh = Path(luna_home).expanduser() if luna_home else home / ".luna"
+    # Целиком и по частям: если папка ячейки внутри LUNA_HOME, целиком
+    # её не спрятать — тогда хотя бы сейф, журналы и чаты.
+    dirs += [lh, lh / "sessions", lh / "logs", lh / "checkpoints"]
+    files = [home / f for f in _SECRET_FILES] + [lh / "secrets.json", lh / "mcp.json"]
+    args: list = []
+    work = Path(cwd)
+    for d in dirs:
+        # Папку, внутри которой работает сама ячейка, прятать нельзя.
+        if not d.is_dir() or d == work or d in work.parents:
+            continue
+        args += ["--tmpfs", str(d)]
+    for p in files:
+        if p.is_file():
+            args += ["--ro-bind", "/dev/null", str(p)]
+    return args
 
 
 def _platform_name(platform_name: str | None) -> str:

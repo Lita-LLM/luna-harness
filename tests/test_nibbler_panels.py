@@ -327,6 +327,10 @@ class ChatPanelsIntegrationTest(unittest.TestCase):
         app.picker._sel_key = item.key
         app.handle_key(Key("enter"))
         self.assertIn("files", app.layout)
+        # ЗАДАЧА-20: /panels после действия не закрывается — выход по Esc.
+        self.assertIsNotNone(app.picker)
+        app.handle_key(Key("esc"))
+        self.assertIsNone(app.picker)
         app.handle_key(Key("m", char="m", mods=frozenset({"alt"})))
         self.assertIn("moon", app.layout)
 

@@ -99,8 +99,14 @@ def resolve_inputs(spec, cwd: Path) -> list:
             if chunk <= 0:
                 return [text]
             return [text[i:i + chunk] for i in range(0, len(text), chunk)] or [""]
-    raise SwarmError("не понимаю описание входов: нужен список, {glob}, "
-                     "{file_lines}, {file} или {text, chunk_chars}")
+    raise SwarmError("не понимаю описание входов: нужен список строк или "
+                     "словарь одного из видов. Примеры: "
+                     "inputs: [\"первый\", \"второй\", \"третий\"]; "
+                     "{glob: \"src/*.py\"} — содержимое файлов по маске; "
+                     "{file_lines: \"задачи.txt\"} — строки файла по одному "
+                     "входу; {file: \"док.md\"} — файл одним входом; "
+                     "{text: \"длинный текст\", chunk_chars: 2000} — куски "
+                     "текста по N символов")
 
 
 # --- исполнитель одной ячейки на роутере матери ------------------------------
@@ -510,6 +516,9 @@ class SwarmRun:
         self._emit({"type": "swarm.cells", "cells": cells, "links": self.total > 2000})
 
     def _emit_mail(self, frm: str, to: str, text: str) -> None:
+        if frm == to:
+            return  # письма самому себе не бывает: звеньевая ячейка в схеме
+            # tree раньше «писала» на адрес своего звена — то есть себе
         if self.total > 500:
             return  # в большом рое письма — только между звеньями (см. _finish_link)
         self._emit({"type": "agent.message", "agent_id": to, "parent_id": frm,
@@ -888,21 +897,41 @@ class SwarmRun:
 
 def estimate(runner, profile: CellProfile, inputs: list, template: str = "",
              settings=None, parallel: int = 8, tmp_dir: Path | None = None) -> dict:
-    """Смета: пробный прогон на 3 входах, цена и время одного × N."""
+    """Смета: пробный прогон на 3 входах, цена и время одного × N.
+
+    Пробные ячейки идут ПАРАЛЛЕЛЬНО: раньше шли строго по очереди, и на
+    живом прогоне тимлида смета съедала почти всё время — 6 крошечных
+    ячеек cls при параллельности 8 заняли ~32 с именно здесь.
+    """
     sample = [str(x) for x in list(inputs)[:3]]
     if not sample:
         raise SwarmError("смета невозможна: входы пустые")
     base = Path(tmp_dir) if tmp_dir else Path.cwd()
-    total_cost = 0.0
-    total_time = 0.0
-    for i, item in enumerate(sample):
+    results: list = [None] * len(sample)
+    errors: list = []
+
+    def probe(i: int, item: str) -> None:
         meta = {"index": i, "address": "estimate/" + profile.caste + ".0." + str(i),
                 "link": 0, "cell_dir": base / ("cell-" + str(i)),
                 "write_dir": base / ("cell-" + str(i)), "endpoint": ""}
         started = time.monotonic()
-        _text, tin, tout = runner(profile, render_task(template, item), meta)
-        total_time += time.monotonic() - started
-        total_cost += usage_cost(settings, tin, tout)
+        try:
+            _text, tin, tout = runner(profile, render_task(template, item), meta)
+            results[i] = (time.monotonic() - started,
+                          usage_cost(settings, tin, tout))
+        except Exception as exc:  # noqa: BLE001 — поднимет estimate после join
+            errors.append(exc)
+
+    threads = [threading.Thread(target=probe, args=(i, item), daemon=True)
+               for i, item in enumerate(sample)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    total_time = sum(r[0] for r in results)
+    total_cost = sum(r[1] for r in results)
     n = len(sample)
     per_cost = total_cost / n
     per_time = total_time / n

@@ -276,7 +276,8 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
         agent.listen(journal.append_event)
         journal.append_command({"type": "user.message", "text": prompt})
 
-    state = {"cost": 0.0, "cost_exceeded": False, "wrote_text": False}
+    state = {"cost": 0.0, "cost_exceeded": False, "wrote_text": False,
+             "text_open": False}  # ответ в stdout не закрыт переводом строки
 
     def on_event(event: dict) -> None:
         if event.get("type") == "usage":
@@ -297,12 +298,22 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
             return
         kind = event.get("type")
         if kind == "agent.text":
-            stream.write(event.get("text", ""))
+            chunk = event.get("text", "")
+            stream.write(chunk)
             stream.flush()
-            state["wrote_text"] = True
+            if chunk:
+                state["wrote_text"] = True
+                state["text_open"] = not chunk.endswith("\n")
             return
         line = _progress_line(event)
         if line is not None:
+            if state["text_open"]:
+                # Ответ обязан кончаться переводом строки ДО первой строки
+                # хода в stderr — иначе строка расхода «прилипает» к ответу
+                # в общем терминале (живой прогон тимлида, ЗАДАЧА-22).
+                stream.write("\n")
+                stream.flush()
+                state["text_open"] = False
             err_stream.write(line + "\n")
             err_stream.flush()
 
@@ -312,7 +323,7 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
     finally:
         if journal is not None:
             journal.close()
-    if output_mode == "text" and state["wrote_text"]:
+    if output_mode == "text" and state["text_open"]:
         stream.write("\n")
         stream.flush()
     if state["cost_exceeded"]:

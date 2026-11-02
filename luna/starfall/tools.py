@@ -127,7 +127,9 @@ def cells_tool() -> Tool:
                     "steps, budget_usd, budget_tokens, can_spawn); save — "
                     "сохранить профиль сессии на весь харнесс (с подтверждением "
                     "человека). Права профиля не шире твоих: чужих тулов в "
-                    "профиль не вписать.",
+                    "профиль не вписать. Профили — материал для starfall (рой "
+                    "на много однотипных входов); одиночную задачу отдавай "
+                    "assistant, не ячейке.",
         parameters={"type": "object", "properties": {
             "action": {"type": "string",
                        "enum": ["list", "show", "create", "edit", "save"]},
@@ -292,6 +294,21 @@ def _starfall(ctx, args: dict) -> ToolResult:
         profs, inputs = plan
         if not caps["enabled"]:
             return ToolResult(False, "Звездопад выключен настройкой starfall.enabled.")
+        if action in ("estimate", "run"):
+            # Рой на горсть входов — лишняя машина: дешевле assistant или
+            # свои руки. Порог — настройка; человек может явно настоять.
+            min_inputs = 3
+            if settings is not None:
+                min_inputs = int(settings.get("starfall.min_inputs", 3) or 3)
+            if len(inputs) < min_inputs and not bool(args.get("force")):
+                return ToolResult(False,
+                                  "Рой на " + str(len(inputs)) + " вход(а) не "
+                                  "запускаю: порог starfall.min_inputs=" +
+                                  str(min_inputs) + ". Одна целая задача — "
+                                  "assistant: {action: \"run\", task: \"…\"}; "
+                                  "пара входов — сделай сама. Если человек ЯВНО "
+                                  "настоял именно на рое — повтори вызов с "
+                                  "force=true.")
         if len(inputs) > caps["max_cells"]:
             return ToolResult(False, "Входов " + str(len(inputs)) +
                               " — выше потолка starfall.max_cells=" +
@@ -395,16 +412,26 @@ def starfall_tool() -> Tool:
     return Tool(
         name="starfall",
         description="Звездопад: рой одноразовых ячеек по профилям (cells) на "
-                    "массовую однотипную работу. Сначала action=estimate — "
-                    "смета пробным прогоном на 3 входах; потом action=run с "
-                    "той же сметой в поле estimate — запуск одним действием "
+                    "массовую однотипную работу. КОГДА ЗВАТЬ РОЙ: входов МНОГО "
+                    "и они ОДНОТИПНЫ — одна ячейка на вход, один шаблон на всех. "
+                    "НЕ рой: одна целая задача — assistant; постоянная команда "
+                    "ролей — crew. Порядок: сначала action=estimate — смета "
+                    "пробным прогоном на 3 входах; потом action=run с той же "
+                    "сметой в поле estimate — запуск одним действием "
                     "(подтверждение покажет смету, профили, режим записи). "
+                    "Пример: {action: \"estimate\", profile: \"cls\", inputs: "
+                    "{glob: \"src/*.py\"}, template: \"Классифицируй файл: "
+                    "{input}\"} — затем тот же вызов с action=run и полем "
+                    "estimate. Меньше starfall.min_inputs входов (по умолчанию "
+                    "3) рой не запускается: 1–2 входа — assistant или сделай "
+                    "сама; человек может явно настоять — тогда force=true. "
                     "inputs: список строк | {glob: маска} | {file_lines: файл} | "
                     "{file: файл} | {text: текст, chunk_chars: N}. profile — "
                     "каста или несколько через запятую. Потолки — настройки "
                     "starfall.* (ячеек, параллельности, бюджет, TTL). Итог — "
                     "сводка и папка с результатами; action=resume докручивает "
-                    "незаконченный поток, status — что не закончено.",
+                    "незаконченный поток, status — что не закончено. Полное "
+                    "руководство — скилл starfall (тул skill).",
         parameters={"type": "object", "properties": {
             "action": {"type": "string",
                        "enum": ["estimate", "run", "status", "resume"]},
@@ -424,6 +451,8 @@ def starfall_tool() -> Tool:
             "collapse": {"type": "string", "enum": ["auto", "code", "model"],
                          "description": "Свёртка звеньев: кодом или ячейкой col"},
             "estimate": {"type": "string", "description": "Текст сметы из action=estimate — уйдёт в подтверждение запуска"},
+            "force": {"type": "boolean",
+                      "description": "Запустить рой вопреки порогу starfall.min_inputs — только если человек явно настоял"},
             "project_confirmed": {"type": "boolean",
                                   "description": "Человек явно подтвердил запись прямо в проект"},
             "swarm": {"type": "string", "description": "Для resume: id потока или путь его папки"}},

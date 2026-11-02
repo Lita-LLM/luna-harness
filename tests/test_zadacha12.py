@@ -184,7 +184,10 @@ class CompatTest(Base):
         (skill / "SKILL.md").write_text(
             "---\nname: deploy\ndescription: Выкатить на стенд\n---\nШаг 1. Собери.\n", encoding="utf-8")
         items = compat.list_skills(self.proj, self.settings)
-        self.assertEqual([(i["name"], i["description"]) for i in items], [("deploy", "Выкатить на стенд")])
+        by_name = {i["name"]: i["description"] for i in items}
+        self.assertEqual(by_name.get("deploy"), "Выкатить на стенд")
+        # Встроенный скилл Луны виден всегда и последним приоритетом (ЗАДАЧА-22).
+        self.assertIn("starfall", by_name)
         self.assertIn("deploy — Выкатить на стенд", compat.skills_prompt_section(self.proj, self.settings))
         res = skill_tool().run(self.ctx, {"name": "deploy"})
         self.assertTrue(res.ok)

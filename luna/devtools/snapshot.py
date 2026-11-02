@@ -23,7 +23,7 @@ from ..ui import phrases
 from ..ui.screen import Buffer
 
 SCREENS = ("splash", "render", "main", "chat", "thinking", "sessions",
-           "panels", "help", "tiles", "constellation", "stream")
+           "panels", "help", "tiles", "constellation", "stream", "nibbler")
 _FAKE_NOW = 10000.0  # вымышленная эпоха снимка: все «сейчас» считаются от неё
 
 _PAGE_CSS = """
@@ -319,6 +319,42 @@ def _render_panels(cols: int, rows: int, caps, settings) -> Buffer:
     return buf
 
 
+def _render_nibbler(cols: int, rows: int, caps, settings) -> Buffer:
+    """Ниблер с длинной репликой при открытых панелях (ЗАДАЧА-22).
+
+    Регрессия, которую ловит экран: строка Ниблера писалась по ширине
+    всего буфера и уезжала поверх колонки панелей. Теперь она режется
+    по ширине ленты — панели справа читаются целиком, а реплика
+    заканчивается у границы ленты.
+    """
+    from ..core.bus import EventBus
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp
+
+    app = ChatApp(EventBus(), settings, Scheduler(), caps.glyph_mode)
+    app._clock = lambda: _FAKE_NOW  # проявление — от вымышленного «сейчас»
+    app.on_agent_event({"type": "session.start", "cwd": "/home/user/project",
+                        "model": "fake-agent", "mode": "normal"})
+    app.submit_text("Почини сборку и поставь зависимости")
+    app.on_agent_event({"type": "turn.start", "turn": 1})
+    app.on_agent_event({"type": "agent.text",
+                        "text": "Смотрю логи и правлю по одному месту за раз."})
+    app.on_agent_event({"type": "agent.text.done"})
+    app.on_agent_event({"type": "nibbler.say", "severity": "serious",
+                        "to": "human",
+                        "text": "Очень длинное наблюдение Ниблера, которое "
+                                "раньше уезжало далеко вправо — поверх панелей "
+                                "и нижних строк экрана, — а теперь честно "
+                                "обрезается границей ленты"})
+    app.on_agent_event({"type": "turn.done", "turn": 1, "reason": "end"})
+    app.layout.open("moon")
+    app.layout.open("files")
+    # Срок строки Ниблера приложение ставит по своим часам — продлеваем.
+    app._nibbler_until = _FAKE_NOW + 60.0
+    buf, _cursor = app.draw(cols, rows, _FAKE_NOW + 1.0)
+    return buf
+
+
 def _render_help(cols: int, rows: int, caps, settings) -> Buffer:
     """Выбиралка команд /help поверх ленты (ЗАДАЧА-16)."""
     from ..core.bus import EventBus
@@ -488,6 +524,8 @@ def render_frames(name: str, cols: int, rows: int, times: list, settings=None) -
                  _render_tiles(cols, rows, caps, settings))]
     if name == "constellation":
         return [("созвездие роя", _render_constellation(cols, rows, caps, settings))]
+    if name == "nibbler":
+        return [("ниблер внутри раскладки", _render_nibbler(cols, rows, caps, settings))]
     if name == "stream":
         return [(str(at) + " с", _render_stream(cols, rows, at, caps, settings))
                 for at in times]

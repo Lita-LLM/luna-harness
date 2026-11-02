@@ -349,16 +349,81 @@ def measure() -> dict:
     return res
 
 
+def frame_costs(pairs: int = 300, frames: int = 7) -> dict:
+    """Стоимость одного кадра чата — без терминала, в буфер (ЗАДАЧА-22).
+
+    Лента из `pairs` пар «вопрос — ответ» (ответ — абзацы с разметкой:
+    перенос и раскраска — самая дорогая часть кадра; до кэша строк
+    записей кадр на такой ленте стоил ~275 мс). Варианты: просто лента;
+    лента с открытыми панелями; лента и живой стрим (хвост дописывается
+    перед каждым кадром). Возвращает медианы в миллисекундах.
+    """
+    from ..core.bus import EventBus
+    from ..core.paths import DataDir
+    from ..core.settings import Settings
+    from ..ui.anim import Scheduler
+    from ..ui.chat import ChatApp, Entry
+
+    root = Path(tempfile.mkdtemp(prefix="luna-frame-"))
+    settings = Settings(home=root / "home", cwd=root)
+    app = ChatApp(EventBus(), settings, Scheduler(), "emoji",
+                  cwd=str(root), data=DataDir(root / "home"))
+    answer = ("Отвечаю по пунктам:\n\n"
+              "- первое — **важное** про сборку и тесты,\n"
+              "- второе — `код` и пути вида luna/ui/chat.py,\n"
+              "- третье — длинная строка пояснения, которая не влезает "
+              "в ширину экрана и честно переносится на следующую.\n\n"
+              "Итого: всё собралось, тесты зелёные, можно двигаться дальше.")
+    for i in range(pairs):
+        app.entries.append(Entry("user", text=f"вопрос номер {i}: почини сборку"))
+        app.entries.append(Entry("agent", text=answer))
+    now = time.monotonic()
+
+    def timed(grow=None) -> float:
+        samples = []
+        for _ in range(frames):
+            if grow is not None:
+                grow()
+            t0 = time.perf_counter()
+            app.draw(100, 30, now)
+            samples.append((time.perf_counter() - t0) * 1000)
+        return round(statistics.median(samples), 1)
+
+    app.draw(100, 30, now)  # прогрев: кэш строк записей наполняется
+    app.draw(100, 30, now)
+    res = {"feed_lines": len(app._feed_texts), "frame_ms": timed()}
+    app.toggle_panel("moon")
+    app.toggle_panel("limits")
+    app.draw(100, 30, now)
+    res["frame_panels_ms"] = timed()
+    live = Entry("agent", text="стрим идёт", streaming=True)
+    app.entries.append(live)
+
+    def grow() -> None:
+        live.text += " ещё кусок"
+
+    app.draw(100, 30, now)
+    res["frame_stream_ms"] = timed(grow)
+    return res
+
+
 GOALS = [
     ("start_first_frame_ms", "Старт до первого кадра, медиана", "≤ 200 мс", 200, "мс", "le"),
     ("idle_rss_mb", "Память в простое", "≤ 40 МБ", 40, "МБ", "le"),
     ("idle_cpu_pct", "ЦП в простое за 10 с", "≈ 0 %", 0.5, "%", "lt"),
+    ("frame_ms", "Кадр на длинной ленте", "≤ 50 мс", 50, "мс", "le"),
+    ("frame_panels_ms", "Кадр: лента + панели", "≤ 50 мс", 50, "мс", "le"),
+    ("frame_stream_ms", "Кадр: лента + живой стрим", "≤ 80 мс", 80, "мс", "le"),
 ]
 
 
 def run_measure(as_json: bool = False) -> int:
     ensure_utf8_stdio()  # печатаем сами (✓/✗, русский) — кодировка наша забота
     res = measure()
+    try:
+        res.update(frame_costs())  # кадры считаются в этом же процессе
+    except Exception:  # noqa: BLE001 — замер кадров не должен ронять остальные
+        pass
     if as_json:
         print(json.dumps(res, ensure_ascii=False, indent=1))
         return 0
@@ -382,6 +447,9 @@ def run_measure(as_json: bool = False) -> int:
     if res.get("start_runs_ms"):
         runs = res["start_runs_ms"]
         print(f"    запуски: {runs} мс")
+    if res.get("feed_lines"):
+        feed_lines = res["feed_lines"]
+        print(f"    лента замера кадра: {feed_lines} строк")
     print("Цель не достигнута — это честный результат замера, а не повод подкрутить цифры."
           if failed else "Все цели вехи 0 по замерам достигнуты на этой машине.")
     return 0

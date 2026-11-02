@@ -146,6 +146,9 @@ def skill_dirs(cwd: Path, settings=None) -> list[tuple[Path, str]]:
         (luna / "skills", "свои (Луна)"),
         (home / ".claude" / "skills", "свои (.claude)"),
         (home / ".config" / "opencode" / "skill", "свои (opencode)"),
+        # Встроенные скиллы самого харнесса — последним приоритетом:
+        # свой скилл с тем же именем их перекрывает (ЗАДАЧА-22).
+        (Path(__file__).resolve().parents[1] / "skills", "встроенные Луны"),
     ]
 
 

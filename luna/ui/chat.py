@@ -360,6 +360,11 @@ class Entry:
     # Стрим с проявлением (ЗАДАЧА-20): отметки кусков текста ответа —
     # (длина текста после куска, момент прихода); fade красит хвост по ним.
     chunk_marks: list = field(default_factory=list)
+    # Кэш отрисовки (ЗАДАЧА-22): готовые визуальные строки неизменной
+    # записи и их плоский текст; ключ — в ChatApp._entry_cache_key.
+    _cache_key: object = field(default=None, repr=False, compare=False)
+    _cache_lines: object = field(default=None, repr=False, compare=False)
+    _cache_texts: object = field(default=None, repr=False, compare=False)
 
 
 class ChatApp:
@@ -480,6 +485,14 @@ class ChatApp:
         self.session_title = ""          # тема сессии для заголовка окна
         self._session_titled = False     # имя задано (руками или автоматом)
         self.color_level = "truecolor"   # ставит run_chat из возможностей терминала
+        # ЗАДАЧА-22: полоса прокрутки и жесты ленты (состояние жеста и
+        # геометрия полосы последнего кадра), замеры кадров для ui.perf.
+        self._sb_drag = None             # (смещение захвата в ползунке)
+        self._sb_geom = None             # (всего строк, высота ленты, макс. прокрутка, верх ползунка, высота ползунка)
+        self._feed_drag = None           # жест перетаскивания ленты / долгого нажатия
+        self._frame_times: list = []     # длительности последних кадров, с
+        self._auto_low = False           # слабый режим, включённый автоматически
+        self._perf_warned = False        # предупреждение о слабом режиме — раз за сессию
         self.notify_hook = None          # run_chat: строка в терминал (звонок/OSC)
         self.title_hook = None           # run_chat: заголовок окна (OSC 2)
         self.open_hook = None            # run_chat: открыть ссылку/файл снаружи
@@ -1535,10 +1548,54 @@ class ChatApp:
         self._edit_manner_id = ""
         self._last_change = self._clock()
 
+    # --- производительность (ЗАДАЧА-22) --------------------------------------
+    # Кадр на слабой машине не должен стоить дороже самой работы: готовые
+    # строки неизменных записей кэшируются (_entry_lines), а если кадр
+    # стабильно долгий, ui.perf=auto сам включает слабый режим.
+
+    _PERF_FRAME_LIMIT = 0.045   # медиана кадра, с: выше — машина не тянет
+    _PERF_FRAMES = 30           # сколько кадров смотреть для решения
+    _LOW_INTERVAL = 0.12        # интервал кадра в слабом режиме, с
+    _LONG_PRESS_SEC = 0.5       # долгое нажатие на ленту → выделение, с
+
+    def _perf_setting(self) -> str:
+        mode = str(self.settings.get("ui.perf") or "auto")
+        return mode if mode in ("auto", "low", "full") else "auto"
+
+    def _low_perf(self) -> bool:
+        """Слабый режим действует: явно (ui.perf=low) или сам включился."""
+        mode = self._perf_setting()
+        if mode == "low":
+            return True
+        return mode == "auto" and self._auto_low
+
+    def _anim_on(self) -> bool:
+        """Анимации действуют: настройка включена и не слабый режим."""
+        return bool(self.settings.get("ui.animations")) and not self._low_perf()
+
+    def _note_frame_time(self, seconds: float) -> None:
+        """Запомнить длительность кадра; стабильно долгие кадры при
+        ui.perf=auto включают слабый режим (предупреждение — строкой
+        в ленту один раз, её ставит draw в начале следующего кадра)."""
+        self._frame_times.append(seconds)
+        if len(self._frame_times) > 60:
+            del self._frame_times[:-60]
+        if self._perf_setting() != "auto" or self._auto_low:
+            return
+        if len(self._frame_times) < self._PERF_FRAMES:
+            return
+        recent = sorted(self._frame_times[-self._PERF_FRAMES:])
+        median = recent[len(recent) // 2]
+        if median > self._PERF_FRAME_LIMIT:
+            self._auto_low = True
+
     def needs_frame(self, now: float) -> bool:
         """Кадры нужны, пока идёт ход, есть события или что-то затухает."""
         if self.busy:
             return True
+        if self._feed_drag is not None and not self._feed_drag["moved"] \
+                and not self._feed_drag["select"]:
+            return True  # держим палец: ждём долгое нажатие → выделение
         if self._fade_busy(now):
             return True
         if self._panel_anim is not None:
@@ -1550,12 +1607,16 @@ class ChatApp:
         pending = getattr(self.source, "has_pending", None)
         if callable(pending) and pending():
             return True
-        if self.settings.get("ui.animations"):
+        if self._anim_on():
             return now - self._last_change < 0.4
         return False
 
     def next_timeout(self):
-        return self.scheduler.frame_interval if self.needs_frame(self._clock()) else None
+        if not self.needs_frame(self._clock()):
+            return None
+        if self._low_perf():
+            return max(self.scheduler.frame_interval, self._LOW_INTERVAL)
+        return self.scheduler.frame_interval
 
     # --- события агента ----------------------------------------------------------
 
@@ -3480,6 +3541,25 @@ class ChatApp:
         if self.picker is not None:
             self._picker_mouse(mouse)
             return  # под выбиралкой лента мышью не выделяется
+        if mouse.button == 0 and mouse.kind in ("move", "release"):
+            # Идущие жесты ЗАДАЧИ-22: тяга ползунка и тяга ленты. Съедают
+            # события первыми — иначе панельный обработчик или выделение
+            # утащат движение не туда.
+            if self._sb_drag is not None:
+                if mouse.kind == "move":
+                    self._scrollbar_move(mouse)
+                else:
+                    self._sb_drag = None
+                return
+            if self._feed_drag_event(mouse):
+                return
+        if mouse.kind == "press" and mouse.button == 0 and mode == "full" \
+                and self._scrollbar_hit(mouse):
+            # Полоса прокрутки — у правого края ленты; нажатие на неё
+            # важнее зон под ней и границы колонок (она и рисуется там).
+            self.panel_focus = False
+            self._scrollbar_press(mouse)
+            return
         if mouse.kind == "press" and mouse.button == 0 and mode == "full":
             zone = self._zone_at(mouse.x - 1, mouse.y - 1)
             if zone is not None and zone[4][0] in ("status", "block", "link", "paste"):
@@ -3524,15 +3604,57 @@ class ChatApp:
             if pos is not None:
                 self.selection = (self._sel_anchor, pos)
         elif mouse.kind == "release" and mouse.button == 0:
-            anchor, self._sel_anchor = self._sel_anchor, None
-            if anchor is None or self.selection is None:
-                return
-            (l0, c0), (l1, c1) = self._sel_range()
-            if (l0, c0) == (l1, c1):
-                return  # простой клик без протяжки — не выделение
-            text = self.selection_text()
-            if text.strip() and self.copy_hook is not None:
-                self.copy_hook(text)
+            self._finish_selection_copy()
+
+    def _finish_selection_copy(self) -> None:
+        """Отпустили мышь после протяжки: выделение — в буфер обмена."""
+        anchor, self._sel_anchor = self._sel_anchor, None
+        if anchor is None or self.selection is None:
+            return
+        (l0, c0), (l1, c1) = self._sel_range()
+        if (l0, c0) == (l1, c1):
+            return  # простой клик без протяжки — не выделение
+        text = self.selection_text()
+        if text.strip() and self.copy_hook is not None:
+            self.copy_hook(text)
+
+    def _feed_drag_event(self, mouse: Mouse) -> bool:
+        """Идущий жест по ленте (ui.drag_scroll). Тяга ВДОЛЬ строк (сдвиг
+        на 2+ строки) — прокрутка за пальцем; тяга почти горизонтальная —
+        выделение, как раньше; после долгого нажатия (промоушн делает
+        draw) тяга выделяет в любую сторону. True — событие у жеста."""
+        drag = self._feed_drag
+        if drag is None:
+            return False
+        if mouse.kind == "move":
+            if drag["select"]:
+                pos = self._feed_pos(mouse)
+                if pos is not None and self._sel_anchor is not None:
+                    self.selection = (self._sel_anchor, pos)
+                return True
+            dy = (mouse.y - 1) - drag["y"]
+            if not drag["moved"] and abs(dy) >= 2:
+                drag["moved"] = True  # жест определился: это прокрутка
+                self.selection = None
+                self._sel_anchor = None
+            if drag["moved"]:
+                # Контент — за пальцем: палец вниз — лента вниз, к старому.
+                self.scroll = max(0, min(100000, drag["scroll"] + dy))
+                return True
+            pos = self._feed_pos(mouse)
+            if pos is not None:
+                if self._sel_anchor is None:
+                    self._sel_anchor = drag["pos"]
+                self.selection = (self._sel_anchor, pos)
+            return True
+        if mouse.kind == "release":
+            was_select = bool(drag["select"])
+            had_anchor = self._sel_anchor is not None
+            self._feed_drag = None
+            if was_select or had_anchor:
+                self._finish_selection_copy()
+            return True
+        return False
 
     # --- выделение мышью и копирование ------------------------------------------------
 
@@ -3552,6 +3674,7 @@ class ChatApp:
         if pos is None:
             self.selection = None
             self._sel_anchor = None
+            self._feed_drag = None
             return
         now = self._clock()
         last = self._last_press
@@ -3560,9 +3683,21 @@ class ChatApp:
                 and abs(mouse.x - last[1]) <= 1 and abs(mouse.y - last[2]) <= 1):
             self._select_word(pos)  # двойной клик — слово целиком, сразу в буфер
             self._sel_anchor = None
+            self._feed_drag = None
             text = self.selection_text()
             if text.strip() and self.copy_hook is not None:
                 self.copy_hook(text)
+            return
+        if self.settings.get("ui.drag_scroll"):
+            # Нажал и держит (ЗАДАЧА-22): тяга — прокрутка за пальцем,
+            # долгое нажатие — выделение (срок смотрит draw). Двойной
+            # клик выше уже обработан; Shift+протяжка — обход терминала.
+            self._feed_drag = {"pos": pos, "x": mouse.x - 1,
+                               "y": mouse.y - 1, "t": now,
+                               "scroll": self.scroll,
+                               "moved": False, "select": False}
+            self._sel_anchor = None
+            self.selection = None
             return
         self._sel_anchor = pos
         self.selection = (pos, pos)
@@ -3792,7 +3927,7 @@ class ChatApp:
     # --- отрисовка ---------------------------------------------------------------------------
 
     def _alpha(self, entry: Entry, now: float) -> float:
-        if not self.settings.get("ui.animations"):
+        if not self._anim_on():
             return 1.0
         return ease_in_out((now - entry.born) / 0.3)
 
@@ -3807,7 +3942,72 @@ class ChatApp:
             out.append((text, fg, attrs))
         return out
 
+    def _entry_cache_key(self, entry: Entry, width: int, now: float):
+        """Ключ кэша строк записи или None — запись живая, не кэшируем.
+
+        Живые: стрим, идущий тул, незаконченные рассуждения, свежий
+        градиент пересказа, проявляющийся хвост стрима и только что
+        родившиеся записи (пока идёт их собственное появление). Всё
+        остальное на длинной ленте неизменно — а пересчитывать перенос
+        и раскраску всей ленты на каждый кадр слабая машина не тянет
+        (замер до правки: ~275 мс кадр на ленте в 3600 строк).
+        """
+        if entry.streaming:
+            return None
+        if entry.kind == "tool" and entry.status == "running":
+            return None
+        if entry.kind == "thinking":
+            if not entry.finished_at:
+                return None
+            if entry.summary_lines and self._anim_on() \
+                    and now - entry.summary_lines[-1][1] < 0.9:
+                return None  # пересказ ещё проявляется градиентом
+        if entry.chunk_marks and self._anim_on() \
+                and str(self.settings.get("ui.stream_fade") or "off") != "off":
+            fade_s = max(0.05, float(self.settings.get("ui.stream_fade_ms")
+                                     or 220) / 1000.0)
+            if now - entry.chunk_marks[-1][1] < fade_s:
+                return None  # хвост стрима ещё проявляется
+        if self._anim_on() and entry.born and now - entry.born < 0.35:
+            return None  # собственное появление записи ещё идёт
+        stamp = [entry.kind, len(entry.text), entry.status, entry.ok,
+                 entry.summary, len(entry.output), len(entry.summary_lines),
+                 entry.summary_lines[-1][1] if entry.summary_lines else 0.0,
+                 entry.selected, entry.answer, entry.intent, entry.name,
+                 entry.risk, entry.reason]
+        if entry.kind in ("tool", "guard"):
+            stamp.append(tuple(sorted((k, str(v)[:40])
+                                      for k, v in (entry.args or {}).items())))
+        if entry.kind == "todo":
+            items = entry.items or self.todos
+            stamp.append(tuple((str(it.get("text", "")), str(it.get("status", "")))
+                               for it in items))
+        if entry.kind == "tool":
+            stamp.append(tuple((g.entry_id, g.status,
+                                tuple(sorted((k, str(v)[:40])
+                                             for k, v in (g.args or {}).items())))
+                               for g in self._guards_for(entry)))
+        return (width, self._exp(entry), self.expand_all,
+                self._thinking_mode(), bool(self.settings.get("ui.details")),
+                int(self.settings.get("ui.diff_lines") or 12),
+                self.glyph_mode, self._applied_theme, self._anim_on(),
+                self.guard_editing, self._guard_replace, tuple(stamp))
+
     def _entry_lines(self, entry: Entry, width: int, now: float):
+        """Визуальные строки записи: из кэша, если запись не изменилась."""
+        key = self._entry_cache_key(entry, width, now)
+        if key is not None and entry._cache_key == key \
+                and entry._cache_lines is not None:
+            return entry._cache_lines
+        lines = self._entry_lines_fresh(entry, width, now)
+        if key is not None:
+            entry._cache_key = key
+            entry._cache_lines = lines
+            entry._cache_texts = ["".join(t for t, _f, _a in spans)
+                                  for spans, _bg in lines]
+        return lines
+
+    def _entry_lines_fresh(self, entry: Entry, width: int, now: float):
         """Визуальные строки записи: список (спаны, фон строки)."""
         alpha = self._alpha(entry, now)
         raw: list = []
@@ -3840,7 +4040,7 @@ class ChatApp:
             moon = _think.moon_glyph(elapsed, self.glyph_mode)
             effort = str(self.settings.get("model.effort") or "auto")
             stars = ""
-            if entry.streaming and self.settings.get("ui.animations"):
+            if entry.streaming and self._anim_on():
                 # Звёзды вспыхивают на свежих кусках; глубина effort —
                 # числом звёзд (орбит) в шапке.
                 stars = " " + _think.star_sparkle(
@@ -3856,7 +4056,7 @@ class ChatApp:
 
             def add_grad(spans, born_at):
                 line_alpha = alpha
-                if self.settings.get("ui.animations"):
+                if self._anim_on():
                     line_alpha = alpha * _think.summary_alpha(born_at, now)
                 raw.append((self._paint(spans, line_alpha), None))
 
@@ -3894,7 +4094,7 @@ class ChatApp:
                 head.append(("  " + compact, "text"))
             if entry.status == "running":
                 head.append(("  " + self.spinner.glyph(now), "amber"))
-                if self.settings.get("ui.animations"):
+                if self._anim_on():
                     # Метеор вызова (ЗАДАЧА-19): звёздный след у идущего тула.
                     head.append((" " + _think.star_sparkle(
                         now, entry.born, 3, self.glyph_mode), "cyan"))
@@ -4072,7 +4272,7 @@ class ChatApp:
         on_agent_event, часы здесь — только аргумент now.
         """
         mode = str(self.settings.get("ui.stream_fade") or "off")
-        if mode == "off" or not self.settings.get("ui.animations"):
+        if mode == "off" or not self._anim_on():
             return None
         if self.color_level in ("16", "mono") or not entry.chunk_marks:
             return None
@@ -4122,7 +4322,7 @@ class ChatApp:
         """Что-то ещё проявляется — нужен кадр; в простое — тишина."""
         if str(self.settings.get("ui.stream_fade") or "off") == "off":
             return False
-        if not self.settings.get("ui.animations"):
+        if not self._anim_on():
             return False
         fade_s = max(0.05, float(self.settings.get("ui.stream_fade_ms") or 220) / 1000.0)
         for entry in reversed(self.entries[-3:]):
@@ -4132,6 +4332,7 @@ class ChatApp:
 
     def _feed_lines(self, width: int, now: float):
         lines: list = []
+        texts: list = []
         self._line_map = []
         thinking_mode = self._thinking_mode()
         for entry in self.entries:
@@ -4142,15 +4343,91 @@ class ChatApp:
                     and thinking_mode == "hidden":
                 continue  # /thinking скрыл показ рассуждений
             entry_lines = self._entry_lines(entry, width, now)
+            if entry._cache_lines is entry_lines \
+                    and entry._cache_texts is not None \
+                    and len(entry._cache_texts) == len(entry_lines):
+                entry_texts = entry._cache_texts
+            else:
+                entry_texts = ["".join(t for t, _f, _a in spans)
+                               for spans, _bg in entry_lines]
             for i, line in enumerate(entry_lines):
                 lines.append(line)
+                texts.append(entry_texts[i])
                 self._line_map.append((entry, i == 0))
             lines.append(([], None))
+            texts.append("")
             self._line_map.append(None)
         if lines:
             lines.pop()
+            texts.pop()
             self._line_map.pop()
+        self._feed_texts = texts
         return lines
+
+    # --- полоса прокрутки ленты (ЗАДАЧА-22) --------------------------------
+
+    def _scrollbar_visible(self, total: int, feed_h: int) -> bool:
+        mode = str(self.settings.get("ui.scrollbar") or "auto")
+        if mode == "off":
+            return False
+        if mode == "on":
+            return True
+        return total > feed_h  # auto: только когда есть что листать
+
+    def _draw_scrollbar(self, buf: Buffer, chat_w: int, feed_h: int,
+                        total: int, max_scroll: int) -> None:
+        """Полоса у правого края ЛЕНТЫ (при открытых панелях — не у края
+        экрана): тонкая дорожка и ползунок. Геометрию последнего кадра
+        запоминаем: по ней мышь считает попадание и тягу ползунка."""
+        self._sb_geom = None
+        if chat_w < 8 or feed_h < 2 \
+                or not self._scrollbar_visible(total, feed_h):
+            return
+        if max_scroll > 0:
+            thumb_h = min(feed_h, max(1, feed_h * feed_h // max(1, total)))
+            span = feed_h - thumb_h
+            thumb_y = int(round((max_scroll - self.scroll) * span
+                                / max_scroll)) if span > 0 else 0
+        else:
+            thumb_h, thumb_y = feed_h, 0
+        thumb_ch, track_ch = ("#", "|") if self.glyph_mode == "ascii" \
+            else ("█", "│")
+        x = chat_w - 1
+        for row in range(feed_h):
+            if thumb_y <= row < thumb_y + thumb_h:
+                buf.set(x, row, thumb_ch, fg=_color.SILVER, bg=_color.SPACE_BG)
+            else:
+                buf.set(x, row, track_ch, fg=DIM_FG, bg=_color.SPACE_BG)
+        self._sb_geom = (total, feed_h, max_scroll, thumb_y, thumb_h)
+
+    def _scrollbar_hit(self, mouse: Mouse) -> bool:
+        """Клик попал в колонку полосы прокрутки последнего кадра."""
+        if self._sb_geom is None:
+            return False
+        chat_w, feed_h = self._feed_geom
+        return (mouse.x - 1) == chat_w - 1 and 0 <= (mouse.y - 1) < feed_h
+
+    def _scrollbar_press(self, mouse: Mouse) -> None:
+        """Нажатие на полосу: по ползунку — захват тяги, по дорожке —
+        страница в ту сторону."""
+        _total, _feed_h, _max_scroll, thumb_y, thumb_h = self._sb_geom
+        y = mouse.y - 1
+        if thumb_y <= y < thumb_y + thumb_h:
+            self._sb_drag = y - thumb_y
+        elif y < thumb_y:
+            self.scroll = min(self.scroll + self._page, 100000)
+        else:
+            self.scroll = max(0, self.scroll - self._page)
+
+    def _scrollbar_move(self, mouse: Mouse) -> None:
+        """Тяга ползунка: его верх едет за мышью, прокрутка — обратно
+        пропорционально (та же формула, что у отрисовки, наоборот)."""
+        _total, feed_h, max_scroll, _thumb_y, thumb_h = self._sb_geom
+        span = feed_h - thumb_h
+        if span <= 0 or max_scroll <= 0:
+            return
+        new_y = min(max(0, (mouse.y - 1) - (self._sb_drag or 0)), span)
+        self.scroll = max_scroll - int(round(new_y * max_scroll / span))
 
     def _panel_content(self, panel_id: str):
         if panel_id not in self._panel_cache:
@@ -4255,7 +4532,7 @@ class ChatApp:
         if picker is None:
             return
         alpha = 1.0
-        if self.settings.get("ui.animations"):
+        if self._anim_on():
             alpha = ease_in_out((now - picker.born) / 0.25)
         lines, sel_row = picker.render_block(max(10, width - 2), max(3, height - 1))
         for row, spans in enumerate(lines[:height]):
@@ -4371,7 +4648,7 @@ class ChatApp:
                 target = max(24, cols // 3)
         if self.layout.leaves():
             self._panel_ghost = self.layout.clone()
-        if not self.settings.get("ui.animations"):
+        if not self._anim_on():
             self._panel_anim = None
             self._panel_shown_w = float(target)
             return target
@@ -4396,6 +4673,34 @@ class ChatApp:
         return int(round(value))
 
     def draw(self, cols: int, rows: int, now: float):
+        """Кадр целиком; длительность замеряем — ui.perf=auto по ней
+        решает, не пора ли в слабый режим (см. _note_frame_time)."""
+        started = time.perf_counter()
+        try:
+            return self._draw_frame(cols, rows, now)
+        finally:
+            self._note_frame_time(time.perf_counter() - started)
+
+    def _draw_frame(self, cols: int, rows: int, now: float):
+        # Слабый режим включился сам на прошлых кадрах — предупредить
+        # строкой в ленту, один раз за сессию.
+        if self._auto_low and not self._perf_warned:
+            self._perf_warned = True
+            self._add(Entry("notice", text="Кадры даются этой машине тяжело — "
+                                           "включила слабый режим интерфейса: "
+                                           "реже кадры, без проявления стрима "
+                                           "и звёзд. Насовсем: luna set ui.perf "
+                                           "low; вернуть полный: luna set "
+                                           "ui.perf full"))
+        # Долгое нажатие на ленту — выделение (жест ui.drag_scroll):
+        # палец держат на месте дольше порога — дальше тяга выделяет.
+        drag = self._feed_drag
+        if drag is not None and not drag["moved"] and not drag["select"] \
+                and now - drag["t"] >= self._LONG_PRESS_SEC:
+            drag["select"] = True
+            if self._sel_anchor is None:
+                self._sel_anchor = drag["pos"]
+                self.selection = (drag["pos"], drag["pos"])
         # Тема — на лету: настройку ui.theme могли сменить /theme, тулом
         # luna или правкой файла; палитра применяется до отрисовки кадра.
         theme_name = str(self.settings.get("ui.theme") or "luna")
@@ -4442,8 +4747,7 @@ class ChatApp:
         start = max(0, end - feed_h)
         # Геометрия и тексты ленты — для выделения мышью и копирования (п. 4):
         # строки хранятся все, first — индекс первой видимой на этом кадре.
-        self._feed_texts = ["".join(t for t, _f, _a in spans)
-                            for spans, _bg in lines]
+        # Сами тексты уже собрал _feed_lines (неизменные — из кэша записей).
         self._feed_first = start
         self._feed_geom = (chat_w, feed_h)
         for row, (spans, bg) in enumerate(lines[start:end]):
@@ -4460,6 +4764,7 @@ class ChatApp:
             for a, b, token in _find_links(line_text):
                 self.zones.append((a, row, b + 1, row + 1, ("link", token)))
         self._draw_selection(buf, start, feed_h)
+        self._draw_scrollbar(buf, chat_w, feed_h, len(lines), max_scroll)
         if panel_w:
             tree = self.layout if self.layout.leaves() else (self._panel_ghost or self.layout)
             total_h = feed_h + input_h + completion_h + nib_h + meta_h
@@ -4488,13 +4793,17 @@ class ChatApp:
                 name, desc = self.cmd_completions[i]
                 style_fg = _color.CYAN if i == self.completion_index else DIM_FG
                 attrs = _color.BOLD if i == self.completion_index else _color.DIM
-                buf.text(2, cy + j, "/" + name + " — " + desc,
+                buf.text(2, cy + j,
+                         _cells_slice("/" + name + " — " + desc, 0,
+                                      max(0, chat_w - 2)),
                          fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
         else:
             for i, candidate in enumerate(self.completions[:completion_h]):
                 style_fg = _color.CYAN if i == self.completion_index else DIM_FG
                 attrs = _color.BOLD if i == self.completion_index else _color.DIM
-                buf.text(2, cy + i, "@" + candidate, fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
+                buf.text(2, cy + i,
+                         _cells_slice("@" + candidate, 0, max(0, chat_w - 2)),
+                         fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
         if nib_h:
             # Строка Ниблера — между лентой и вводом; в конце жизни затухает.
             text, severity = self._nibbler_line
@@ -4503,7 +4812,11 @@ class ChatApp:
             if left < 1.5:
                 fg = _color.lerp(_color.SPACE_BG, fg, max(0.0, left / 1.5))
             label = "🐾 Ниблер: " if self.glyph_mode == "emoji" else "Ниблер: "
-            buf.text(2, feed_h + completion_h, label + text, fg=fg,
+            # Режем по ширине ЛЕНТЫ, а не экрана: раньше длинная реплика
+            # уезжала поверх колонки панелей — Ниблер писал вне раскладки
+            # (ЗАДАЧА-22). Весь вывод — только внутри своего места кадра.
+            buf.text(2, feed_h + completion_h,
+                     _cells_slice(label + text, 0, max(0, chat_w - 2)), fg=fg,
                      bg=_color.SPACE_BG, attrs=_color.ITALIC)
         my = feed_h + completion_h + nib_h
         for i, line in enumerate(meta_lines):

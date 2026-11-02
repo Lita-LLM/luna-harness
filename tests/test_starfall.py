@@ -372,13 +372,15 @@ class StarfallToolTest(StarfallCase):
         self.assertFalse(out.ok)
         self.assertIn("max_cells", out.text)
         out = self._starfall(self.ctx, {"action": "run", "profile": "cls",
-                                        "inputs": ["x"], "budget_usd": 2.0})
+                                        "inputs": ["x"], "budget_usd": 2.0,
+                                        "force": True})  # force: тест не про порог входов (ЗАДАЧА-22)
         self.assertFalse(out.ok)
         self.assertIn("budget_usd", out.text)
 
     def test_project_mode_needs_confirmation(self):
         out = self._starfall(self.ctx, {"action": "run", "profile": "cls",
-                                        "inputs": ["x"], "write_mode": "project"})
+                                        "inputs": ["x"], "write_mode": "project",
+                                        "force": True})  # force: тест не про порог входов (ЗАДАЧА-22)
         self.assertFalse(out.ok)
         self.assertIn("project", out.text)
 

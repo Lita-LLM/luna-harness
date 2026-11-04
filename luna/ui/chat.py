@@ -31,6 +31,7 @@ from . import themes as _themes
 from . import thinking_view as _think
 from .anim import PhraseWheel, Scheduler, Spinner, ease_in_out, ease_out
 from .editor import TextEditor
+from .keyhints import find_key_hints
 from .keys import Key, Mouse, Paste, Resize
 from .markdown import Span, render_markdown, wrap_spans, wrap_text
 from .panels import LayoutTree, PanelData, create_panel, find_panel, registered_panels
@@ -473,6 +474,7 @@ class ChatApp:
         # свёрнутые вставки, уведомления и заголовок окна.
         self.expand_all = bool(self.settings.get("ui.expand_all"))
         self.zones: list = []            # карта кликабельных зон последнего кадра
+        self._hover_pos = None           # где мышь: подсветка подсказки клавиши
         self._line_map: list = []        # визуальная строка ленты → (запись, первая?)
         self._block_sel = None           # запись под курсором блоков (Alt+↑/↓)
         self._stash: tuple | None = None  # (текст, курсор) заначки Ctrl+S
@@ -3502,6 +3504,36 @@ class ChatApp:
             self._click_link(action[1])
         elif kind == "paste":
             self._expand_paste_in_editor()
+        elif kind == "key":
+            # Клик по подсказке «Esc — закрыть» — та же клавиша, что с
+            # клавиатуры: без неё (нетбук, сенсор) доступно всё обещанное.
+            self.handle_key(action[1])
+
+    def _key_zones(self, buf: Buffer, text: str, x: int, y: int,
+                   right: int) -> None:
+        """Зоны «Клавиша — действие» строки text, нарисованной с колонки x;
+        под мышью кусочек подсвечивается — видно, что это кнопка."""
+        if not self.settings.get("ui.click_hints"):
+            return
+        hints = find_key_hints(text)
+        if not hints:
+            return
+        hover = None
+        hp = self._hover_pos
+        if hp is not None and hp[1] == y:
+            for i, (a, b, _key) in enumerate(hints):
+                if x + a <= hp[0] < x + b:
+                    hover = i  # последняя накрывшая — как у _zone_at
+        for i, (a, b, key) in enumerate(hints):
+            x0, x1 = x + a, min(x + b, right, buf.cols)
+            if x1 <= x0:
+                continue
+            self.zones.append((x0, y, x1, y + 1, ("key", key)))
+            if i == hover and 0 <= y < buf.rows:
+                for cx in range(x0, x1):
+                    ch, _fg, bg, attrs = buf.cell(cx, y)
+                    buf.cells[y][cx] = (ch, _color.CYAN, bg,
+                                        (attrs & ~_color.DIM) | _color.UNDERLINE)
 
     def _picker_mouse(self, mouse: Mouse) -> None:
         """Мышь над выбиралкой: наведение подсвечивает, клик выбирает,
@@ -3514,6 +3546,10 @@ class ChatApp:
             picker._move(-3 if mouse.kind == "wheel_up" else 3)
             return
         zone = self._zone_at(mx, my)
+        if zone is not None and zone[4][0] == "key":
+            if mouse.kind == "press" and mouse.button == 0:
+                self._zone_action(zone[4])
+            return
         item = zone[4][1] if zone is not None and zone[4][0] == "picker" else None
         if item is None:
             return
@@ -3536,6 +3572,8 @@ class ChatApp:
         mode = self._mouse_mode()
         if mode == "off":
             return  # мышь не трогаем вовсе: выделение — за терминалом
+        if mouse.kind == "move":
+            self._hover_pos = (mouse.x - 1, mouse.y - 1)
         if "shift" in mouse.mods and mouse.kind in ("press", "move", "release"):
             return  # Shift+протяжка — обход: выделение средствами терминала
         if self.picker is not None:
@@ -3562,7 +3600,8 @@ class ChatApp:
             return
         if mouse.kind == "press" and mouse.button == 0 and mode == "full":
             zone = self._zone_at(mouse.x - 1, mouse.y - 1)
-            if zone is not None and zone[4][0] in ("status", "block", "link", "paste"):
+            if zone is not None and zone[4][0] in ("status", "block", "link",
+                                                   "paste", "key"):
                 self._zone_action(zone[4])
                 return
         if self._col_drag:
@@ -4547,6 +4586,8 @@ class ChatApp:
             item = picker._row_map.get(row)
             if item is not None:
                 self.zones.append((0, row, width, row + 1, ("picker", item)))
+            elif any(role == "hint" for _t, role in spans):
+                self._key_zones(buf, "".join(t for t, _r in spans), 1, row, width)
 
     def _status_line(self, buf: Buffer, y: int, cols: int, now: float) -> None:
         buf.fill_rect(0, y, cols, 1, " ", bg=STATUS_BG)
@@ -4589,7 +4630,8 @@ class ChatApp:
             (str(self.settings.get("ui.theme") or "luna"), ("status", "theme"), "theme"),
         ]
         if self.layout.leaves() and not self.panel_focus:
-            segments.append((" · F6 — панели", None, "extra"))
+            segments.append((" · ", None, "extra"))
+            segments.append(("F6 — панели", ("key", Key("f6")), "extra"))
         if self.settings.get("ui.vim_mode"):
             segments.append((" · vim:" + ("normal" if self._vim_normal else "insert"), None, "extra"))
         right_w = str_width("$" + format(self.cost, ".4f")) + 1
@@ -4716,6 +4758,10 @@ class ChatApp:
         chat_w = cols - panel_w
         guard = self.pending_guard
         ask = self.pending_ask
+        # Вместо ввода — строка подсказок ответа: она же ряд кнопок.
+        guard_hint = (guard is not None and not self.guard_editing
+                      and not self._guard_replace) or (
+            guard is None and ask is not None and not self.editor.text)
         if guard is not None and not self.guard_editing and not self._guard_replace:
             input_lines, cursor_pos = ["Enter — да · n — нет · e — править · "
                                        "a — без вопросов · p — в проекте без вопросов · "
@@ -4763,6 +4809,11 @@ class ChatApp:
             line_text = self._feed_texts[start + row] if start + row < len(self._feed_texts) else ""
             for a, b, token in _find_links(line_text):
                 self.zones.append((a, row, b + 1, row + 1, ("link", token)))
+            if mapped is not None and mapped[0].status == "pending" \
+                    and mapped[0].kind in ("guard", "ask"):
+                # Подсказки ожидающего вопроса — кнопки; у отвеченного
+                # они уже ничего не значат, а модельный текст не трогаем.
+                self._key_zones(buf, line_text, 0, row, chat_w)
         self._draw_selection(buf, start, feed_h)
         self._draw_scrollbar(buf, chat_w, feed_h, len(lines), max_scroll)
         if panel_w:
@@ -4775,8 +4826,10 @@ class ChatApp:
             self._draw_panels(buf, chat_w, 0, panel_w,
                               total_h - len(hint_lines), now, tree=tree)
             for i, line in enumerate(hint_lines):
-                buf.text(chat_w + 1, total_h - len(hint_lines) + i, line,
-                         fg=DIM_FG, bg=PANEL_BG, attrs=_color.DIM)
+                hy = total_h - len(hint_lines) + i
+                buf.text(chat_w + 1, hy, line, fg=DIM_FG, bg=PANEL_BG,
+                         attrs=_color.DIM)
+                self._key_zones(buf, line, chat_w + 1, hy, cols)
         else:
             self._panel_rects = {}
         cy = feed_h
@@ -4823,6 +4876,7 @@ class ChatApp:
             # Подсказка, очередь и режим отправки — строкой над вводом.
             buf.text(2, my + i, _cells_slice(line, 0, max(3, chat_w - 3)),
                      fg=DIM_FG, bg=_color.SPACE_BG, attrs=_color.DIM)
+            self._key_zones(buf, line, 2, my + i, chat_w - 1)
         iy = my + meta_h
         for i, line in enumerate(input_lines):
             prefix = "› " if i == 0 else "  "
@@ -4830,6 +4884,8 @@ class ChatApp:
             attrs = _color.BOLD if guard is not None or i == 0 else 0
             buf.text(0, iy + i, prefix, fg=fg, bg=_color.SPACE_BG, attrs=_color.BOLD)
             buf.text(2, iy + i, line, fg=_color.SILVER, bg=_color.SPACE_BG, attrs=attrs)
+            if guard_hint:
+                self._key_zones(buf, line, 2, iy + i, chat_w)
         if self._pastes and any(ph in self.editor.text for ph in self._pastes):
             # Клик по полю ввода со свёрнутой вставкой — развернуть её.
             self.zones.append((0, iy, chat_w, iy + input_h, ("paste",)))

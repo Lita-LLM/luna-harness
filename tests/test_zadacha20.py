@@ -595,9 +595,12 @@ class GuardHabitsTest(unittest.TestCase):
                                  mode="normal")
         # Чтение/низкий риск не спрашивает; высокий — по проектному «всегда».
         self.assertEqual(decision.decision, "allow")
-        saved = json.loads((root / ".luna" / "settings.json").read_text(
+        # Уровень проекта хранится в глобальных настройках по ключу папки:
+        # проектный файл чужого репозитория не может его подложить.
+        saved = json.loads((root / "home" / "settings.json").read_text(
             encoding="utf-8"))
-        self.assertEqual(saved["guard"]["always_rank_project"], 2)
+        self.assertEqual(saved["guard"]["always_rank_projects"],
+                         {settings.project_key(): 2})
 
 
 class BangShellTest(unittest.TestCase):

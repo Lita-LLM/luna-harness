@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -98,6 +99,81 @@ def _sandbox_preexec(spec, timeout: int):
     return apply
 
 
+# Поверх того, что прячет песочница роя: чаты и ключи других харнессов.
+# Работник с bash не должен вычитать их через «/ только для чтения».
+_CAGE_HIDE_DIRS = (".claude", ".codex", ".gemini", ".config/opencode")
+_CONTAINER_CLIENT_ENV = ("HOME", "XDG_RUNTIME_DIR", "DOCKER_HOST", "CONTAINER_HOST",
+                         "DOCKER_CONFIG")
+
+
+def _cage_workdir(ctx, cage) -> Path:
+    if cage.fs_mode == "rw" and cage.fs_roots:
+        return Path(cage.fs_roots[0])
+    scratch = getattr(ctx, "scratch_dir", None)
+    if scratch is None:
+        import tempfile
+
+        scratch = Path(tempfile.mkdtemp(prefix="luna-cage-sh-"))
+        ctx.scratch_dir = scratch  # уберёт Agent.cleanup()
+    return Path(scratch)
+
+
+def _cage_spec(ctx, cage):
+    """(SandboxSpec, None) или (None, причина отказа). Без проверенной
+    изоляции bash клетки не запускается никогда — ни на Windows, ни при
+    starfall.sandbox=none."""
+    if cage.bash != "sandbox":
+        return None, "клетка: bash не выдан (bash: off)."
+    from ..starfall.sandbox import BACKEND_ORDER, resolve_spec
+
+    workdir = _cage_workdir(ctx, cage)
+    spec = resolve_spec(ctx.settings, workdir, net=False)
+    if spec.unavailable or spec.backend not in BACKEND_ORDER or not spec.verified:
+        reason = str(getattr(spec, "reason", "") or "бэкенд не найден")
+        return None, ("клетка: изоляция bash недоступна (" + reason + "). "
+                      "Команда НЕ выполнена: без песочницы клетка bash не запускает.")
+    spec.net = False  # сеть работнику — только через web_fetch с его списком хостов
+    return spec, None
+
+
+def _cage_hide_args(workdir: Path) -> list:
+    home = Path(os.path.expanduser("~"))
+    args: list = []
+    for rel in _CAGE_HIDE_DIRS:
+        d = home / rel
+        if d.is_dir() and d != workdir and d not in workdir.parents:
+            args += ["--tmpfs", str(d)]
+    return args
+
+
+def _spawn_cage(ctx, cage, command: str, kwargs: dict):
+    from ..worker.cage import env_for_bash
+
+    spec, error = _cage_spec(ctx, cage)
+    if spec is None:
+        return None, error
+    argv, _env = spec.wrap(command)
+    workdir = Path(spec.workdir)
+    if spec.backend == "bwrap":
+        # Прячем до --bind рабочей папки: поздний mount сильнее раннего.
+        hide = _cage_hide_args(workdir)
+        try:
+            at = argv.index("--bind")
+        except ValueError:
+            at = len(argv) - 3
+        argv = argv[:at] + hide + argv[at:]
+        env = env_for_bash()
+    else:
+        env = env_for_bash()
+        # клиенту контейнеров нужны свои конфиги и сокет; внутрь контейнера
+        # это не попадает — туда идут только явные --env рецепта
+        env.update({k: os.environ[k] for k in _CONTAINER_CLIENT_ENV if k in os.environ})
+    kwargs["env"] = env
+    proc = subprocess.Popen(argv, shell=False, cwd=str(workdir),
+                            stdin=subprocess.DEVNULL, **kwargs)
+    return proc, None
+
+
 def _spawn(ctx, command: str, timeout: int, **popen_kw):
     """Запуск команды с учётом ctx.sandbox (изоляция ячеек, ЗАДАЧА-21).
 
@@ -107,6 +183,9 @@ def _spawn(ctx, command: str, timeout: int, **popen_kw):
     spec = getattr(ctx, "sandbox", None)
     kwargs = dict(popen_kw)
     kwargs.update(_group_kwargs())
+    cage = getattr(ctx, "cage", None)
+    if cage is not None:
+        return _spawn_cage(ctx, cage, command, kwargs)
     if spec is not None and getattr(spec, "unavailable", False):
         return None, ("Изоляция bash недоступна: " +
                       str(getattr(spec, "reason", "") or "бэкенд не найден") +
@@ -129,11 +208,16 @@ def _bash(ctx, args) -> ToolResult:
     command = args.get("command", "")
     if not command.strip():
         return ToolResult(False, "Пустая команда.")
+    cage = getattr(ctx, "cage", None)
+    if cage is not None and cage.bash != "sandbox":
+        return ToolResult(False, "клетка: bash не выдан (bash: off).")
     timeout = int(args.get("timeout") or 0)
     if not timeout:
         timeout = int(ctx.settings.get("tools.bash_timeout", 120)) if ctx.settings else 120
     if args.get("background"):
-        log_dir = Path(getattr(ctx, "output_dir", "") or ".")
+        # Без output_dir — во временную папку системы, не в cwd: иначе
+        # логи фона сыплются прямо в проект.
+        log_dir = Path(getattr(ctx, "output_dir", "") or tempfile.gettempdir())
         log_dir.mkdir(parents=True, exist_ok=True)
         log = log_dir / ("bg-" + time.strftime("%Y%m%d-%H%M%S") + ".log")
         # Вывод фона — в файл: непрочитанный PIPE рано или поздно повесит процесс.

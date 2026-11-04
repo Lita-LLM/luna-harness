@@ -169,7 +169,8 @@ class SandboxSpec:
 # «/ только для чтения» всё ещё даёт ячейке ЧИТАТЬ сейф Луны и ключи
 # хозяина — а прочитанное уйдёт модели в выводе bash. Прячем их поверх.
 _SECRET_DIRS = (".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker",
-                ".config/gh", ".config/gcloud", ".password-store")
+                ".config/gh", ".config/gcloud", ".password-store",
+                ".claude", ".codex", ".gemini")
 _SECRET_FILES = (".netrc", ".git-credentials", ".pgpass", ".npmrc", ".pypirc")
 
 

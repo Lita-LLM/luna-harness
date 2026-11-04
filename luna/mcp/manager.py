@@ -160,28 +160,66 @@ def _load_json(path: Path, problems: list) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def config_paths(cwd, home) -> list:
-    """Файлы конфигов в порядке возрастания силы."""
+# Проектные конфиги: (путь от каталога, подпись, формат OpenCode).
+PROJECT_SOURCES = ((".mcp.json", ".mcp.json", False),
+                   ("opencode.json", "opencode.json", True),
+                   (".luna/mcp.json", ".luna/mcp.json", False))
+
+
+def _sources(cwd, home, project_configs: bool = True, global_config=None) -> list:
     cwd, home = Path(cwd), Path(home)
-    return [home / "mcp.json", cwd / ".mcp.json", cwd / "opencode.json", cwd / ".luna" / "mcp.json"]
+    if global_config is not None:
+        first = (Path(global_config), str(global_config), False)
+    else:
+        first = (home / "mcp.json", "LUNA_HOME/mcp.json", False)
+    out = [first]
+    if project_configs:
+        out += [(cwd / rel, label, oc) for rel, label, oc in PROJECT_SOURCES]
+    return out
 
 
-def has_mcp_config(cwd, home) -> bool:
-    return any(path.exists() for path in config_paths(cwd, home))
+def config_paths(cwd, home, project_configs: bool = True, global_config=None) -> list:
+    """Файлы конфигов в порядке возрастания силы.
+
+    project_configs=False — только файл хозяина: проектные конфиги запускают
+    команды сами, из недоверенной папки и в клетке их не читаем.
+    """
+    return [path for path, _l, _o in _sources(cwd, home, project_configs, global_config)]
 
 
-def load_configs(cwd, home) -> tuple:
-    """(серверы по имени, проблемы разбора). Поздний источник перекрывает ранний."""
-    cwd, home = Path(cwd), Path(home)
+def has_mcp_config(cwd, home, project_configs: bool = True, global_config=None) -> bool:
+    return any(path.exists() for path in config_paths(cwd, home, project_configs, global_config))
+
+
+def project_config_labels(cwd) -> list:
+    """Какие проектные конфиги MCP лежат в каталоге (для честного «пропущен»)."""
+    cwd = Path(cwd)
+    out = []
+    for rel, label, is_opencode in PROJECT_SOURCES:
+        path = cwd / rel
+        if not path.is_file():
+            continue
+        if is_opencode:
+            # opencode.json без раздела mcp серверов не запускает — молчим
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or "mcp" not in data:
+                continue
+        out.append(label)
+    return out
+
+
+def load_configs(cwd, home, project_configs: bool = True, global_config=None,
+                 only_servers=None) -> tuple:
+    """(серверы по имени, проблемы разбора). Поздний источник перекрывает ранний.
+
+    only_servers — набор имён: остальные серверы даже не разбираются (клетка).
+    """
     servers: dict[str, ServerConfig] = {}
     problems: list[str] = []
-    sources = [
-        (home / "mcp.json", "LUNA_HOME/mcp.json", False),
-        (cwd / ".mcp.json", ".mcp.json", False),
-        (cwd / "opencode.json", "opencode.json", True),
-        (cwd / ".luna" / "mcp.json", ".luna/mcp.json", False),
-    ]
-    for path, label, is_opencode in sources:
+    for path, label, is_opencode in _sources(cwd, home, project_configs, global_config):
         if not path.exists():
             continue
         data = _load_json(path, problems)
@@ -196,6 +234,8 @@ def load_configs(cwd, home) -> tuple:
             problems.append(label + ": нет объекта " + ("mcp" if is_opencode else "mcpServers"))
             continue
         for name, entry in entries.items():
+            if only_servers is not None and str(name) not in only_servers:
+                continue
             cfg = _from_entry(str(name), entry, label, problems, opencode=is_opencode)
             if cfg is not None:
                 servers[cfg.name] = cfg
@@ -229,13 +269,18 @@ def resolve_map(values: dict, secrets, environ) -> dict:
 class Manager:
     """Живые подключения одного набора конфигов; создаётся лениво, стартует серверы по требованию."""
 
-    def __init__(self, *, cwd, home=None, secrets=None, environ=None, opener=None):
+    def __init__(self, *, cwd, home=None, secrets=None, environ=None, opener=None,
+                 project_configs: bool = True, global_config=None, only_servers=None):
         self.cwd = Path(cwd)
         self.home = Path(home) if home is not None else luna_home()
+        # secrets может быть суженным видом (клетка): нужен только .get(имя)
         self.secrets = secrets if secrets is not None else Secrets(self.home / "secrets.json")
         self.environ = environ if environ is not None else os.environ
         self._opener = opener
-        self._servers, self.problems = load_configs(self.cwd, self.home)
+        self.project_configs = project_configs
+        self._servers, self.problems = load_configs(
+            self.cwd, self.home, project_configs=project_configs,
+            global_config=global_config, only_servers=only_servers)
         self._clients: dict[str, Client] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._tools: dict[str, list] = {}
@@ -373,8 +418,12 @@ class Manager:
 # --- склейка с реестром тулов ---------------------------------------------------
 
 
-def build_mcp_tools(manager: Manager) -> tuple:
-    """(тулы реестра, ошибки по серверам). Один битый сервер не роняет остальные."""
+def build_mcp_tools(manager: Manager, tool_filter=None) -> tuple:
+    """(тулы реестра, ошибки по серверам). Один битый сервер не роняет остальные.
+
+    tool_filter(server, raw_name, alias) -> bool — какие тулы регистрировать
+    (клетка); отсеянные модель не увидит вовсе.
+    """
     from ..tools.registry import Tool, ToolResult
 
     tools: dict[str, Tool] = {}
@@ -393,6 +442,8 @@ def build_mcp_tools(manager: Manager) -> tuple:
         for definition in definitions:
             raw_name = definition["name"]
             alias = tool_alias(cfg.name, raw_name)
+            if tool_filter is not None and not tool_filter(cfg.name, raw_name, alias):
+                continue
             description = "MCP-сервер " + cfg.name + ", тул " + raw_name + "."
             text = str(definition.get("description") or "").strip()
             if text:
@@ -406,5 +457,6 @@ def build_mcp_tools(manager: Manager) -> tuple:
                 return handler
 
             tools[alias] = Tool(alias, description, definition["inputSchema"],
-                                make_handler(cfg.name, raw_name), mutating=True)
+                                make_handler(cfg.name, raw_name), mutating=True,
+                                origin=(cfg.name, raw_name))
     return tools, errors

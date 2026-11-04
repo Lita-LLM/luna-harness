@@ -67,9 +67,21 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna mcp test <имя>       подключиться к MCP-серверу и перечислить его тулы
   luna pool key <имя>       ключ адреса пула роя скрытым вводом в сейф (pool:<имя>)
   luna -p "задача"          headless: один ход без экрана; ответ — stdout, ход — stderr;
-                            --output text|json|stream-json, --mode, --model, --max-usd,
-                            --max-turns, --allow <шаблон>; промпт можно дать и в stdin;
-                            --continue / --resume <id> продолжают сессию
+                            --output text|json|stream-json (json — один итоговый объект),
+                            --mode, --model, --max-usd, --max-turns, --timeout SEC,
+                            --allow <шаблон>, --schema FILE, --fail-on-deny, --cwd DIR;
+                            промпт можно дать и в stdin; --continue / --resume <id>
+                            продолжают сессию; коды выхода: 0 ok, 1 модель/сеть,
+                            2 флаги/профиль, 3 лимит, 4 отказ, 5 схема, 6 MCP, 130 прервано
+  luna -p --worker ИМЯ "…"  работник в клетке: профиль LUNA_HOME/workers/ИМЯ.json
+                            (или --worker-file PATH); флаги только сужают; --check —
+                            показать итоговую клетку без модели. Клетка из одних флагов:
+                            --tools a,b  --deny ШАБЛОН  --mcp СЕРВЕР[:тул,шаблон*]
+                            --mcp-config FILE  --fs none|ro|rw  --root DIR  --bash off|sandbox
+                            --fetch-host ШАБЛОН  --fetch-any  --fetch-query
+                            --instructions none|project|all. Подробно: docs/РАБОТНИК.md
+  luna trust [PATH]         пометить проект доверенным (security.trusted_projects);
+                            --list — список; luna untrust [PATH] — снять доверие
   luna --version            версия
 """
 
@@ -251,6 +263,211 @@ def _cmd_manners(argv: list[str]) -> int:
                      "Без аргументов в терминале — выбиралка, в пайпе — список.")
 
 
+# Флаги luna -p: со значением и без. Флаги клетки сами включают клетку:
+# что в ней не названо — закрыто (docs/РАБОТНИК.md).
+_P_VALUE_FLAGS = ("--output", "--mode", "--model", "--max-usd", "--max-turns", "--allow",
+                  "--worker", "--worker-file", "--tools", "--deny", "--mcp", "--mcp-config",
+                  "--fs", "--root", "--bash", "--fetch-host", "--instructions", "--schema",
+                  "--timeout", "--cwd")
+_P_BOOL_FLAGS = ("--json", "--check", "--fetch-any", "--fetch-query", "--fail-on-deny")
+_P_REPEAT = ("--allow", "--deny", "--mcp", "--root", "--fetch-host")
+_CAGE_FLAGS = ("--tools", "--deny", "--mcp", "--mcp-config", "--fs", "--root", "--bash",
+               "--fetch-host", "--fetch-any", "--fetch-query", "--instructions")
+
+
+def _parse_p_flags(rest: list[str]):
+    from .core.errors import HumanError
+
+    values: dict = {f: [] for f in _P_REPEAT}
+    prompt_parts: list[str] = []
+    idx = 0
+    while idx < len(rest):
+        item = rest[idx]
+        name, eq, inline = item.partition("=")
+        if item.startswith("--") and name in _P_VALUE_FLAGS:
+            if eq:
+                value = inline
+            else:
+                if idx + 1 >= len(rest):
+                    raise HumanError("usage", "Флагу " + name + " нужно значение", "")
+                idx += 1
+                value = rest[idx]
+            if name in _P_REPEAT:
+                values[name].append(value)
+            else:
+                values[name] = value
+        elif item in _P_BOOL_FLAGS:
+            values[item] = True
+        else:
+            prompt_parts.append(item)
+        idx += 1
+    return values, prompt_parts
+
+
+def _number(values: dict, flag: str, kind):
+    from .core.errors import HumanError
+
+    raw = values.get(flag)
+    if raw is None:
+        return kind(0)
+    try:
+        number = kind(raw)
+    except ValueError:
+        raise HumanError("usage", flag + " — " + ("целое число" if kind is int else "число") +
+                         ", а не " + repr(raw), "") from None
+    if number < 0:
+        raise HumanError("usage", flag + " не может быть отрицательным", "")
+    return number
+
+
+def _cmd_headless(rest: list[str], *, continue_last: bool, resume) -> int:
+    from pathlib import Path
+
+    from .core.errors import HumanError
+    from .headless import run_headless
+
+    values, prompt_parts = _parse_p_flags(rest)
+    if resume is not None and not resume:
+        raise HumanError("usage", "Для luna -p нужно: --resume <id сессии>",
+                         "Id виден в журнале сессий (LUNA_HOME/sessions) "
+                         "и в строке сессии headless.")
+    max_usd = _number(values, "--max-usd", float)
+    max_turns = _number(values, "--max-turns", int)
+    timeout_s = _number(values, "--timeout", float)
+    workdir = Path(values["--cwd"]).expanduser().resolve() if values.get("--cwd") else Path.cwd()
+    if not workdir.is_dir():
+        raise HumanError("usage", "--cwd: нет такой папки: " + str(workdir), "")
+    schema = None
+    if values.get("--schema"):
+        from .worker.profile import load_schema_file
+
+        schema = load_schema_file(values["--schema"])
+    check = bool(values.get("--check"))
+    tools = None
+    if "--tools" in values:
+        tools = [t.strip() for t in str(values["--tools"]).split(",") if t.strip()]
+    mcp = None
+    if values["--mcp"]:
+        from .worker.profile import parse_mcp_flag
+
+        mcp = {}
+        for item in values["--mcp"]:
+            server, globs = parse_mcp_flag(item)
+            if server not in mcp:
+                mcp[server] = globs
+            elif mcp[server] is None or globs is None:
+                mcp[server] = None  # один из флагов просил все тулы сервера
+            else:
+                mcp[server] = list(mcp[server]) + globs
+    worker = values.get("--worker")
+    worker_file = values.get("--worker-file")
+    if worker and worker_file:
+        raise HumanError("usage", "Либо --worker, либо --worker-file", "")
+    cage_flags = any(values.get(f) or (f == "--tools" and tools is not None) for f in _CAGE_FLAGS)
+    cage = None
+    if worker or worker_file:
+        from .worker.profile import load_profile, narrow
+
+        cage = load_profile(worker or str(Path(worker_file).expanduser().resolve()),
+                            cwd=workdir)
+        cage = narrow(cage, tools=tools, deny=values["--deny"], allow=values["--allow"],
+                      max_usd=max_usd, max_steps=max_turns, timeout_s=timeout_s,
+                      mode=values.get("--mode", ""), schema=schema,
+                      fs_roots=values["--root"] or None, fs_mode=values.get("--fs", ""),
+                      bash=values.get("--bash", ""), fetch_hosts=values["--fetch-host"] or None,
+                      fetch_any=bool(values.get("--fetch-any")),
+                      fetch_query=True if values.get("--fetch-query") else None,
+                      instructions=values.get("--instructions", ""), mcp=mcp,
+                      mcp_config=(str(Path(values["--mcp-config"]).expanduser().resolve())
+                                  if values.get("--mcp-config") else ""),
+                      fail_on_deny=bool(values.get("--fail-on-deny")),
+                      model=values.get("--model", ""), cwd=workdir)
+    elif cage_flags:
+        from .worker.profile import cage_from_flags
+
+        cage = cage_from_flags(
+            tools=tools, deny=values["--deny"], allow=values["--allow"], mcp=mcp,
+            mcp_config=(str(Path(values["--mcp-config"]).expanduser().resolve())
+                        if values.get("--mcp-config") else ""),
+            fs=values.get("--fs", "none"), roots=values["--root"],
+            bash=values.get("--bash", "off"), fetch_hosts=values["--fetch-host"],
+            fetch_any=bool(values.get("--fetch-any")),
+            fetch_query=bool(values.get("--fetch-query")),
+            instructions=values.get("--instructions", "none"), max_usd=max_usd,
+            max_steps=max_turns, timeout_s=timeout_s, mode=values.get("--mode", ""),
+            model=values.get("--model", ""), schema=schema,
+            fail_on_deny=bool(values.get("--fail-on-deny")), cwd=workdir)
+    prompt = " ".join(prompt_parts)
+    if not prompt and not check and not sys.stdin.isatty():
+        prompt = sys.stdin.read().strip()
+    if not prompt and not check:
+        raise HumanError("usage",
+                         "Нужно: luna -p \"задача\" [--output text|json|stream-json] "
+                         "[--mode РЕЖИМ] [--model МОДЕЛЬ] [--max-usd N] [--max-turns N] "
+                         "[--allow ШАБЛОН] [--worker ИМЯ] …",
+                         "Все флаги: luna --help; клетка работника — docs/РАБОТНИК.md.")
+    return run_headless(prompt, json_mode=bool(values.get("--json")),
+                        output=values.get("--output", ""),
+                        mode=values.get("--mode", ""), model_ref=values.get("--model", ""),
+                        continue_last=continue_last, resume_id=resume or "",
+                        max_usd=max_usd, max_turns=max_turns,
+                        allow=values["--allow"] if cage is None else None,
+                        cwd=workdir, cage=cage, check=check, timeout_s=timeout_s,
+                        schema=schema, fail_on_deny=bool(values.get("--fail-on-deny")))
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def _cmd_trust(argv: list[str], untrust: bool = False, settings=None) -> int:
+    """luna trust [PATH] | --list, luna untrust [PATH]: список доверенных
+    проектов живёт только в глобальном слое — проект не может довериться сам."""
+    from pathlib import Path
+
+    from .core.errors import HumanError
+
+    if settings is None:
+        from .core.settings import Settings
+
+        settings = Settings(project_layer=False)
+    key = "security.trusted_projects"
+    current = [str(p) for p in (settings.get(key, []) or []) if str(p).strip()]
+    if argv[:1] == ["--list"]:
+        if len(argv) > 1:
+            raise HumanError("usage", "Нужно: luna trust --list", "")
+        if not current:
+            print("Доверенных проектов нет.")
+        for item in current:
+            print(item)
+        return 0
+    if len(argv) > 1:
+        raise HumanError("usage", "Нужно: luna " + ("untrust" if untrust else "trust") + " [ПАПКА]",
+                         "Без папки — текущая.")
+    path = Path(argv[0]).expanduser() if argv else Path.cwd()
+    try:
+        path = path.resolve()
+    except (OSError, RuntimeError):
+        raise HumanError("usage", "Путь не разрешается: " + str(path), "") from None
+    text = str(path)
+    if untrust:
+        kept = [p for p in current if not _same_path(p, text)]
+        if len(kept) == len(current):
+            print("Проект и так не в доверенных: " + text)
+            return 0
+        settings.set(key, kept, layer="global")
+        print("Доверие снято: " + text)
+        return 0
+    if not path.is_dir():
+        raise HumanError("usage", "Нет такой папки: " + text, "")
+    if any(_same_path(p, text) for p in current):
+        print("Проект уже доверенный: " + text)
+        return 0
+    settings.set(key, current + [text], layer="global")
+    print("Проект доверенный: " + text + " (записано в " + str(settings.global_path) + ")")
+    return 0
+
+
 def settings_value_type(key: str) -> str:
     from .core.settings import SCHEMA
 
@@ -293,76 +510,11 @@ def main(argv: list[str] | None = None) -> int:
                   + " (переменная окружения LUNA_HOME; там настройки, секреты, сессии и свои манеры)")
             return 0
         if cmd in ("-p", "--prompt"):
-            from .headless import run_headless
-
-            prompt_parts = []
-            json_mode = False
-            output = ""
-            mode = ""
-            model_ref = ""
-            max_usd = 0.0
-            max_turns = 0
-            allow: list[str] = []
-            idx = 0
-
-            def next_value(flag: str) -> str:
-                nonlocal idx
-                if idx + 1 >= len(rest):
-                    raise HumanError("usage", "Флагу " + flag + " нужно значение", "")
-                idx += 1
-                return rest[idx]
-
-            while idx < len(rest):
-                item = rest[idx]
-                if item == "--json":
-                    json_mode = True
-                elif item == "--output":
-                    output = next_value("--output")
-                elif item.startswith("--output="):
-                    output = item.split("=", 1)[1]
-                elif item == "--mode":
-                    mode = next_value("--mode")
-                elif item == "--model":
-                    model_ref = next_value("--model")
-                elif item == "--max-usd":
-                    raw = next_value("--max-usd")
-                    try:
-                        max_usd = float(raw)
-                    except ValueError:
-                        raise HumanError("usage", "--max-usd — число, а не " +
-                                         repr(raw), "") from None
-                elif item == "--max-turns":
-                    raw = next_value("--max-turns")
-                    try:
-                        max_turns = int(raw)
-                    except ValueError:
-                        raise HumanError("usage", "--max-turns — целое число, а не " +
-                                         repr(raw), "") from None
-                elif item == "--allow":
-                    allow.append(next_value("--allow"))
-                elif item.startswith("--allow="):
-                    allow.append(item.split("=", 1)[1])
-                else:
-                    prompt_parts.append(item)
-                idx += 1
-            if resume is not None and not resume:
-                raise HumanError("usage", "Для luna -p нужно: --resume <id сессии>",
-                                 "Id виден в журнале сессий (LUNA_HOME/sessions) "
-                                 "и в строке сессии headless.")
-            prompt = " ".join(prompt_parts)
-            if not prompt and not sys.stdin.isatty():
-                prompt = sys.stdin.read().strip()
-            if not prompt:
-                raise HumanError("usage",
-                                 "Нужно: luna -p \"задача\" [--output text|json|stream-json] "
-                                 "[--mode РЕЖИМ] [--model МОДЕЛЬ] [--max-usd N] "
-                                 "[--max-turns N] [--allow ШАБЛОН]", "")
-            return run_headless(prompt, json_mode=json_mode, output=output,
-                                mode=mode, model_ref=model_ref,
-                                continue_last=continue_last,
-                                resume_id=resume or "",
-                                max_usd=max_usd, max_turns=max_turns,
-                                allow=allow)
+            return _cmd_headless(rest, continue_last=continue_last, resume=resume)
+        if cmd == "trust":
+            return _cmd_trust(rest)
+        if cmd == "untrust":
+            return _cmd_trust(rest, untrust=True)
         if cmd == "setup":
             from .core.paths import DataDir
             from .core.secrets import Secrets

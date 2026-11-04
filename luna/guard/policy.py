@@ -71,17 +71,78 @@ def _host_of(url: str) -> str:
         return ""
 
 
-def is_local_host(host: str) -> bool:
-    """localhost и частные адреса: запрос туда — повод спросить человека."""
+# Имена, которые по определению не публичные (RFC 6761 и обычаи домашних сетей).
+_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
+# Зарезервированные зоны, которые не резолвятся никогда: DNS не трогаем.
+_NEVER_RESOLVES = (".test", ".example", ".invalid")
+_DNS_TTL_S = 60.0
+_dns_cache: dict = {}
+
+
+def _addr_is_local(addr) -> bool:
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified
+                or not addr.is_global)
+
+
+def _resolves_local(host: str) -> bool:
+    """Имя резолвится хотя бы в ОДИН локальный адрес.
+
+    Ошибка DNS (офлайн, нет имени) — не локальный: решает web_fetch, который
+    сам проверяет адрес после DNS и на редиректах. Кэш короткий, чтобы
+    смена записи (rebinding) не жила долго.
+    """
+    import socket
+    import time
+
+    now = time.monotonic()
+    hit = _dns_cache.get(host)
+    if hit is not None and now - hit[0] < _DNS_TTL_S:
+        return hit[1]
+    local = False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError, ValueError):
+        infos = []
+    for info in infos:
+        try:
+            raw = str(info[4][0]).split("%", 1)[0]
+            if _addr_is_local(ipaddress.ip_address(raw)):
+                local = True
+                break
+        except (ValueError, IndexError, TypeError):
+            continue
+    if len(_dns_cache) > 512:
+        _dns_cache.clear()
+    _dns_cache[host] = (now, local)
+    return local
+
+
+def is_local_host(host: str, *, resolve: bool = True) -> bool:
+    """localhost, частные и служебные адреса: запрос туда — повод спросить человека.
+
+    Сначала быстрые проверки по написанию, DNS — последним (имя вроде
+    suspect114 из hosts или 2130706433 тоже ведёт в локальную сеть).
+    """
+    host = (host or "").strip().lower().rstrip(".")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     if not host:
         return False
-    if host == "localhost" or host.endswith(".local"):
+    if host == "localhost" or host.endswith(_LOCAL_SUFFIXES):
         return True
     try:
-        addr = ipaddress.ip_address(host)
+        addr = ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
+        addr = None
+    if addr is not None:
+        return _addr_is_local(addr)
+    if not resolve or host.endswith(_NEVER_RESOLVES):
         return False
-    return bool(addr.is_private or addr.is_loopback or addr.is_link_local)
+    return _resolves_local(host)
 
 
 def check_irreversible(tool_name: str, args: dict) -> str | None:
@@ -112,9 +173,11 @@ def _parse_rules(raw: str) -> list[tuple[str, str, str]]:
 
 
 class Guard:
-    def __init__(self, settings=None, secrets=None, guard_judge=None):
+    def __init__(self, settings=None, secrets=None, guard_judge=None, enforce: bool = False):
         self.settings = settings
         self.secrets = secrets
+        # enforce — клетка работника: guard.enabled=false не выключает Предохранитель.
+        self.enforce = bool(enforce)
         # guard_judge(tool, args, intent) -> (bool, reason): модель-охранник режима review
         self.guard_judge = guard_judge
         self._always_rank = -1  # «дальше без вопросов» на этом уровне риска и ниже
@@ -122,29 +185,59 @@ class Guard:
     def remember_always(self, risk: str) -> None:
         self._always_rank = max(self._always_rank, _RISK_ORDER.get(risk, 0))
 
+    def _project_key(self) -> str:
+        key_fn = getattr(self.settings, "project_key", None)
+        if key_fn is None:
+            return ""
+        try:
+            return str(key_fn())
+        except Exception:  # noqa: BLE001 — без ключа проекта остаётся сессионное «всегда»
+            return ""
+
+    def _project_ranks(self) -> dict:
+        try:
+            ranks = self.settings.get("guard.always_rank_projects", {})
+        except Exception:  # noqa: BLE001
+            return {}
+        return dict(ranks) if isinstance(ranks, dict) else {}
+
     def remember_always_project(self, risk: str) -> None:
-        """«Больше не спрашивать для такого в этом проекте» (ЗАДАЧА-20):
-        уровень риска — в проектные настройки, переживает перезапуск."""
+        """«Больше не спрашивать для такого в этом проекте» (ЗАДАЧА-20).
+
+        Уровень пишется в ГЛОБАЛЬНУЮ карту guard.always_rank_projects по
+        пути проекта: проектный файл чужого репозитория мог бы иначе сам
+        выдать себе «без вопросов».
+        """
         rank = _RISK_ORDER.get(risk, 0)
         self._always_rank = max(self._always_rank, rank)
-        if self.settings is not None:
-            try:
-                current = int(self.settings.get("guard.always_rank_project", -1))
-            except (TypeError, ValueError):
-                current = -1
-            if rank > current:
-                self.settings.set("guard.always_rank_project", rank,
-                                  layer="project")
+        key = self._project_key() if self.settings is not None else ""
+        if not key:
+            return
+        ranks = self._project_ranks()
+        try:
+            current = int(ranks.get(key, -1))
+        except (TypeError, ValueError):
+            current = -1
+        if rank > current:
+            ranks[key] = rank
+            self.settings.set("guard.always_rank_projects", ranks)
 
     def _always_rank_effective(self) -> int:
         """Уровень «без вопросов»: сессионный и проектный — больший."""
         rank = self._always_rank
         if self.settings is not None:
+            # Старый ключ: глобальный слой или доверенный проект (недоверенный
+            # Settings уже отбросил).
             try:
-                rank = max(rank, int(self.settings.get(
-                    "guard.always_rank_project", -1)))
+                rank = max(rank, int(self.settings.get("guard.always_rank_project", -1)))
             except (TypeError, ValueError):
                 pass
+            key = self._project_key()
+            if key:
+                try:
+                    rank = max(rank, int(self._project_ranks().get(key, -1)))
+                except (TypeError, ValueError):
+                    pass
         return rank
 
     def _rule(self, tool_name: str, args_text: str) -> str | None:
@@ -255,7 +348,9 @@ class Guard:
         if irreversible:
             return Decision("ask", "rules", "Необратимое: " + irreversible +
                             ". Спрашиваю даже в режиме yolo", "high")
-        if tool_name in ("web_fetch", "web_search", "bash") and self._secret_in_args(args_text):
+        # MCP тоже: разрешённый send_message юзербота не должен выносить секреты.
+        if ((tool_name in ("web_fetch", "web_search", "bash") or tool_name.startswith("mcp__"))
+                and self._secret_in_args(args_text)):
             return Decision("ask", "rules", "В аргументах есть значение секрета: "
                             "оно уйдёт наружу, если выполнить", "high")
         if tool_name == "web_fetch":
@@ -272,7 +367,7 @@ class Guard:
         risk = "medium" if mutating else "low"
 
         enabled = True
-        if self.settings is not None:
+        if self.settings is not None and not self.enforce:
             enabled = bool(self.settings.get("guard.enabled", True))
         if not enabled:
             return Decision("allow", "mode", "Предохранитель выключен настройкой guard.enabled", risk)

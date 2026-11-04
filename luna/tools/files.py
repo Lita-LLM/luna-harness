@@ -18,8 +18,27 @@ def _resolve(ctx, raw: str) -> Path:
     return path
 
 
+def _cage_refusal(ctx, path, *, write: bool = False) -> ToolResult | None:
+    """Клетка работника: путь вне её корней — отказ с причиной, иначе None."""
+    cage = getattr(ctx, "cage", None)
+    if cage is None:
+        return None
+    reason = cage.path_check(path, write=write)
+    return ToolResult(False, "клетка: " + reason) if reason else None
+
+
+def _cage_visible(ctx, path) -> bool:
+    # Каждый найденный файл — отдельно: симлинк внутри корня может
+    # смотреть наружу, и glob/grep не должны его ни показать, ни прочитать.
+    cage = getattr(ctx, "cage", None)
+    return cage is None or not cage.path_check(path)
+
+
 def _read(ctx, args) -> ToolResult:
     path = _resolve(ctx, args.get("path", ""))
+    refusal = _cage_refusal(ctx, path)
+    if refusal is not None:
+        return refusal
     if not path.is_file():
         return ToolResult(False, "Нет такого файла: " + str(path))
     raw = path.read_bytes()
@@ -44,6 +63,9 @@ def _checkpoint(ctx, path) -> None:
 
 def _write(ctx, args) -> ToolResult:
     path = _resolve(ctx, args.get("path", ""))
+    refusal = _cage_refusal(ctx, path, write=True)
+    if refusal is not None:
+        return refusal
     content = args.get("content", "")
     _checkpoint(ctx, path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +77,9 @@ def _write(ctx, args) -> ToolResult:
 
 def _edit(ctx, args) -> ToolResult:
     path = _resolve(ctx, args.get("path", ""))
+    refusal = _cage_refusal(ctx, path, write=True)
+    if refusal is not None:
+        return refusal
     if not path.is_file():
         return ToolResult(False, "Нет такого файла: " + str(path))
     text = path.read_text(encoding="utf-8")
@@ -77,13 +102,16 @@ def _edit(ctx, args) -> ToolResult:
 def _glob(ctx, args) -> ToolResult:
     pattern = args.get("pattern", "**/*")
     base = _resolve(ctx, args.get("path", "."))
+    refusal = _cage_refusal(ctx, base)
+    if refusal is not None:
+        return refusal
     if not base.is_dir():
         return ToolResult(False, "Нет такого каталога: " + str(base))
     out = []
     for found in sorted(base.glob(pattern)):
         if any(part in SKIP_DIRS for part in found.parts):
             continue
-        if found.is_file():
+        if found.is_file() and _cage_visible(ctx, found):
             out.append(str(found.relative_to(base)))
         if len(out) >= 200:
             break
@@ -99,9 +127,13 @@ def _grep(ctx, args) -> ToolResult:
     except re.error as exc:
         return ToolResult(False, "Плохой regex: " + str(exc))
     base = _resolve(ctx, args.get("path", "."))
+    refusal = _cage_refusal(ctx, base)
+    if refusal is not None:
+        return refusal
     out: list[str] = []
     files = [base] if base.is_file() else sorted(
-        p for p in base.rglob("*") if p.is_file() and not any(d in SKIP_DIRS for d in p.parts))
+        p for p in base.rglob("*") if p.is_file() and not any(d in SKIP_DIRS for d in p.parts)
+        and _cage_visible(ctx, p))
     for path in files:
         try:
             text = path.read_text(encoding="utf-8", errors="strict")

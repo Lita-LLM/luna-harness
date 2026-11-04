@@ -29,21 +29,44 @@ class Agent:
                  bus=None, session_id: str = "", mode: str = "",
                  model_ref: str = "", guard: Guard | None = None,
                  ask_guard_fn=None, ask_user_fn=None, tools: dict | None = None,
-                 system_suffix: str = ""):
+                 system_suffix: str = "", cage=None):
         self.settings = settings
         self.secrets = secrets
         self.router = router
         self.cwd = Path(cwd)
         self.bus = bus
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        # Клетка работника (luna.worker.cage): задаёт модель, режим и потолок
+        # шагов, если клиент не сказал явно, и сужает всё остальное.
+        self.cage = cage
+        if cage is not None:
+            mode = mode or (cage.mode or "")
+            model_ref = model_ref or (cage.model or "")
         self.mode = mode or (settings.get("agent.mode", "normal") if settings else "normal")
         self.model_ref = model_ref
-        self.tools = tools if tools is not None else build_registry()
-        self.guard = guard if guard is not None else Guard(settings, secrets, guard_judge=self._make_judge())
+        self._temp_dirs: list = []
+        if tools is None:
+            tools = build_registry(cage=cage, cwd=self.cwd, settings=settings)
+        elif cage is not None:
+            # Чужой реестр (тесты, клиент): что клетка не выдала — вон
+            for name in [n for n in list(dict.keys(tools)) if not self._cage_allows(n, dict.get(tools, n))]:
+                dict.pop(tools, name, None)
+        self.tools = tools
+        if guard is None:
+            if cage is not None:
+                # enforce: клетке guard.enabled=false не действует
+                guard = Guard(settings, secrets, guard_judge=self._make_judge(), enforce=True)
+            else:
+                guard = Guard(settings, secrets, guard_judge=self._make_judge())
+        elif cage is not None and hasattr(guard, "enforce"):
+            guard.enforce = True
+        self.guard = guard
         self.ask_guard_fn = ask_guard_fn  # (event) -> {decision, args?} | None
         self.ctx = ToolContext(cwd=self.cwd, settings=settings, secrets=secrets,
                                ask_user_fn=self._ask_user,
-                               output_dir=self._output_dir(), agent=self)
+                               output_dir=self._output_dir(), agent=self, cage=cage)
+        if cage is not None and int(getattr(cage, "max_steps", 0) or 0) > 0:
+            self.max_steps_override = int(cage.max_steps)
         self._system_suffix = system_suffix  # роль ребёнка (ЗАДАЧА-11): хвост промпта
         self._ask_user_fn = ask_user_fn  # (id, question, options) -> str | None
         self._listeners: list = []
@@ -79,6 +102,8 @@ class Agent:
 
     def _make_checkpoints(self):
         """Стор чекпоинтов сессии; None — выключен настройкой или сломался."""
+        if self.cage is not None:
+            return None  # работник эфемерен: откатывать некому, а снимки — след на диске
         if self.settings is not None and not self.settings.get("checkpoints.enabled", True):
             return None
         try:
@@ -294,13 +319,51 @@ class Agent:
     def _output_dir(self) -> Path:
         from ..core.paths import luna_home
 
+        if self.cage is not None and getattr(self.cage, "ephemeral", True):
+            import tempfile
+
+            path = Path(tempfile.mkdtemp(prefix="luna-cage-"))
+            self._temp_dirs.append(path)
+            return path
         return luna_home() / "local" / "outputs"
+
+    def _cage_allows(self, name: str, tool=None) -> bool:
+        cage = self.cage
+        if cage is None:
+            return True
+        origin = getattr(tool, "origin", None)
+        if origin:
+            return cage.mcp_tool_allowed(origin[0], origin[1], name)
+        return cage.tool_allowed(name)
+
+    def cleanup(self) -> None:
+        """Убрать временные папки работника (вывод, рабочая папка bash) и
+        погасить MCP-серверы клетки. Повторный вызов безопасен."""
+        import shutil
+
+        scratch = getattr(self.ctx, "scratch_dir", None)
+        if scratch is not None:
+            self._temp_dirs.append(Path(scratch))
+            self.ctx.scratch_dir = None
+        dirs, self._temp_dirs = self._temp_dirs, []
+        for path in dirs:
+            shutil.rmtree(path, ignore_errors=True)
+        if self.cage is not None:
+            manager = getattr(self.tools, "mcp_manager", None)
+            closer = getattr(manager, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # noqa: BLE001 — уборка не падает
+                    pass
 
     def _specs(self):
         specs = []
         for tool in self.tools.values():
             if self.mode == "plan" and tool.name in WRITE_TOOLS:
                 continue  # в plan тулы записи модели даже не выдаются (ta)
+            if not self._cage_allows(tool.name, tool):
+                continue
             specs.append(tool.spec())
         return specs
 
@@ -404,7 +467,12 @@ class Agent:
                         digest = str(hash(entry["text"]))
                 except Exception:  # noqa: BLE001 — подпись не должна ронять ход
                     digest = ""
-        return (self.mode, manner, digest)
+        cage_sig = ""
+        if self.cage is not None:
+            cage_sig = str(hash((self.cage.name, self.cage.instructions, self.cage.prompt,
+                                 json.dumps(self.cage.output_schema, sort_keys=True,
+                                            ensure_ascii=False, default=str))))
+        return (self.mode, manner, digest, cage_sig)
 
     def _reload_settings(self) -> None:
         """Настройки поменяли руками или другой процесс — подхватить перед ходом."""
@@ -429,7 +497,8 @@ class Agent:
         sig = self._current_prompt_sig()
         if self._started and sig == self._prompt_sig:
             return
-        content = build_system_prompt(self.cwd, self.mode, settings=self.settings)
+        content = build_system_prompt(self.cwd, self.mode, settings=self.settings,
+                                      cage=self.cage)
         if self._system_suffix:
             content = content + "\n\n" + self._system_suffix
         if self._history and self._history[0].get("role") == "system":
@@ -602,6 +671,14 @@ class Agent:
         """
         self.publish({"type": "tool.call", "id": call_id, "name": tool.name,
                       "args": args, "intent": intent})
+        if not self._cage_allows(tool.name, tool):
+            # Вторая линия: реестр клетки уже отфильтрован, но тул мог прийти
+            # чужим реестром или догрузкой — без выдачи не исполняем никогда.
+            reason = "клетка: тул не выдан"
+            self.publish({"type": "guard.verdict", "id": call_id, "decision": "deny",
+                          "by": "cage", "reason": reason})
+            self._deny(call_id, tool.name, reason)
+            return None
         if human:
             self.publish({"type": "guard.verdict", "id": call_id,
                           "decision": "allow", "by": "human",
@@ -692,7 +769,7 @@ class Agent:
             return ("allow", "human", "Человек разрешил и сказал «дальше без вопросов»", args)
         if choice == "always_project":
             # «Больше не спрашивать для такого в этом проекте»: уровень
-            # риска пишется в проектные настройки (guard.always_rank_project).
+            # риска пишется в глобальные настройки по ключу папки (guard.always_rank_projects).
             self.guard.remember_always_project(decision.risk)
             return ("allow", "human", "Человек разрешил и сказал «в этом "
                     "проекте для такого больше не спрашивать»", args)

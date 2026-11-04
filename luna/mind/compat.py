@@ -45,6 +45,38 @@ def _read(path: Path) -> str:
         return ""
 
 
+# Куда @импорт не дотягивается никогда: инструкции проекта пишет кто угодно,
+# а вставленный файл уходит модели целиком (сейф Луны, ключи, чаты харнессов).
+_IMPORT_DENY_HOME = (".ssh", ".gnupg", ".aws", ".claude")
+
+
+def _import_denied(target: Path) -> bool:
+    from ..core.paths import luna_home
+    from ..guard.policy import SECRET_PATHS
+
+    try:
+        real = target.resolve()
+    except (OSError, RuntimeError):
+        return True
+    if SECRET_PATHS.search(str(real)) or SECRET_PATHS.search(str(target)):
+        return True
+    home = _home()
+    roots = [luna_home()] + [home / name for name in _IMPORT_DENY_HOME]
+    for root in roots:
+        try:
+            root = root.expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if real == root or root in real.parents:
+            if root.name == ".claude" and real.suffix.lower() == ".md" \
+                    and (root / "projects") not in real.parents:
+                # Глобальный CLAUDE.md хозяина подключает соседние .md —
+                # это его же инструкции; чаты и память (projects/) — нет.
+                continue
+            return True
+    return False
+
+
 def _expand_imports(text: str, base: Path, depth: int, seen: set) -> str:
     """`@путь` на отдельной строке (как в CLAUDE.md) — вставить файл."""
     if depth >= MAX_IMPORT_DEPTH:
@@ -59,7 +91,7 @@ def _expand_imports(text: str, base: Path, depth: int, seen: set) -> str:
             key = str(target.resolve())
         except OSError:
             return match.group(0)
-        if key in seen or not target.is_file():
+        if key in seen or not target.is_file() or _import_denied(target):
             return match.group(0)
         seen.add(key)
         inner = _read(target)[:MAX_FILE_CHARS]
@@ -74,14 +106,17 @@ def is_global_instruction(path: str) -> bool:
     return any(norm == home + "/" + name for name in GLOBAL_FILES)
 
 
-def collect_instructions(cwd: Path, settings=None) -> list[tuple[str, str]]:
-    """(путь, текст) инструкций: проект от каталога вверх, затем глобальные."""
+def collect_instructions(cwd: Path, settings=None, include_global: bool = True) -> list[tuple[str, str]]:
+    """(путь, текст) инструкций: проект от каталога вверх, затем глобальные.
+
+    include_global=False — только проектные (клетка с instructions=project).
+    """
     candidates: list[Path] = []
     current = Path(cwd).resolve()
     for directory in (current, *current.parents):
         for name in PROJECT_FILES:
             candidates.append(directory / name)
-    if _setting(settings, "compat.global_instructions", True):
+    if include_global and _setting(settings, "compat.global_instructions", True):
         home = _home()
         for name in GLOBAL_FILES:
             candidates.append(home / name)

@@ -3,7 +3,8 @@
 
 У каждой настройки: ключ, тип, значение по умолчанию, описание по-русски и
 допустимые значения. Слои, от слабого к сильному: умолчания → глобальный файл
-<LUNA_HOME>/settings.json → проектный ./.luna/settings.json. Незнакомые поля
+<LUNA_HOME>/settings.json → проектный ./.luna/settings.json. Проект вне
+security.trusted_projects защиту только сужает (см. _narrow_project). Незнакомые поля
 в файлах при записи сохраняются; ключи не переименовываются никогда. Запись
 атомарная. Изменение публикует событие settings.changed на шине — горячая
 перезагрузка позже просто подпишется на него.
@@ -12,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,7 +29,7 @@ SOURCE_NAMES = {"default": "умолчание", "global": "глобально",
 @dataclass(frozen=True)
 class Field:
     key: str            # полный ключ: "ui.color"
-    type: str           # bool | int | float | str | choice
+    type: str           # bool | int | float | str | choice | list | dict
     default: Any
     title: str          # описание по-русски
     choices: tuple = ()  # для choice: допустимые значения
@@ -257,6 +260,65 @@ _f("ui.perf", "choice", "auto",
    ("auto", "low", "full"))
 _f("starfall.min_inputs", "int", 3,
    "Минимум входов, с которого рой запускается: меньше — starfall отвечает подсказкой взять assistant для одной задачи (человек может явно настоять — вызов с force=true)")
+# Доверие к проектам (клетка): проектный .luna/settings.json чужого
+# репозитория не должен ослаблять защиту. Список и карта «без вопросов»
+# живут только в глобальном слое — проект их не задаёт ни при каком доверии.
+_f("security.trusted_projects", "list", [],
+   "Доверенные проекты: абсолютные пути папок (и всё внутри); их .luna/settings.json действует целиком. Остальные проекты только сужают защиту (luna trust)",
+   human_only=True)
+_f("guard.always_rank_projects", "dict", {},
+   "Служебное: уровни риска «дальше без вопросов» по проектам {путь: уровень} (ставится ответом p в вопросе Предохранителя, не руками)",
+   human_only=True)
+
+
+# --- что недоверенный проект может менять ------------------------------------
+# Принцип: проектный файл приходит вместе с чужим репозиторием, поэтому всё,
+# что касается защиты, режимов и того, КУДА уходят запросы (и ключи API),
+# из проекта только сужается или игнорируется.
+
+# Проект не задаёт никогда (даже доверенный): служебные глобальные ключи.
+_GLOBAL_ONLY_PREFIXES = ("security.", "guard.always_rank_projects")
+
+# Недоверенный проект не задаёт: адреса провайдеров и поисковиков (туда
+# уходят ключи и запросы), разрешения headless, модель-охранник review,
+# папка вывода роя (запись вне проекта).
+_UNTRUSTED_IGNORED = frozenset({
+    "headless.allow", "guard.always_rank_project",
+    "model.provider", "model.kind", "model.base_url", "model.guard",
+    "web.searxng_url", "web.exa_url", "web.parallel_url",
+    "starfall.output_dir",
+})
+# То же по форме имени: незнакомые ключи будущих версий с адресами и
+# учётными данными тоже не принимаем из проекта.
+_UNTRUSTED_IGNORED_RE = re.compile(
+    r"(^|[._])(url|urls|endpoint|endpoints|host|hosts|token|auth|secret|secrets|"
+    r"password|api_key|key|proxy)$")
+
+# Режимы от строгого к свободному: проект может только ужесточить.
+MODE_STRICTNESS = ("plan", "normal", "review", "auto", "yolo")
+
+# Возможности: проект может выключить, но не включить.
+_CAPABILITY_FLAGS = frozenset({"agents.enabled", "starfall.enabled", "web.enabled"})
+
+# Потолки: проект может только опустить. True — 0 значит «без лимита».
+_UPPER_BOUNDS = {
+    "agent.max_steps": False, "agents.max_depth": False, "agents.max_children": False,
+    "agents.max_steps": False, "agents.session_budget_usd": True,
+    "starfall.max_cells": False, "starfall.max_parallel": False,
+    "starfall.budget_usd": False, "starfall.ttl_s": False, "starfall.max_attempts": False,
+    "starfall.sandbox_memory_mb": False, "starfall.sandbox_processes": False,
+}
+
+_NO_VALUE = object()
+
+
+def _rule_action(line: str) -> str:
+    """Действие строки guard.rules (allow/ask/deny) или пусто."""
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return ""
+    action = line.rsplit("=", 1)[1].strip().lower()
+    return action if action in ("allow", "ask", "deny") else ""
 
 
 def _dig(data: dict, key: str):
@@ -284,22 +346,35 @@ def _plant(data: dict, key: str, value: Any) -> None:
 def _flatten(data: dict, prefix: str = ""):
     for k, v in data.items():
         key = f"{prefix}{k}"
-        if isinstance(v, dict):
+        field = SCHEMA.get(key)
+        # Словарь-значение (карта путей) — лист: в путях бывают точки.
+        if isinstance(v, dict) and not (field is not None and field.type == "dict"):
             yield from _flatten(v, key + ".")
         else:
             yield key, v
 
 
 class Settings:
-    def __init__(self, *, home: Path | str | None = None, cwd: Path | str | None = None, bus=None):
+    def __init__(self, *, home: Path | str | None = None, cwd: Path | str | None = None, bus=None,
+                 project_layer: bool = True):
         self.home_dir = Path(home).expanduser() if home is not None else luna_home()
         self.global_path = self.home_dir / "settings.json"
         base = Path(cwd) if cwd is not None else Path.cwd()
         self.project_path = base / ".luna" / "settings.json"
+        try:
+            self.project_dir = base.expanduser().resolve()
+        except (OSError, RuntimeError):
+            self.project_dir = base.absolute()
+        # False — проектный файл не читается вовсе (клетка работника).
+        self.project_layer = bool(project_layer)
         self.bus = bus
         self._global = self._load(self.global_path)
-        self._project = self._load(self.project_path)
+        self._project = self._load_project()
+        self._trusted = self._compute_trust()
         self._stamps = self._file_stamps()
+
+    def _load_project(self) -> dict:
+        return self._load(self.project_path) if self.project_layer else {}
 
     @staticmethod
     def _load(path: Path) -> dict:
@@ -321,12 +396,14 @@ class Settings:
 
     def reload(self) -> None:
         self._global = self._load(self.global_path)
-        self._project = self._load(self.project_path)
+        self._project = self._load_project()
+        self._trusted = self._compute_trust()
         self._stamps = self._file_stamps()
 
     def _file_stamps(self) -> tuple:
         out = []
-        for path in (self.global_path, self.project_path):
+        paths = [self.global_path] + ([self.project_path] if self.project_layer else [])
+        for path in paths:
             try:
                 st = path.stat()
                 out.append((st.st_mtime_ns, st.st_size))
@@ -350,9 +427,10 @@ class Settings:
         before = dict(_flatten(self._project))
         before_g = dict(_flatten(self._global))
         new_global = self._load(self.global_path)
-        new_project = self._load(self.project_path)
+        new_project = self._load_project()
         old_values = {k: self.get(k) for k in set(before) | set(before_g) | set(SCHEMA)}
         self._global, self._project = new_global, new_project
+        self._trusted = self._compute_trust()  # список доверия мог смениться
         keys = set(old_values) | {k for k, _ in _flatten(new_global)} | {k for k, _ in _flatten(new_project)}
         changes = []
         for key in sorted(keys):
@@ -366,8 +444,141 @@ class Settings:
 
     # чтение
 
-    def get(self, key: str, default: Any = None) -> Any:
+    # доверие
+
+    def _compute_trust(self) -> bool:
+        raw, found = _dig(self._global, "security.trusted_projects")
+        if not found or not isinstance(raw, list):
+            return False
+        for item in raw:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            path = Path(item.strip()).expanduser()
+            # Относительный путь разрешился бы от текущей папки и доверил бы
+            # что угодно — такие записи пропускаем.
+            if not path.is_absolute():
+                continue
+            try:
+                root = path.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if self.project_dir == root or root in self.project_dir.parents:
+                return True
+        return False
+
+    def project_trusted(self) -> bool:
+        """Проект (папка с .luna) внутри одного из security.trusted_projects."""
+        return self._trusted
+
+    def project_key(self) -> str:
+        """Ключ проекта для глобальных карт: разрешённый путь, на Windows без регистра."""
+        return os.path.normcase(str(self.project_dir))
+
+    def _global_value(self, key: str) -> Any:
+        value, found = _dig(self._global, key)
+        if found:
+            return value
+        field = SCHEMA.get(key)
+        return field.default if field is not None else None
+
+    def _project_value(self, key: str):
+        """(значение, найдено) проектного слоя с учётом доверия.
+
+        Недоверенный проект для ключей защиты только сужает: всё, что
+        ослабило бы глобальное значение, считается незаданным.
+        """
+        if key.startswith(_GLOBAL_ONLY_PREFIXES):
+            return None, False
         value, found = _dig(self._project, key)
+        if not found:
+            return None, False
+        if self._trusted:
+            return value, True
+        narrowed = self._narrow_project(key, value)
+        if narrowed is _NO_VALUE:
+            return None, False
+        return narrowed, True
+
+    def _narrow_project(self, key: str, value: Any) -> Any:
+        if key in _UNTRUSTED_IGNORED or _UNTRUSTED_IGNORED_RE.search(key):
+            return _NO_VALUE
+        if key == "guard.enabled":
+            return value if value is True else _NO_VALUE
+        if key == "guard.rules":
+            return self._merged_rules(value)
+        if key.startswith("guard."):
+            return _NO_VALUE  # незнакомые ключи защиты — только человек глобально
+        if key == "agent.mode":
+            glob = self._global_value(key)
+            if value not in MODE_STRICTNESS:
+                return _NO_VALUE
+            if glob in MODE_STRICTNESS and MODE_STRICTNESS.index(value) > MODE_STRICTNESS.index(glob):
+                return _NO_VALUE
+            return value
+        if key == "starfall.sandbox":
+            return _NO_VALUE if value == "none" else value
+        if key in _CAPABILITY_FLAGS:
+            return value if value is False or value == self._global_value(key) else _NO_VALUE
+        if key in _UPPER_BOUNDS:
+            return self._narrow_bound(key, value, _UPPER_BOUNDS[key])
+        return value
+
+    def _narrow_bound(self, key: str, value: Any, zero_unlimited: bool) -> Any:
+        glob = self._global_value(key)
+        num_types = (int, float)
+        if isinstance(value, bool) or not isinstance(value, num_types):
+            return _NO_VALUE
+        if isinstance(glob, bool) or not isinstance(glob, num_types):
+            return value
+        if zero_unlimited:
+            if glob == 0:
+                return value
+            if value == 0:
+                return _NO_VALUE
+        return value if value <= glob else _NO_VALUE
+
+    def _merged_rules(self, value: Any) -> Any:
+        """Глобальные правила + проектные без allow.
+
+        Порядок важен (первое совпадение решает): проектные deny — первыми,
+        чтобы сужать и глобальный allow; проектные ask — после глобальных,
+        иначе ask перекрыл бы глобальный deny.
+        """
+        if not isinstance(value, str):
+            return _NO_VALUE
+        glob = self._global_value("guard.rules")
+        glob = glob if isinstance(glob, str) else ""
+        deny, ask = [], []
+        for line in value.splitlines():
+            action = _rule_action(line)
+            if action == "deny":
+                deny.append(line.strip())
+            elif action == "ask":
+                ask.append(line.strip())
+        parts = deny + ([glob.strip("\n")] if glob.strip() else []) + ask
+        return "\n".join(parts)
+
+    def ignored_project_keys(self) -> list[str]:
+        """Проектные ключи, которые не действуют (целиком или частью) — для doctor и уведомлений."""
+        out = []
+        for key, value in _flatten(self._project):
+            if key.startswith(_GLOBAL_ONLY_PREFIXES):
+                out.append(key)
+                continue
+            if self._trusted:
+                continue
+            narrowed = self._narrow_project(key, value)
+            if narrowed is _NO_VALUE:
+                out.append(key)
+            elif key == "guard.rules" and isinstance(value, str) and any(
+                    _rule_action(line) == "allow" for line in value.splitlines()):
+                out.append(key)
+        return sorted(out)
+
+    # чтение
+
+    def get(self, key: str, default: Any = None) -> Any:
+        value, found = self._project_value(key)
         if found:
             return value
         value, found = _dig(self._global, key)
@@ -375,11 +586,13 @@ class Settings:
             return value
         field = SCHEMA.get(key)
         if field is not None:
+            if field.type in ("list", "dict"):
+                return type(field.default)(field.default)  # умолчание не должно меняться снаружи
             return field.default
         return default
 
     def source(self, key: str) -> str:
-        if _dig(self._project, key)[1]:
+        if self._project_value(key)[1]:
             return "project"
         if _dig(self._global, key)[1]:
             return "global"
@@ -429,6 +642,12 @@ class Settings:
         elif field.type == "str":
             if not isinstance(value, str):
                 raise HumanError("settings_value", f"Настройка {key} — строка", "")
+        elif field.type == "list":
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise HumanError("settings_value", f"Настройка {key} — список строк", "")
+        elif field.type == "dict":
+            if not isinstance(value, dict):
+                raise HumanError("settings_value", f"Настройка {key} — словарь", "")
         return value
 
     def parse_value(self, key: str, text: str) -> Any:
@@ -455,16 +674,32 @@ class Settings:
                 return float(text)
             except ValueError:
                 raise HumanError("settings_value", f"Не число: {text!r}", "") from None
+        if field.type in ("list", "dict"):
+            stripped = text.strip()
+            if field.type == "list" and not stripped.startswith("["):
+                # Одно значение без JSON — список из одного элемента (путь с запятой не ломаем).
+                return [stripped] if stripped else []
+            try:
+                value = json.loads(stripped)
+            except ValueError:
+                raise HumanError("settings_value", f"Не JSON для {key}: {text!r}",
+                                 "Например: [\"/путь/один\", \"/путь/два\"].") from None
+            return self.validate(key, value)
         return self.validate(key, text)
 
     def set(self, key: str, value: Any, layer: str = "global") -> None:
         value = self.validate(key, value)
+        if layer == "project" and not self.project_layer:
+            raise HumanError("settings_layer", "Проектный слой настроек здесь выключен",
+                             "Запиши настройку глобально (без --project).")
         data = self._project if layer == "project" else self._global
         path = self.project_path if layer == "project" else self.global_path
         old, _ = _dig(data, key)
         _plant(data, key, value)
         text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
         atomic_write_text(path, text)
+        if layer != "project":
+            self._trusted = self._compute_trust()
         self._stamps = self._file_stamps()  # своя запись — не «внешнее изменение»
         if self.bus is not None:
             self.bus.publish({"type": "settings.changed", "key": key,
@@ -474,4 +709,8 @@ class Settings:
     def value_text(field_type: str, value: Any) -> str:
         if field_type == "bool":
             return "on" if value else "off"
+        if field_type == "list" and isinstance(value, list):
+            return ", ".join(str(v) for v in value) if value else "—"
+        if field_type == "dict" and isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False) if value else "—"
         return str(value)

@@ -604,7 +604,7 @@ class Headless21Test(Case):
     def test_max_usd_stops_turn(self):
         self.settings.set("model.price_in", 1000000.0)  # 10 токенов = $10
         code, _out, err = self._run(max_usd=0.01)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 3)  # код лимита (клетка работника, коды выхода luna -p)
         self.assertIn("max-usd", err)
 
     def test_max_turns_limits_steps(self):
@@ -621,7 +621,7 @@ class Headless21Test(Case):
         ])
         self.settings.set("model.main", "fake:script")
         code, out, _err = self._run("прочитай оба", max_turns=1)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 3)
         self.assertNotIn("всё прочитал", out)
 
 

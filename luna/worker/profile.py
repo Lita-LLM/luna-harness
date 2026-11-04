@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -42,7 +43,8 @@ _SCHEMA = {
     "bash": str,
     "net": {"fetch_hosts": (list, type(None)), "fetch_query": bool},
     "instructions": str,
-    "limits": {"max_usd": (int, float), "max_steps": int, "timeout_s": (int, float)},
+    "limits": {"max_usd": (int, float), "max_steps": int, "timeout_s": (int, float),
+               "max_tokens": int},
     "output": {"schema": dict, "retries": int},
     "ephemeral": bool, "fail_on_deny": bool,
 }
@@ -110,6 +112,10 @@ def _str_list(value, where: str) -> list:
 
 
 def _num(value, where: str):
+    # json.loads пропускает NaN и Infinity: min(nan, x) — nan, и лимит
+    # молча исчезает. Только конечные числа (атака 04.11.2026).
+    if not math.isfinite(value):
+        raise _err("В профиле " + where + " — конечное число, а не " + repr(value))
     if value < 0:
         raise _err("В профиле " + where + " не может быть отрицательным")
     return value
@@ -128,6 +134,12 @@ def _resolve_roots(raw: list, cwd: Path, where: str) -> list:
         if not path.is_dir():
             raise _err(where + ": корня нет или это не папка: " + str(path),
                        "Корни считаются от рабочей папки запуска (--cwd); «.» — она сама.")
+        for guarded in _guarded_homes():
+            if path == guarded or path in guarded.parents:
+                # Список закрытых папок всегда отстаёт от новых программ:
+                # корень, накрывший домашнюю папку, — ошибка, а не надежда.
+                raise _err(where + ": корень " + str(path) + " накрывает " + str(guarded),
+                           "Дай работнику узкую папку под задачу, а не домашнюю целиком.")
         if path not in roots:
             roots.append(path)
     return roots
@@ -144,11 +156,32 @@ def _read_json(path: Path, what: str):
         raise _err("Кривой JSON в " + what + ": " + str(path), str(exc)) from None
 
 
-def find_profile(name_or_path, *, home=None, cwd=None) -> Path:
+def _guarded_homes() -> list:
+    from ..core.paths import luna_home
+
+    out = []
+    for raw in (Path.home(), luna_home()):
+        try:
+            out.append(Path(raw).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    return out
+
+
+def find_profile(name_or_path, *, home=None, cwd=None, kind: str = "auto") -> Path:
+    """kind: name — только имя из LUNA_HOME/workers (--worker); path — только
+    файл (--worker-file); auto — как раньше, для вызовов из кода."""
     text = str(name_or_path or "").strip()
     if not text:
         raise _err("Не задан работник", "Нужно: --worker <имя> или --worker-file <путь>.")
-    if NAME_RE.match(text):
+    if kind == "name":
+        if text.lower().endswith(".json"):
+            text = text[:-5]
+        if not NAME_RE.match(text):
+            # Иначе «--worker news.json» тихо брал файл из папки проекта.
+            raise _err("--worker — только имя профиля из LUNA_HOME/workers: «" + text + "»",
+                       "Буквы, цифры, _ и -. Файл по пути — флагом --worker-file.")
+    if kind != "path" and NAME_RE.match(text):
         folder = workers_dir(home)
         path = folder / (text + ".json")
         if not path.is_file():
@@ -165,9 +198,9 @@ def find_profile(name_or_path, *, home=None, cwd=None) -> Path:
     return path.resolve()
 
 
-def load_profile(name_or_path, *, home=None, cwd=None) -> Cage:
+def load_profile(name_or_path, *, home=None, cwd=None, kind: str = "auto") -> Cage:
     """Имя ([A-Za-z0-9_-]+) → LUNA_HOME/workers/<имя>.json; иначе путь к файлу."""
-    path = find_profile(name_or_path, home=home, cwd=cwd)
+    path = find_profile(name_or_path, home=home, cwd=cwd, kind=kind)
     base = Path(cwd) if cwd is not None else Path.cwd()
     data = _read_json(path, "профиле работника")
     _check_obj(data, _SCHEMA, "профиль")
@@ -228,6 +261,7 @@ def load_profile(name_or_path, *, home=None, cwd=None) -> Cage:
     cage.max_usd = float(_num(limits.get("max_usd", 0), "limits.max_usd"))
     cage.max_steps = int(_num(limits.get("max_steps", 0), "limits.max_steps"))
     cage.timeout_s = float(_num(limits.get("timeout_s", 0), "limits.timeout_s"))
+    cage.max_tokens = int(_num(limits.get("max_tokens", 0), "limits.max_tokens"))
     output = data.get("output", {})
     cage.output_schema = output.get("schema")
     retries = output.get("retries", 1)
@@ -273,6 +307,14 @@ def check_cage(cage: Cage, *, raw_roots=None, cwd=None, where: str = "Клетк
         if name == "bash" and cage.bash == "off":
             raise _err(where + ": тул bash в tools, но bash: off",
                        "Включи bash: sandbox или убери тул.")
+    for pattern in cage.allow:
+        _tool, sep, needle = pattern.partition(":")
+        if sep and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", needle):
+            # «send_message:@мой_канал» модель выполнит, упомянув канал в
+            # тексте письма в любой чат. В клетке — только поле=шаблон.
+            raise _err(where + ": allow «" + pattern + "» с подстрокой небезопасен",
+                       "В клетке — только «тул» или «тул:поле=шаблон», например "
+                       "mcp__tg__send_message:chat_id=@my_channel.")
     if raw_roots is not None:
         base = Path(cwd) if cwd is not None else Path.cwd()
         cage.fs_roots = _resolve_roots(raw_roots, base, where)
@@ -321,6 +363,7 @@ def load_schema_file(path, *, cwd=None) -> dict:
 def cage_from_flags(*, tools=None, deny=(), allow=(), mcp=None, mcp_config="",
                     fs="none", roots=(), bash="off", fetch_hosts=(), fetch_any=False,
                     fetch_query=False, instructions="none", max_usd=0.0, max_steps=0,
+                    max_tokens=0,
                     timeout_s=0.0, mode="", model="", schema=None, fail_on_deny=False,
                     cwd=None) -> Cage:
     """Разовая клетка из одних флагов: что не названо — закрыто.
@@ -352,6 +395,7 @@ def cage_from_flags(*, tools=None, deny=(), allow=(), mcp=None, mcp_config="",
     cage.max_usd = float(max_usd or 0)
     cage.max_steps = int(max_steps or 0)
     cage.timeout_s = float(timeout_s or 0)
+    cage.max_tokens = int(max_tokens or 0)
     cage.mode = mode or "normal"
     cage.model = model or ""
     cage.output_schema = schema
@@ -402,7 +446,8 @@ def _stricter(order, a: str, b: str) -> str:
 
 
 def _min_nonzero(a, b):
-    a, b = a or 0, b or 0
+    a = a if a and math.isfinite(a) else 0
+    b = b if b and math.isfinite(b) else 0
     if a and b:
         return min(a, b)
     return a or b
@@ -422,6 +467,7 @@ def _no_wider(order, current: str, wanted: str, flag: str) -> str:
 
 def narrow(cage: Cage, *, tools=None, deny=(), allow=(), max_usd=0, max_steps=0,
            timeout_s=0, mode="", schema=None, fs_roots=None, fs_mode="", bash="",
+           max_tokens=0,
            fetch_hosts=None, fetch_any=False, fetch_query=None, instructions="",
            mcp=None, mcp_config="", fail_on_deny=False, model="", cwd=None) -> Cage:
     """Новая клетка, никогда не шире исходной.
@@ -448,6 +494,7 @@ def narrow(cage: Cage, *, tools=None, deny=(), allow=(), max_usd=0, max_steps=0,
     out.max_usd = float(_min_nonzero(cage.max_usd, max_usd))
     out.max_steps = int(_min_nonzero(cage.max_steps, max_steps))
     out.timeout_s = float(_min_nonzero(cage.timeout_s, timeout_s))
+    out.max_tokens = int(_min_nonzero(cage.max_tokens, max_tokens))
     if mode:
         if mode not in MODE_ORDER:
             raise HumanError("worker_narrow", "--mode: неизвестный режим " + repr(mode),

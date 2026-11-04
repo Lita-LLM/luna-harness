@@ -46,7 +46,7 @@ def _luna_tool_changing() -> tuple:
         return ("set", "mcp_add", "mcp_remove", "manners_use", "theme_use", "theme_create")
     return CHANGING
 
-SECRET_PATHS = re.compile(r"(^|[/\\])(\.env|secrets\.json|id_rsa|id_ed25519)([/\\]|$)|\.(pem|key)$")
+SECRET_PATHS = re.compile(r"(^|[/\\])(\.env(\.[\w.-]+)?|\.envrc|secrets\.json|id_rsa|id_ed25519)([/\\]|$)|\.(pem|key)$")
 
 
 @dataclass
@@ -225,6 +225,10 @@ class Guard:
     def _always_rank_effective(self) -> int:
         """Уровень «без вопросов»: сессионный и проектный — больший."""
         rank = self._always_rank
+        if self.enforce:
+            # В клетке «больше не спрашивать», сказанное хозяином в чате,
+            # не действует: единственный пропуск — allow профиля.
+            return rank
         if self.settings is not None:
             # Старый ключ: глобальный слой или доверенный проект (недоверенный
             # Settings уже отбросил).
@@ -247,6 +251,8 @@ class Guard:
                 continue
             if needle and needle not in args_text:
                 continue
+            if action == "allow" and self.enforce:
+                continue  # клетке allow-правила хозяина не передаются, deny/ask — да
             return action
         return None
 

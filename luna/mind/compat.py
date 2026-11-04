@@ -45,31 +45,34 @@ def _read(path: Path) -> str:
         return ""
 
 
-# Куда @импорт не дотягивается никогда: инструкции проекта пишет кто угодно,
-# а вставленный файл уходит модели целиком (сейф Луны, ключи, чаты харнессов).
-_IMPORT_DENY_HOME = (".ssh", ".gnupg", ".aws", ".claude")
-
-
-def _import_denied(target: Path) -> bool:
+# @импорт вставляет файл в промпт целиком — а инструкции проекта пишет
+# кто угодно (клонированный репозиторий). Поэтому файл подключает только
+# то, что лежит в его же папке и глубже, и даже там — не сейф Луны, не
+# ключи хозяина и не секретные файлы (общий список с клеткой работника).
+def _import_denied(target: Path, scope: Path) -> bool:
     from ..core.paths import luna_home
     from ..guard.policy import SECRET_PATHS
+    from ..worker.cage import _HOME_DENY
 
     try:
         real = target.resolve()
+        scope = scope.resolve()
     except (OSError, RuntimeError):
+        return True
+    if real != scope and scope not in real.parents:
         return True
     if SECRET_PATHS.search(str(real)) or SECRET_PATHS.search(str(target)):
         return True
     home = _home()
-    roots = [luna_home()] + [home / name for name in _IMPORT_DENY_HOME]
+    claude = home / ".claude"
+    roots = [luna_home()] + [home / name for name in _HOME_DENY]
     for root in roots:
         try:
             root = root.expanduser().resolve()
         except (OSError, RuntimeError):
             continue
         if real == root or root in real.parents:
-            if root.name == ".claude" and real.suffix.lower() == ".md" \
-                    and (root / "projects") not in real.parents:
+            if root == claude.resolve() and real.suffix.lower() == ".md"                     and (root / "projects") not in real.parents                     and (scope == root or root in scope.parents):
                 # Глобальный CLAUDE.md хозяина подключает соседние .md —
                 # это его же инструкции; чаты и память (projects/) — нет.
                 continue
@@ -77,10 +80,15 @@ def _import_denied(target: Path) -> bool:
     return False
 
 
-def _expand_imports(text: str, base: Path, depth: int, seen: set) -> str:
-    """`@путь` на отдельной строке (как в CLAUDE.md) — вставить файл."""
+def _expand_imports(text: str, base: Path, depth: int, seen: set,
+                    scope: Path | None = None) -> str:
+    """`@путь` на отдельной строке (как в CLAUDE.md) — вставить файл.
+
+    scope — папка, за которую импорт не выходит (папка исходного файла
+    инструкций); вложенные импорты наследуют её, а не свою папку."""
     if depth >= MAX_IMPORT_DEPTH:
         return text
+    scope = scope if scope is not None else base
 
     def repl(match: re.Match) -> str:
         raw = match.group(1)
@@ -91,11 +99,11 @@ def _expand_imports(text: str, base: Path, depth: int, seen: set) -> str:
             key = str(target.resolve())
         except OSError:
             return match.group(0)
-        if key in seen or not target.is_file() or _import_denied(target):
+        if key in seen or not target.is_file() or _import_denied(target, scope):
             return match.group(0)
         seen.add(key)
         inner = _read(target)[:MAX_FILE_CHARS]
-        return _expand_imports(inner, target.parent, depth + 1, seen)
+        return _expand_imports(inner, target.parent, depth + 1, seen, scope)
 
     return _IMPORT.sub(repl, text)
 

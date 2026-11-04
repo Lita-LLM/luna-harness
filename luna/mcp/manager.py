@@ -270,8 +270,10 @@ class Manager:
     """Живые подключения одного набора конфигов; создаётся лениво, стартует серверы по требованию."""
 
     def __init__(self, *, cwd, home=None, secrets=None, environ=None, opener=None,
-                 project_configs: bool = True, global_config=None, only_servers=None):
+                 project_configs: bool = True, global_config=None, only_servers=None,
+                 write_cache: bool = True):
         self.cwd = Path(cwd)
+        self.write_cache = write_cache  # эфемерная клетка не оставляет следов
         self.home = Path(home) if home is not None else luna_home()
         # secrets может быть суженным видом (клетка): нужен только .get(имя)
         self.secrets = secrets if secrets is not None else Secrets(self.home / "secrets.json")
@@ -311,6 +313,8 @@ class Manager:
             return None
 
     def _write_cache(self, name: str, aliases: list) -> None:
+        if not self.write_cache:
+            return
         try:
             path = self.cache_path()
             try:

@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
+import re
 import sys
 import threading
 from pathlib import Path
@@ -57,14 +59,36 @@ def _allow_patterns(settings, cli_patterns) -> list:
     return patterns
 
 
+_FIELD_NEEDLE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+
+def _string_values(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _string_values(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _string_values(item)
+
+
 def _pattern_matches(pattern: str, tool_name: str, args: dict) -> bool:
+    """«тул», «тул:подстрока» или «тул:поле=шаблон».
+
+    Подстрока ищется только в строковых значениях аргументов, не в JSON
+    целиком; «поле=шаблон» — fnmatch по одному полю (надёжно: модель не
+    подложит нужное слово в свободный текст сообщения)."""
     tool_pattern, _, needle = pattern.partition(":")
-    if not fnmatch.fnmatch(tool_name, tool_pattern.strip()):
+    if not fnmatch.fnmatchcase(tool_name, tool_pattern.strip()):
         return False
-    if needle:
-        text = json.dumps(args or {}, ensure_ascii=False, default=str)
-        return needle in text
-    return True
+    if not needle:
+        return True
+    field = _FIELD_NEEDLE.match(needle)
+    if field is not None:
+        value = (args or {}).get(field.group(1))
+        return value is not None and not isinstance(value, (dict, list)) and             fnmatch.fnmatchcase(str(value), field.group(2))
+    return any(needle in text for text in _string_values(args or {}))
 
 
 def _brief_args(args: dict) -> str:
@@ -172,7 +196,8 @@ _STATUS_CODES = {"ok": EXIT_OK, "error": EXIT_ERROR, "usage": EXIT_USAGE,
 
 
 def _min_nonzero(a, b):
-    a, b = a or 0, b or 0
+    a = a if a and math.isfinite(a) else 0
+    b = b if b and math.isfinite(b) else 0
     if a and b:
         return min(a, b)
     return a or b
@@ -220,7 +245,7 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
                  max_turns: int = 0, allow=None, data=None,
                  cwd=None, cage=None, check: bool = False,
                  timeout_s: float = 0.0, schema: dict | None = None,
-                 fail_on_deny: bool = False) -> int:
+                 fail_on_deny: bool = False, max_tokens: int = 0) -> int:
     """Выполнить один ход без интерфейса. Возвращает код выхода процесса.
 
     output: "" / "text" — ответ в stdout, ход в stderr; "json" — один
@@ -275,9 +300,12 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
     if cage is not None:
         from .worker.profile import MODE_ORDER
 
-        max_usd = _min_nonzero(max_usd, cage.max_usd)
-        max_turns = _min_nonzero(max_turns, cage.max_steps)
-        timeout_s = _min_nonzero(timeout_s, cage.timeout_s)
+        # Клетка уже сужена флагами (narrow): её лимиты — последнее слово,
+        # сырые значения CLI второй раз не смешиваем (nan съедал лимит).
+        max_usd = cage.max_usd
+        max_turns = cage.max_steps
+        timeout_s = cage.timeout_s
+        max_tokens = cage.max_tokens
         schema = cage.output_schema if cage.output_schema is not None else schema
         fail_on_deny = fail_on_deny or cage.fail_on_deny
         retries = int(cage.schema_retries)
@@ -356,7 +384,7 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
                            else " или настройка headless.allow") +
                           ". Причина вопроса: " + str(event.get("reason", ""))}
 
-    state = {"cost": 0.0, "cost_exceeded": False, "wrote_text": False,
+    state = {"cost": 0.0, "tokens": 0, "cost_exceeded": False, "wrote_text": False,
              "text_open": False,  # ответ в stdout не закрыт переводом строки
              "timeout": False, "denied": False, "step_text": [], "last_text": "",
              "names": {}, "last_error": ""}
@@ -384,6 +412,19 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
                           ((". " + exc.hint) if getattr(exc, "hint", "") else ""))
         if max_turns and int(max_turns) > 0:
             agent.max_steps_override = int(max_turns)
+        if cage is not None and settings is not None:
+            home_dir = getattr(settings, "home_dir", None)
+            if home_dir is not None and str(home_dir) not in cage.deny_dirs:
+                cage.deny_dirs.append(str(home_dir))  # настоящий сейф, если home свой
+        if max_usd and settings is not None and not (
+                float(settings.get("model.price_in", 0) or 0) > 0
+                or float(settings.get("model.price_out", 0) or 0) > 0):
+            # Без цен стоимость всегда $0 — потолок денег молча не сработает.
+            err_stream.write("Внимание: цены модели не заданы (model.price_in/price_out), "
+                             "потолок денег не сработает" +
+                             ("; держит потолок токенов." if max_tokens else
+                              " — задай limits.max_tokens или --max-tokens.") + "\n")
+            err_stream.flush()
 
         def on_timeout() -> None:
             state["timeout"] = True
@@ -431,6 +472,14 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
                 cost = float(event.get("cost") or 0.0)
                 if cost > state["cost"]:
                     state["cost"] = cost
+                state["tokens"] += int(event.get("input") or 0) + int(event.get("output") or 0)
+                if max_tokens and state["tokens"] >= int(max_tokens) and \
+                        not state["cost_exceeded"]:
+                    state["cost_exceeded"] = True
+                    err_stream.write("Потолок токенов " + str(int(max_tokens)) +
+                                     " исчерпан (" + str(state["tokens"]) + ") — ход прерван.\n")
+                    err_stream.flush()
+                    agent.interrupt()
                 if max_usd and state["cost"] >= float(max_usd) and \
                         not state["cost_exceeded"]:
                     state["cost_exceeded"] = True

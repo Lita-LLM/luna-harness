@@ -214,6 +214,10 @@ def _bash(ctx, args) -> ToolResult:
     timeout = int(args.get("timeout") or 0)
     if not timeout:
         timeout = int(ctx.settings.get("tools.bash_timeout", 120)) if ctx.settings else 120
+    if args.get("background") and cage is not None:
+        # Фон пережил бы запуск: контейнер podman/docker не умирает вместе
+        # с клиентом, а клетка обещает «после себя ничего».
+        return ToolResult(False, "клетка: фоновые команды не выдаются — только обычные.")
     if args.get("background"):
         # Без output_dir — во временную папку системы, не в cwd: иначе
         # логи фона сыплются прямо в проект.

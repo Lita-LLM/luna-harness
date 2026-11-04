@@ -33,7 +33,17 @@ INSTRUCTION_MODES = ("none", "project", "all")
 _HOME_DENY = (".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker",
               ".config/gh", ".config/gcloud", ".password-store", ".claude",
               ".codex", ".gemini", ".netrc", ".git-credentials", ".pgpass",
-              ".npmrc", ".pypirc")
+              ".npmrc", ".pypirc",
+              # Мессенджеры, браузеры и хранилища паролей — ровно то, за чем
+              # пришёл бы взломанный промптом работник (атака 04.11.2026).
+              "AppData/Roaming", "AppData/Local/Google", "AppData/Local/Microsoft",
+              "AppData/Local/Packages", "AppData/Local/Telegram Desktop",
+              ".mozilla", ".thunderbird", ".local/share/TelegramDesktop",
+              ".local/share/keyrings", ".config/google-chrome", ".config/chromium",
+              ".config/BraveSoftware", ".config/Signal", ".config/discord",
+              ".var/app", "Library",
+              ".bash_history", ".zsh_history", ".python_history", ".lesshst",
+              ".viminfo", ".psql_history", ".mysql_history", ".node_repl_history")
 
 
 def _match_any(name: str, patterns) -> bool:
@@ -70,6 +80,8 @@ class Cage:
     max_usd: float = 0.0
     max_steps: int = 0
     timeout_s: float = 0.0
+    max_tokens: int = 0                 # потолок токенов: работает и без цен моделей
+    deny_dirs: list = field(default_factory=list)   # ещё закрытые папки (свой home_dir)
     output_schema: dict | None = None
     schema_retries: int = 1
     ephemeral: bool = True
@@ -128,6 +140,11 @@ class Cage:
         home = Path.home().resolve()
         from ..core.paths import luna_home
         denied = [luna_home().expanduser().resolve()] + [home / d for d in _HOME_DENY]
+        for extra in self.deny_dirs:
+            try:
+                denied.append(Path(extra).expanduser().resolve())
+            except (OSError, RuntimeError):
+                continue
         for d in denied:
             if real == d or d in real.parents:
                 return "закрыто всегда: " + str(d)
@@ -177,7 +194,7 @@ class Cage:
             "net": {"fetch_hosts": self.fetch_hosts, "fetch_query": self.fetch_query},
             "instructions": self.instructions,
             "limits": {"max_usd": self.max_usd, "max_steps": self.max_steps,
-                       "timeout_s": self.timeout_s},
+                       "timeout_s": self.timeout_s, "max_tokens": self.max_tokens},
             "output_schema": self.output_schema is not None,
             "ephemeral": self.ephemeral,
         }

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -268,7 +269,7 @@ def _cmd_manners(argv: list[str]) -> int:
 _P_VALUE_FLAGS = ("--output", "--mode", "--model", "--max-usd", "--max-turns", "--allow",
                   "--worker", "--worker-file", "--tools", "--deny", "--mcp", "--mcp-config",
                   "--fs", "--root", "--bash", "--fetch-host", "--instructions", "--schema",
-                  "--timeout", "--cwd")
+                  "--timeout", "--cwd", "--max-tokens")
 _P_BOOL_FLAGS = ("--json", "--check", "--fetch-any", "--fetch-query", "--fail-on-deny")
 _P_REPEAT = ("--allow", "--deny", "--mcp", "--root", "--fetch-host")
 _CAGE_FLAGS = ("--tools", "--deny", "--mcp", "--mcp-config", "--fs", "--root", "--bash",
@@ -315,8 +316,9 @@ def _number(values: dict, flag: str, kind):
     except ValueError:
         raise HumanError("usage", flag + " — " + ("целое число" if kind is int else "число") +
                          ", а не " + repr(raw), "") from None
-    if number < 0:
-        raise HumanError("usage", flag + " не может быть отрицательным", "")
+    if number < 0 or (kind is float and not math.isfinite(number)):
+        # nan проходит «< 0» и потом в min() съедает лимит профиля.
+        raise HumanError("usage", flag + " — конечное неотрицательное число", "")
     return number
 
 
@@ -334,6 +336,7 @@ def _cmd_headless(rest: list[str], *, continue_last: bool, resume) -> int:
     max_usd = _number(values, "--max-usd", float)
     max_turns = _number(values, "--max-turns", int)
     timeout_s = _number(values, "--timeout", float)
+    max_tokens = _number(values, "--max-tokens", int)
     workdir = Path(values["--cwd"]).expanduser().resolve() if values.get("--cwd") else Path.cwd()
     if not workdir.is_dir():
         raise HumanError("usage", "--cwd: нет такой папки: " + str(workdir), "")
@@ -368,10 +371,14 @@ def _cmd_headless(rest: list[str], *, continue_last: bool, resume) -> int:
     if worker or worker_file:
         from .worker.profile import load_profile, narrow
 
-        cage = load_profile(worker or str(Path(worker_file).expanduser().resolve()),
-                            cwd=workdir)
+        if worker:
+            cage = load_profile(worker, cwd=workdir, kind="name")
+        else:
+            cage = load_profile(str(Path(worker_file).expanduser().resolve()),
+                                cwd=workdir, kind="path")
         cage = narrow(cage, tools=tools, deny=values["--deny"], allow=values["--allow"],
                       max_usd=max_usd, max_steps=max_turns, timeout_s=timeout_s,
+                      max_tokens=max_tokens,
                       mode=values.get("--mode", ""), schema=schema,
                       fs_roots=values["--root"] or None, fs_mode=values.get("--fs", ""),
                       bash=values.get("--bash", ""), fetch_hosts=values["--fetch-host"] or None,
@@ -394,7 +401,8 @@ def _cmd_headless(rest: list[str], *, continue_last: bool, resume) -> int:
             fetch_any=bool(values.get("--fetch-any")),
             fetch_query=bool(values.get("--fetch-query")),
             instructions=values.get("--instructions", "none"), max_usd=max_usd,
-            max_steps=max_turns, timeout_s=timeout_s, mode=values.get("--mode", ""),
+            max_steps=max_turns, timeout_s=timeout_s, max_tokens=max_tokens,
+            mode=values.get("--mode", ""),
             model=values.get("--model", ""), schema=schema,
             fail_on_deny=bool(values.get("--fail-on-deny")), cwd=workdir)
     prompt = " ".join(prompt_parts)
@@ -413,7 +421,8 @@ def _cmd_headless(rest: list[str], *, continue_last: bool, resume) -> int:
                         max_usd=max_usd, max_turns=max_turns,
                         allow=values["--allow"] if cage is None else None,
                         cwd=workdir, cage=cage, check=check, timeout_s=timeout_s,
-                        schema=schema, fail_on_deny=bool(values.get("--fail-on-deny")))
+                        schema=schema, fail_on_deny=bool(values.get("--fail-on-deny")),
+                        max_tokens=max_tokens)
 
 
 def _same_path(a: str, b: str) -> bool:

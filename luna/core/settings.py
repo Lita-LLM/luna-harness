@@ -13,6 +13,7 @@ security.trusted_projects защиту только сужает (см. _narrow_
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -287,6 +288,8 @@ _UNTRUSTED_IGNORED = frozenset({
     "model.provider", "model.kind", "model.base_url", "model.guard",
     "web.searxng_url", "web.exa_url", "web.parallel_url",
     "starfall.output_dir",
+    # Учёт денег: проект с ценой 0 или −1000 обнулял бы все потолки бюджета.
+    "model.price_in", "model.price_out", "model.context_tokens",
 })
 # То же по форме имени: незнакомые ключи будущих версий с адресами и
 # учётными данными тоже не принимаем из проекта.
@@ -305,7 +308,7 @@ _UPPER_BOUNDS = {
     "agent.max_steps": False, "agents.max_depth": False, "agents.max_children": False,
     "agents.max_steps": False, "agents.session_budget_usd": True,
     "starfall.max_cells": False, "starfall.max_parallel": False,
-    "starfall.budget_usd": False, "starfall.ttl_s": False, "starfall.max_attempts": False,
+    "starfall.budget_usd": True, "starfall.ttl_s": False, "starfall.max_attempts": False,
     "starfall.sandbox_memory_mb": False, "starfall.sandbox_processes": False,
 }
 
@@ -528,6 +531,8 @@ class Settings:
         num_types = (int, float)
         if isinstance(value, bool) or not isinstance(value, num_types):
             return _NO_VALUE
+        if value < 0 or not math.isfinite(value):
+            return _NO_VALUE  # отрицательный потолок у потребителей значит «без лимита»
         if isinstance(glob, bool) or not isinstance(glob, num_types):
             return value
         if zero_unlimited:

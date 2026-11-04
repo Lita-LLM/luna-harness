@@ -283,7 +283,8 @@ def _load_cage_mcp(cage, cwd: Path, home: Path) -> tuple:
     global_config = Path(cage.mcp_config).expanduser() if cage.mcp_config else home / "mcp.json"
     secrets = _SecretsView(Secrets(home / "secrets.json"), cage)
     manager = Manager(cwd=cwd, home=home, secrets=secrets, project_configs=False,
-                      global_config=global_config, only_servers=set(cage.mcp))
+                      global_config=global_config, only_servers=set(cage.mcp),
+                      write_cache=not cage.ephemeral)
     errors = list(manager.problems)
     failed: list[str] = []
     configs = {cfg.name: cfg for cfg in manager.configs()}

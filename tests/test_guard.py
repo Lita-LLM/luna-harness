@@ -45,6 +45,8 @@ class GuardModesTest(unittest.TestCase):
             ("bash", {"command": "crontab -e"}),
             ("read", {"path": "/home/u/.ssh/id_rsa"}),
             ("read", {"path": "project/.env"}),
+            ("read", {"path": "certs/server.pem"}),
+            ("read", {"path": "tls.key"}),
         ]
         for tool, args in cases:
             verdict = self.guard.decide(tool, tool == "bash", args, mode="yolo")

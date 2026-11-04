@@ -46,7 +46,7 @@ def _luna_tool_changing() -> tuple:
         return ("set", "mcp_add", "mcp_remove", "manners_use", "theme_use", "theme_create")
     return CHANGING
 
-SECRET_PATHS = re.compile(r"(^|[/\\])(\.env|secrets\.json|id_rsa|id_ed25519)([/\\]|$)|\\.(pem|key)$")
+SECRET_PATHS = re.compile(r"(^|[/\\])(\.env|secrets\.json|id_rsa|id_ed25519)([/\\]|$)|\.(pem|key)$")
 
 
 @dataclass

@@ -1005,8 +1005,58 @@ class ChatApp:
             items.append(PickerItem(key=role, title=role + " — " + title,
                                     detail=detail))
         self._open_picker("models", "Модель по ролям", items,
-                          hint="Enter — задать модель роли · Esc — закрыть",
+                          hint="Enter — выбрать модель роли · Esc — закрыть",
                           preview_lines=0)
+
+    def _model_choice_items(self, role: str, remote: list) -> list:
+        """Пункты выбора модели роли: свои действия, текущая, затем список API."""
+        current = str(self.settings.get("model." + role) or "")
+        items = [PickerItem(key="__manual__", title="✎ вписать ссылку вручную",
+                            detail="«провайдер:модель» — для чего нет в списке")]
+        if role != "main":
+            items.append(PickerItem(key="__inherit__", title="как главная",
+                                    detail="своей модели у роли нет",
+                                    mark="" if current else "→"))
+        seen = set()
+        for ref in [current] + list(remote):
+            if not ref or ref in seen:
+                continue
+            seen.add(ref)
+            items.append(PickerItem(key=ref, title=ref,
+                                    detail="сейчас" if ref == current else "",
+                                    mark="→" if ref == current else ""))
+        return items
+
+    def open_model_choice(self, role: str) -> None:
+        """Второй экран /model: модели провайдера списком с поиском и кликом.
+
+        Список берём из API в фоне, чтобы экран открылся сразу, а сеть не
+        вешала интерфейс; пока он едет, можно выбрать текущую или вписать."""
+        import threading
+
+        self._model_role = role
+        self._open_picker(
+            "modelpick", "Модель роли " + role, self._model_choice_items(role, []),
+            hint="печатайте — поиск · Enter — выбрать · Esc — закрыть",
+            preview_lines=0)
+        picker = self.picker
+
+        def fetch() -> None:
+            try:
+                from ..core.secrets import Secrets
+                from ..router.core import Router
+
+                router = Router(self.settings, Secrets(self._data_dir().secrets))
+                models = router.fetch_models()
+            except Exception:  # noqa: BLE001 — нет сети или ключа не роняет экран
+                return
+            if self.picker is picker:
+                picker.set_items(self._model_choice_items(role, models))
+                picker.hint = ("печатайте — поиск · Enter — выбрать · Esc — закрыть"
+                               " · моделей в списке: " + str(len(models)))
+                self._last_change = self._clock()
+
+        threading.Thread(target=fetch, daemon=True).start()
 
     def _mcp_items(self) -> list:
         from .panels.mcp import load_servers
@@ -1156,11 +1206,21 @@ class ChatApp:
                 else:
                     self._slash("/" + item.key)
             elif kind == "models":
-                current = str(self.settings.get("model." + item.key) or "")
-                self.picker.ask_input(
-                    "Модель роли " + item.key + " («провайдер:модель» или "
-                    "модель; пусто — как главная): ", ("role", item.key),
-                    initial=current)
+                self.open_model_choice(item.key)
+            elif kind == "modelpick":
+                role = self._model_role
+                if item.key == "__manual__":
+                    current = str(self.settings.get("model." + role) or "")
+                    self.picker.ask_input(
+                        "Модель роли " + role + " («провайдер:модель» или "
+                        "модель; пусто — как главная): ", ("role", role),
+                        initial=current)
+                else:
+                    self.picker = None
+                    ref = "" if item.key == "__inherit__" else item.key
+                    self.settings.set("model." + role, ref)
+                    self._add(Entry("notice", text="Модель роли " + role + ": "
+                                    + (ref or "(как главная)") + " — со следующего хода."))
             elif kind == "mcp":
                 self.picker = None
                 if item.key:
@@ -1218,7 +1278,7 @@ class ChatApp:
             return
         if action[0] == "input":
             text, ctx = action[1], action[2]
-            if kind == "models" and ctx is not None and ctx[0] == "role":
+            if kind in ("models", "modelpick") and ctx is not None and ctx[0] == "role":
                 role = ctx[1]
                 self.settings.set("model." + role, text)
                 self.picker = None
@@ -1335,7 +1395,7 @@ class ChatApp:
             self._manners_picker_action(action)
         elif self._picker_kind in ("panels", "help", "models", "mcp", "agents",
                                    "theme", "history", "rewind", "adddir", "cells",
-                                   "effort", "mode", "send", "thinking"):
+                                   "effort", "mode", "send", "thinking", "modelpick"):
             self._extra_picker_action(action)
 
     def _is_current_session(self, item) -> bool:

@@ -476,6 +476,8 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
                 if max_tokens and state["tokens"] >= int(max_tokens) and \
                         not state["cost_exceeded"]:
                     state["cost_exceeded"] = True
+                    state["limit_what"] = ("токенов: " + str(state["tokens"]) + " из "
+                                           + str(int(max_tokens)))
                     err_stream.write("Потолок токенов " + str(int(max_tokens)) +
                                      " исчерпан (" + str(state["tokens"]) + ") — ход прерван.\n")
                     err_stream.flush()
@@ -483,6 +485,7 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
                 if max_usd and state["cost"] >= float(max_usd) and \
                         not state["cost_exceeded"]:
                     state["cost_exceeded"] = True
+                    state["limit_what"] = "денег: $" + format(state["cost"], ".4f")
                     err_stream.write("Потолок --max-usd " + format(float(max_usd), ".4f") +
                                      " исчерпан (потрачено $" +
                                      format(state["cost"], ".4f") + ") — ход прерван.\n")
@@ -547,7 +550,7 @@ def run_headless(prompt: str = "", *, json_mode: bool = False, mode: str = "",
             if state["timeout"]:
                 return "limit", "Потолок времени исчерпан."
             if state["cost_exceeded"]:
-                return "limit", "Потолок денег исчерпан."
+                return "limit", "Потолок исчерпан — " + state.get("limit_what", "денег или токенов") + "."
             if reason == "limit":
                 return "limit", "Потолок шагов исчерпан."
             if reason == "interrupted":

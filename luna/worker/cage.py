@@ -56,6 +56,10 @@ class McpRule:
     tools: list = field(default_factory=lambda: ["*"])   # шаблоны сырых имён
     deny: list = field(default_factory=list)             # сильнее tools
     required: bool = False                               # не поднялся — код 6
+    # Ограничение аргументов: {шаблон тула: {поле: [шаблоны значений]}}.
+    # Разрешено только то, что совпало; поля нет в вызове — отказ. Так тул
+    # «читать сообщения» привязывается к чатам из списка, а не ко всем.
+    args: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -113,6 +117,29 @@ class Cage:
         if _match_any(raw_tool, rule.deny):
             return False
         return _match_any(raw_tool, rule.tools)
+
+    def mcp_args_check(self, server: str, raw_tool: str, args) -> str:
+        """Пусто — можно; иначе причина. Каждое ограниченное поле обязано быть
+        в вызове, и все его значения (у списка — каждый элемент) совпасть."""
+        rule = self.mcp.get(server)
+        if rule is None:
+            return "сервер не выдан"
+        args = args if isinstance(args, dict) else {}
+        for tool_pat, fields in (rule.args or {}).items():
+            if not fnmatch.fnmatchcase(raw_tool, tool_pat):
+                continue
+            for name, patterns in fields.items():
+                if name not in args:
+                    return "поле «" + name + "» обязательно и ограничено списком"
+                value = args[name]
+                values = value if isinstance(value, (list, tuple)) else [value]
+                if not values or isinstance(value, (dict, bool)) or any(
+                        isinstance(v, (dict, list, tuple, bool, type(None))) for v in values):
+                    return "поле «" + name + "» должно быть значением из списка"
+                for v in values:
+                    if not _match_any(str(v), patterns):
+                        return "значение поля «" + name + "» вне разрешённого списка"
+        return ""
 
     def tool_allowed(self, name: str) -> bool:
         """Любое имя реестра: встроенное или mcp__сервер__тул."""

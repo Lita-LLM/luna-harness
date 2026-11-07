@@ -58,6 +58,32 @@ class ProfileFixesTest(Base):
                                           {"chat_id": "@evil", "text": "chat_id=@me"}))
 
 
+class McpArgsTest(Base):
+    def cage(self):
+        return self.load({"version": 1, "mcp": {"servers": {"tg": {
+            "tools": ["read-messages", "search-*"],
+            "args": {"read-messages": {"chat_id": ["-100123", "@news_*"]},
+                     "search-messages": {"chat_id": ["-100123"]}}}}}})
+
+    def test_args_limit_chats(self):
+        c = self.cage()
+        ok = lambda tool, a: c.mcp_args_check("tg", tool, a)
+        self.assertEqual(ok("read-messages", {"chat_id": "-100123"}), "")
+        self.assertEqual(ok("read-messages", {"chat_id": -100123}), "")
+        self.assertEqual(ok("read-messages", {"chat_id": "@news_ru", "limit": 5}), "")
+        self.assertNotEqual(ok("read-messages", {"chat_id": "@private"}), "")
+        self.assertNotEqual(ok("read-messages", {}), "")
+        self.assertNotEqual(ok("read-messages", {"chat_id": ["-100123", "@private"]}), "")
+        self.assertNotEqual(ok("read-messages", {"chat_id": {"x": "-100123"}}), "")
+        self.assertNotEqual(ok("search-messages", {"chat_id": "@news_ru"}), "")
+
+    def test_args_survive_narrow_and_validate(self):
+        c = narrow(self.cage(), max_tokens=10)
+        self.assertNotEqual(c.mcp_args_check("tg", "read-messages", {"chat_id": "x"}), "")
+        self.assertProfileError({"version": 1, "mcp": {"servers": {"tg": {
+            "args": {"read-messages": {"chat_id": []}}}}}}, "пустой")
+
+
 class GuardAndSettingsFixesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

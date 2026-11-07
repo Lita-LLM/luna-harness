@@ -679,6 +679,15 @@ class Agent:
                           "by": "cage", "reason": reason})
             self._deny(call_id, tool.name, reason)
             return None
+        origin = getattr(tool, "origin", None)
+        if self.cage is not None and origin:
+            why = self.cage.mcp_args_check(origin[0], origin[1], args)
+            if why:
+                reason = "клетка: аргументы тула не по списку — " + why
+                self.publish({"type": "guard.verdict", "id": call_id, "decision": "deny",
+                              "by": "cage", "reason": reason})
+                self._deny(call_id, tool.name, reason)
+                return None
         if human:
             self.publish({"type": "guard.verdict", "id": call_id,
                           "decision": "allow", "by": "human",

@@ -48,9 +48,23 @@ _SCHEMA = {
     "output": {"schema": dict, "retries": int},
     "ephemeral": bool, "fail_on_deny": bool,
 }
-_SERVER_SCHEMA = {"tools": list, "deny": list, "required": bool}
+_SERVER_SCHEMA = {"tools": list, "deny": list, "required": bool, "args": dict}
 _TYPE_NAMES = {int: "целое число", float: "число", str: "строка", list: "список",
                dict: "объект", bool: "true/false", type(None): "null"}
+
+
+def _mcp_args(raw, where: str) -> dict:
+    """{тул: {поле: [шаблоны]}} — строгая проверка формы."""
+    out: dict = {}
+    for tool, fields in raw.items():
+        if not isinstance(fields, dict) or not fields:
+            raise _err(where + "." + str(tool) + " должен быть объектом {поле: [значения]}")
+        out[str(tool)] = {}
+        for name, patterns in fields.items():
+            out[str(tool)][str(name)] = _str_list(patterns, where + "." + str(tool) + "." + str(name))
+            if not out[str(tool)][str(name)]:
+                raise _err(where + "." + str(tool) + "." + str(name) + ": пустой список запрещает всё")
+    return out
 
 
 def _err(title: str, hint: str = "") -> HumanError:
@@ -246,7 +260,8 @@ def load_profile(name_or_path, *, home=None, cwd=None, kind: str = "auto") -> Ca
         cage.mcp[server] = McpRule(
             tools=_str_list(rule.get("tools", ["*"]), where + ".tools"),
             deny=_str_list(rule.get("deny", []), where + ".deny"),
-            required=rule.get("required", False))
+            required=rule.get("required", False),
+            args=_mcp_args(rule.get("args") or {}, where + ".args"))
 
     fs = data.get("fs", {})
     cage.fs_mode = fs.get("mode", "none")
@@ -480,7 +495,9 @@ def narrow(cage: Cage, *, tools=None, deny=(), allow=(), max_usd=0, max_steps=0,
     тулам, которые клетка и так показывает, и hard_block не перебивают.
     """
     out = replace(cage, tools=list(cage.tools), deny=list(cage.deny), allow=list(cage.allow),
-                  mcp={k: McpRule(list(v.tools), list(v.deny), v.required) for k, v in cage.mcp.items()},
+                  mcp={k: McpRule(list(v.tools), list(v.deny), v.required,
+                                  {t: {f: list(p) for f, p in fs.items()} for t, fs in v.args.items()})
+                      for k, v in cage.mcp.items()},
                   secrets=list(cage.secrets), fs_roots=list(cage.fs_roots),
                   fetch_hosts=None if cage.fetch_hosts is None else list(cage.fetch_hosts))
     if tools is not None:

@@ -256,7 +256,7 @@ def _web_search(ctx, args) -> ToolResult:
         return ToolResult(False, "Веб-тулы выключены настройкой web.enabled.")
     from ..net.search import chain_search
 
-    results, label, errors, skipped = chain_search(ctx, query)
+    results, label, errors, skipped = chain_search(ctx, query, str(args.get("provider") or ""))
     if not results:
         parts = ["Поиск не дал результатов."]
         if errors:
@@ -318,8 +318,9 @@ def web_fetch_tool() -> Tool:
 
 
 def web_search_tool() -> Tool:
-    return Tool("web_search", "Поиск в вебе цепочкой провайдеров (порядок — web.search_providers): свой SearXNG, бесплатные Exa и Parallel без ключа, DuckDuckGo, ключные Brave/Tavily/Perplexity. Ответ: заголовки, адреса, выдержки и источник.",
-                {"type": "object", "properties": {"query": {"type": "string"}},
+    return Tool("web_search", "Поиск в вебе цепочкой провайдеров (порядок — web.search_providers): свой SearXNG, бесплатные Exa и Parallel без ключа, DuckDuckGo, ключные Brave/Tavily/Perplexity. Ответ: заголовки, адреса, выдержки и источник. Можно выбрать движок сама полем provider (searxng, exa, parallel, duckduckgo, brave, tavily, perplexity, native; несколько — через запятую): например, если выдача пустая или нужен другой взгляд. Без provider — обычная цепочка.",
+                {"type": "object", "properties": {"query": {"type": "string"},
+                                                  "provider": {"type": "string", "description": "Необязательно: движок или несколько через запятую"}},
                  "required": ["query"]}, _web_search)
 
 

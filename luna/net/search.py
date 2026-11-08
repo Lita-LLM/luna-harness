@@ -332,7 +332,7 @@ PROVIDERS = {
 DEFAULT_ORDER = "searxng,exa,parallel,duckduckgo,brave,tavily,perplexity"
 
 
-def chain_search(ctx, query: str):
+def chain_search(ctx, query: str, only: str = ""):
     """(результаты, подпись источника, ошибки по пути, пропуски).
 
     Идём по web.search_providers; web.native_search добавляет родной
@@ -346,6 +346,15 @@ def chain_search(ctx, query: str):
         order.append("native")
     errors: list = []
     skipped: list = []
+    # Модель сама выбрала движок: идём только по нему (можно несколько через
+    # запятую), а не по цепочке из настроек — иначе выбор у неё отнят.
+    chosen = [n.strip().lower() for n in only.split(",") if n.strip()]
+    if chosen:
+        unknown = [n for n in chosen if n not in PROVIDERS]
+        if unknown:
+            return [], "", [], ["не знаю провайдера: " + ", ".join(unknown) +
+                                 ". Есть: " + ", ".join(PROVIDERS)]
+        order = chosen
     for name in order:
         entry = PROVIDERS.get(name)
         if entry is None:

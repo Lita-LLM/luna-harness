@@ -483,3 +483,15 @@ class ChatCellsTest(StarfallCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_inputs_json_strokoy_razbiraetsya(tmp_path):
+    # Модели шлют inputs JSON-строкой: раньше это был один вход вместо N.
+    from luna.starfall.engine import resolve_inputs
+
+    assert resolve_inputs('["a", "b", "c"]', tmp_path) == ["a", "b", "c"]
+    (tmp_path / "x.txt").write_text("1", encoding="utf-8")
+    (tmp_path / "y.txt").write_text("2", encoding="utf-8")
+    assert resolve_inputs('{"glob": "*.txt"}', tmp_path) == ["1", "2"]
+    assert resolve_inputs("просто текст", tmp_path) == ["просто текст"]
+    assert resolve_inputs("[не json", tmp_path) == ["[не json"]

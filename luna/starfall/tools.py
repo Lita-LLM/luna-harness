@@ -435,7 +435,9 @@ def starfall_tool() -> Tool:
         parameters={"type": "object", "properties": {
             "action": {"type": "string",
                        "enum": ["estimate", "run", "status", "resume"]},
-            "inputs": {"description": "Входы: список строк или описание {glob|file_lines|file|text}"},
+            "inputs": {"description": "Входы НАСТОЯЩИМ JSON-массивом строк или объектом "
+                                      "{glob|file_lines|file|text}, не строкой с JSON внутри. "
+                                      "Один элемент массива — одна ячейка роя"},
             "profile": {"type": "string", "description": "Каста профиля (или несколько через запятую)"},
             "profiles": {"type": "array", "items": {"type": "string"},
                          "description": "Касты списком (альтернатива profile)"},

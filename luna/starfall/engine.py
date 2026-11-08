@@ -76,6 +76,16 @@ def resolve_inputs(spec, cwd: Path) -> list:
     if spec is None:
         return []
     if isinstance(spec, str):
+        # Модели часто шлют структуру JSON-строкой (схема у поля без типа):
+        # иначе список из 5 входов превращался в один вход-текст.
+        stripped = spec.strip()
+        if stripped[:1] in ("[", "{"):
+            try:
+                decoded = json.loads(stripped)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, (list, dict)):
+                return resolve_inputs(decoded, cwd)
         return [spec]
     if isinstance(spec, (list, tuple)):
         return [str(item) for item in spec]

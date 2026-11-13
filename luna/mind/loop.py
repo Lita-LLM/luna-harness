@@ -75,6 +75,10 @@ class Agent:
         self._deferred: list[dict] = []  # delivery=queue: отдельные ходы после текущего
         self._interrupt = threading.Event()
         self.ctx.cancel_event = self._interrupt  # долгие тулы рвутся вместе с ходом
+        self._detach = threading.Event()
+        self.ctx.detach_event = self._detach    # Ctrl+B: идущий bash — в фон
+        self.ctx.on_background_done = self._background_done
+        self._bg_notes: list = []
         self._turn = 0
         self._started = False
         self._prompt_sig: tuple | None = None
@@ -144,6 +148,9 @@ class Agent:
                 notes = host.take_owner_notes()
                 if notes:
                     text = notes + ("\n\n" + text if text else "")
+            if self._bg_notes:
+                notes, self._bg_notes = "\n".join("[фон] " + n for n in self._bg_notes), []
+                text = notes + ("\n\n" + text if text else "")
             if self._turn_active:
                 item = {"text": text, "attachments": command.get("attachments") or []}
                 # delivery (ЗАДАЧА-18, docs/СОБЫТИЯ.md): inject — подмешать
@@ -210,6 +217,19 @@ class Agent:
         if mode in ("normal", "plan", "review", "auto", "yolo"):
             self.mode = mode
             self.publish({"type": "mode.changed", "mode": mode})
+
+    def detach(self) -> None:
+        """Ctrl+B: идущая команда bash уходит в фон, ход продолжается."""
+        self._detach.set()
+
+    def _background_done(self, pid: int, command: str, code, log: str) -> None:
+        """Фон, отпущенный человеком, закончился: заметка в ленту и модели
+        в начало следующего хода — она сама не узнала бы."""
+        short = command if len(command) <= 80 else command[:79] + "…"
+        text = ("Фоновая команда (pid " + str(pid) + ") закончилась, код " + str(code) +
+                ": " + short + ". Вывод — " + log)
+        self._bg_notes.append(text)
+        self.publish({"type": "notice", "level": "info", "text": text})
 
     def interrupt(self) -> None:
         self._interrupt.set()

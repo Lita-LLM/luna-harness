@@ -31,6 +31,8 @@ ENV_DIR = "LUNA_NEWMOON_DIR"
 _lock = threading.Lock()
 _confirmed: set = set()
 _cleanup_registered = False
+_alive = None  # открытый и запертый файл «жив» в своей временной папке
+_ALIVE = "alive.lock"
 
 
 def active() -> bool:
@@ -43,8 +45,10 @@ def enable() -> Path:
     os.environ[ENV] = "1"
     path = os.environ.get(ENV_DIR)
     if not path or not Path(path).is_dir():
+        sweep_orphans()
         path = tempfile.mkdtemp(prefix="luna-nm-")
         os.environ[ENV_DIR] = path
+        _hold(Path(path))
     if not _cleanup_registered:
         atexit.register(wipe)
         _cleanup_registered = True
@@ -68,9 +72,62 @@ def redirect(default: Path, kind: str) -> Path:
 
 def wipe() -> None:
     """Стереть временную папку режима (при выходе)."""
+    global _alive
     root = os.environ.get(ENV_DIR)
+    if _alive is not None:
+        try:
+            _alive.close()  # Windows не даст стереть открытый файл
+        except OSError:
+            pass
+        _alive = None
     if root and Path(root).name.startswith("luna-nm-"):
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _hold(path: Path) -> None:
+    """Запереть файл «жив»: пока процесс жив, папку никто не сочтёт сиротой."""
+    global _alive
+    from .run_lock import _lock as lock_file
+
+    try:
+        handle = open(path / _ALIVE, "a+b")
+        lock_file(handle)
+        _alive = handle
+    except OSError:
+        pass
+
+
+def sweep_orphans(max_age_s: float = 86400.0) -> int:
+    """Стереть временные папки Новолуния от упавших или закрытых окном
+    процессов: atexit не успевает, если окно просто закрыли. Папка чужая
+    живая — её файл «жив» заперт; без файла — по возрасту."""
+    import time
+
+    from .run_lock import _lock as lock_file
+
+    gone = 0
+    base = Path(tempfile.gettempdir())
+    own = os.environ.get(ENV_DIR, "")
+    for path in base.glob("luna-nm-*"):
+        if not path.is_dir() or str(path) == own:
+            continue
+        marker = path / _ALIVE
+        if marker.exists():
+            try:
+                with open(marker, "a+b") as handle:
+                    lock_file(handle)  # занят — OSError: процесс жив
+                    lock_file(handle, False)
+            except OSError:
+                continue
+        else:
+            try:
+                if time.time() - path.stat().st_mtime < max_age_s:
+                    continue  # возможно, только что создана — не трогаем
+            except OSError:
+                continue
+        shutil.rmtree(path, ignore_errors=True)
+        gone += 1
+    return gone
 
 
 # --- подтверждение адресов моделей -----------------------------------------

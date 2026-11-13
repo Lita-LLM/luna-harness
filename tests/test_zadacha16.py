@@ -41,6 +41,12 @@ def key(name: str, char: str = "", mods=()) -> Key:
 class CommandsTest(unittest.TestCase):
     def test_every_command_dispatches(self):
         # Каждая команда реестра разбирается и не роняет экран.
+        # /update без подмены пошёл бы в настоящий git (fetch и pull) по сети.
+        from unittest import mock
+
+        patcher = mock.patch("luna.ui.updater.Updater._run")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         for name, _desc in COMMANDS:
             with self.subTest(command=name):
                 app = make_app(self)

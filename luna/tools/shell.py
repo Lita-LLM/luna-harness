@@ -204,6 +204,101 @@ def _spawn(ctx, command: str, timeout: int, **popen_kw):
     return proc, None
 
 
+class _Pump:
+    """Читатель вывода команды в своём потоке: в память, а после Ctrl+B — в лог."""
+
+    def __init__(self, proc):
+        import threading
+
+        self.proc = proc
+        self._chunks: list = []
+        self._sink = None
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="luna-bash-out")
+        self._thread.start()
+
+    def _run(self) -> None:
+        stream = self.proc.stdout
+        while True:
+            try:
+                block = stream.read1(65536) if hasattr(stream, "read1") else stream.read(65536)
+            except (OSError, ValueError):
+                break
+            if not block:
+                break
+            with self._lock:
+                if self._sink is not None:
+                    try:
+                        self._sink.write(block)
+                        self._sink.flush()
+                    except (OSError, ValueError):
+                        pass
+                else:
+                    self._chunks.append(block)
+        with self._lock:
+            if self._sink is not None:
+                try:
+                    self._sink.close()
+                except OSError:
+                    pass
+
+    def alive(self) -> bool:
+        return self._thread.is_alive() or self.proc.poll() is None
+
+    def wait(self, seconds: float) -> None:
+        self._thread.join(seconds)
+
+    def finish(self) -> None:
+        self._thread.join(5)
+
+    def data(self) -> bytes:
+        with self._lock:
+            return b"".join(self._chunks)
+
+    def redirect(self, path: Path) -> bytes:
+        """Дальше — в файл; накопленное тоже туда. Вернуть накопленное."""
+        with self._lock:
+            done = b"".join(self._chunks)
+            self._chunks = []
+            fh = open(path, "wb")
+            fh.write(done)
+            fh.flush()
+            if self._thread.is_alive():
+                self._sink = fh
+            else:
+                fh.close()
+            return done
+
+
+def _to_background(ctx, proc, pipe: _Pump, command: str) -> ToolResult:
+    """Ctrl+B: команда живёт дальше, вывод — в лог, ход идёт дальше."""
+    import threading
+
+    log_dir = Path(getattr(ctx, "output_dir", "") or tempfile.gettempdir())
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = log_dir / ("bg-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(proc.pid) + ".log")
+    done = pipe.redirect(log)
+    ctx.background[proc.pid] = proc
+    notify = getattr(ctx, "on_background_done", None)
+
+    def watch() -> None:
+        code = proc.wait()
+        pipe.finish()
+        if callable(notify):
+            try:
+                notify(proc.pid, command, code, str(log))
+            except Exception:  # noqa: BLE001 — заметка не роняет поток
+                pass
+
+    threading.Thread(target=watch, daemon=True, name="luna-bash-bg").start()
+    tail = _decode(done)[-2000:]
+    return ToolResult(True, "Человек перевёл команду в фон (Ctrl+B): она работает дальше, "
+                      "pid " + str(proc.pid) + ". Вывод пишется в " + str(log) +
+                      " (читай тулом read); когда закончится — придёт пометка [фон]. "
+                      "Не жди её — продолжай работу.\nВывод на момент перевода:\n" +
+                      (tail or "(пока пусто)"))
+
+
 def _bash(ctx, args) -> ToolResult:
     command = args.get("command", "")
     if not command.strip():
@@ -248,24 +343,30 @@ def _bash(ctx, args) -> ToolResult:
     if proc is None:
         return ToolResult(False, error or "Не удалось запустить команду.")
     cancel = getattr(ctx, "cancel_event", None)
+    detach = getattr(ctx, "detach_event", None)
+    if detach is not None:
+        detach.clear()  # Ctrl+B, нажатый до этой команды, её не касается
     deadline = time.monotonic() + timeout
-    out_b = b""
-    while True:
-        try:
-            out_b, _ = proc.communicate(timeout=0.05)
-            break
-        except subprocess.TimeoutExpired:
-            if cancel is not None and cancel.is_set():
-                kill_tree(proc)
-                out_b, _ = proc.communicate()
-                return ToolResult(False, "Команда прервана человеком.\n" +
-                                  _decode(out_b or b""))
-            if time.monotonic() >= deadline:
-                kill_tree(proc)
-                out_b, _ = proc.communicate()
-                return ToolResult(False, "Команда не уложилась в " + str(timeout) +
-                                  " с и убита.\n" + _decode(out_b or b""))
-    out = _decode(out_b or b"")
+    # Вывод читает поток: по Ctrl+B его можно на лету перевести в файл,
+    # а процесс живёт дальше сам (communicate держал бы его у хода).
+    pipe = _Pump(proc)
+    while pipe.alive():
+        if cancel is not None and cancel.is_set():
+            kill_tree(proc)
+            pipe.finish()
+            return ToolResult(False, "Команда прервана человеком.\n" + _decode(pipe.data()))
+        if detach is not None and detach.is_set():
+            detach.clear()
+            return _to_background(ctx, proc, pipe, command)
+        if time.monotonic() >= deadline:
+            kill_tree(proc)
+            pipe.finish()
+            return ToolResult(False, "Команда не уложилась в " + str(timeout) +
+                              " с и убита.\n" + _decode(pipe.data()))
+        pipe.wait(0.05)
+    pipe.finish()
+    proc.wait()
+    out = _decode(pipe.data())
     code = proc.returncode
     head = "Код выхода: " + str(code) + "\n"
     return ToolResult(code == 0, head + out if out else head + "(вывода нет)")

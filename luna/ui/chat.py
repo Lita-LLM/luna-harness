@@ -88,7 +88,8 @@ COMMANDS = [
     ("newmoon", "Новолуние: тёмный режим без следов, каждая модель — с твоего подтверждения"),
     ("update", "обновить Луну с GitHub и применить на лету, сессия не теряется; /update check — только проверить"),
     ("reload", "горячая перезагрузка: свежий код с диска, сессия и настройки остаются (и в Новолунии)"),
-    ("model", "модель по ролям — выбиралка, смена на лету"),
+    ("model", "модель по ролям — выбиралка, смена на лету; ★ — одна на все роли"),
+    ("profile", "профили моделей: роли, усилие и провайдеры одним именем; /profile <имя> — применить"),
     ("cost", "расход сессии: токены и стоимость"),
     ("usage", "расход и лимиты провайдера — что отдали события"),
     ("context", "панель «Контекст»: состав контекста по долям"),
@@ -141,6 +142,7 @@ COMMAND_RU = {
     "модель": "model", "модели": "model",
     "пульт": "pult", "провайдеры": "pult",
     "обновить": "update", "обновление": "update", "перезагрузка": "reload",
+    "профиль": "profile", "профили": "profile",
     "новолуние": "newmoon",
     "стоимость": "cost", "расход": "usage",
     "контекст": "context",
@@ -193,6 +195,7 @@ COMMAND_ALIASES = {
     "models": "model", "h": "help", "?": "help",
     "cls": "clear", "reset": "new",
     "upgrade": "update", "hot": "reload", "restart": "reload",
+    "profiles": "profile", "preset": "profile",
 }
 _USER_ALIASES: dict = {}
 
@@ -251,7 +254,7 @@ HELP_TEXT = """Команды и клавиши Луны
 Выбиралки: печатать — поиск · ↑↓ — выбор · Enter — действие · Esc — закрыть · мышь: клик выбирает, колесо крутит, наведение подсвечивает
 /panels — все тайлы выбиралкой: пробел открывает/закрывает панель сразу, список не закрывается · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер · Alt+C/G/P/T — Контекст, Git, Процессы, Дерево
 Команды не зависят от раскладки (ui.layout_fix): /панель = /panel, а .зфтуд в ЙЦУКЕН — тоже /panel; аргументы и Ctrl/Alt-клавиши понимаются в любой раскладке
-Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера) · Ctrl+G — промпт во внешнем редакторе · ? на пустом вводе — эта справка
+Ctrl+R — поиск по истории ввода · Ctrl+B — идущую команду bash в фон (ход дальше, по концу — пометка) · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера) · Ctrl+G — промпт во внешнем редакторе · ? на пустом вводе — эта справка
 Правка как в readline: Ctrl+A/E — начало/конец строки · Ctrl+U/K — вырезать до начала/конца строки · Ctrl+W — путь/слово до пробела назад · Ctrl+Backspace / Alt+Backspace — слово назад · Ctrl+Delete / Alt+D — слово вперёд · Ctrl+Y — вернуть вырезанное, Alt+Y следом — по кольцу дальше · Ctrl+←/→ — по словам (до знаков препинания) · Alt+←/→ — по словам до пробела · Ctrl+P/N — история назад/вперёд · Ctrl+_ (Ctrl+Shift+-) — отмена правки ввода · Ctrl+Z — свернуть в фон (Unix; fg — вернуться)
 Esc Esc на пустом вводе — откат к ходу выбиралкой, с текстом — убрать набросок в историю (↑ вернёт; Ctrl+C тоже не теряет) · Esc во время хода — прервать ход одним нажатием · Ctrl+C во время хода — прервать; без хода — очистить ввод, второй подряд за секунду — выход
 Отправка во время хода (chat.send_mode, видна в строке состояния): inject — вставка в ход · queue — очередь · interrupt — прервать и отправить · Alt+S — сменить режим по кругу · /send — выбиралка · Alt+Enter — разово прервать и отправить · ↑ на пустом поле — вернуть сообщение из очереди
@@ -571,6 +574,7 @@ class ChatApp:
         self.picker: Picker | None = None
         self._picker_kind = ""
         self._pult = None  # пульт ИИ (ui/pult.py) — создаётся первым /pult
+        self._profiles = None  # профили моделей (ui/profiles_ui.py) — первым /profile
         from .updater import Updater
 
         self.updater = Updater(self)
@@ -1297,11 +1301,36 @@ class ChatApp:
         else:
             self._pult.open()
 
+    def open_profiles(self, arg: str = "") -> None:
+        """/profile [имя]: профили моделей — выбиралка или сразу применить."""
+        from .profiles_ui import ProfilesUI
+
+        if self._profiles is None:
+            self._profiles = ProfilesUI(self)
+        self._profiles.open(arg)
+
+    def _set_role_model(self, role: str, ref: str) -> None:
+        """Модель роли; role "__all__" — одна модель на все: главная = ref,
+        остальные — «как главная» (пусто), чтобы потом менялось одним шагом."""
+        if role == "__all__":
+            self.settings.set("model.main", ref)
+            for other in ("fast", "guard", "vision"):
+                self.settings.set("model." + other, "")
+            self._add(Entry("notice", text="Все роли: " + (ref or "(пусто)") +
+                            " — со следующего хода."))
+            return
+        self.settings.set("model." + role, ref)
+        self._add(Entry("notice", text="Модель роли " + role + ": "
+                        + (ref or "(как главная)") + " — со следующего хода."))
+
     def open_models_picker(self) -> None:
         """/model: роли выбиралкой; Enter — задать ссылку роли на лету."""
         from .panels.models import ROLES
 
-        items = []
+        items = [PickerItem(key="__all__", title="★ одна модель на все роли",
+                            detail="главная = выбранная, остальные — как главная"),
+                 PickerItem(key="__profiles__", title="☰ профили моделей",
+                            detail="сохранить роли под именем и переключаться одним Enter")]
         for role, title in ROLES:
             ref = str(self.settings.get("model." + role) or "")
             detail = ref if ref else ("не задана" if role == "main" else "как главная")
@@ -1313,10 +1342,11 @@ class ChatApp:
 
     def _model_choice_items(self, role: str, remote: list) -> list:
         """Пункты выбора модели роли: свои действия, текущая, затем список API."""
-        current = str(self.settings.get("model." + role) or "")
+        current = str(self.settings.get("model." + ("main" if role == "__all__" else role))
+                      or "")
         items = [PickerItem(key="__manual__", title="✎ вписать ссылку вручную",
                             detail="«провайдер:модель» — для чего нет в списке")]
-        if role != "main":
+        if role not in ("main", "__all__"):
             items.append(PickerItem(key="__inherit__", title="как главная",
                                     detail="своей модели у роли нет",
                                     mark="" if current else "→"))
@@ -1339,7 +1369,8 @@ class ChatApp:
 
         self._model_role = role
         self._open_picker(
-            "modelpick", "Модель роли " + role, self._model_choice_items(role, []),
+            "modelpick", "Модель на все роли" if role == "__all__" else "Модель роли " + role,
+            self._model_choice_items(role, []),
             hint="печатайте — поиск · Enter — выбрать · Esc — закрыть",
             preview_lines=0)
         picker = self.picker
@@ -1509,21 +1540,23 @@ class ChatApp:
                 else:
                     self._slash("/" + item.key)
             elif kind == "models":
-                self.open_model_choice(item.key)
+                if item.key == "__profiles__":
+                    self.picker = None
+                    self.open_profiles()
+                else:
+                    self.open_model_choice(item.key)
             elif kind == "modelpick":
                 role = self._model_role
                 if item.key == "__manual__":
-                    current = str(self.settings.get("model." + role) or "")
+                    current = str(self.settings.get(
+                        "model." + ("main" if role == "__all__" else role)) or "")
                     self.picker.ask_input(
                         "Модель роли " + role + " («провайдер:модель» или "
                         "модель; пусто — как главная): ", ("role", role),
                         initial=current)
                 else:
                     self.picker = None
-                    ref = "" if item.key == "__inherit__" else item.key
-                    self.settings.set("model." + role, ref)
-                    self._add(Entry("notice", text="Модель роли " + role + ": "
-                                    + (ref or "(как главная)") + " — со следующего хода."))
+                    self._set_role_model(role, "" if item.key == "__inherit__" else item.key)
             elif kind == "mcp":
                 self.picker = None
                 if item.key:
@@ -1582,12 +1615,8 @@ class ChatApp:
         if action[0] == "input":
             text, ctx = action[1], action[2]
             if kind in ("models", "modelpick") and ctx is not None and ctx[0] == "role":
-                role = ctx[1]
-                self.settings.set("model." + role, text)
                 self.picker = None
-                label = text if text else "(как главная)"
-                self._add(Entry("notice", text="Модель роли " + role + ": "
-                                               + label + " — со следующего хода."))
+                self._set_role_model(ctx[1], text)
             elif kind == "adddir":
                 self.picker = None
                 if text:
@@ -1689,6 +1718,9 @@ class ChatApp:
         if self._picker_kind == "pult" and self._pult is not None:
             # Пульт ведёт свои экраны сам: Esc у него — шаг назад.
             self._pult.on_action(action)
+            return
+        if self._picker_kind == "profiles" and self._profiles is not None:
+            self._profiles.on_action(action)
             return
         if kind == "close":
             self.picker = None
@@ -2415,6 +2447,8 @@ class ChatApp:
             self.open_pult(rest)
         elif cmd == "/newmoon":
             self.newmoon_command(rest)
+        elif cmd == "/profile":
+            self.open_profiles(rest)
         elif cmd == "/reload":
             self.updater.reload_command()
         elif cmd == "/update":
@@ -3324,6 +3358,14 @@ class ChatApp:
             return
         if key.label == "alt+o":
             self._cycle_thinking()
+            return
+        if key.label == "ctrl+b":
+            # Как у Клод Кода: идущая команда bash — в фон, ход дальше.
+            if self.busy:
+                self.send_command({"type": "detach"})
+                self._flash_hint("Ctrl+B: идущая команда уходит в фон — ход продолжается.")
+            else:
+                self._flash_hint("Ctrl+B переводит в фон идущую команду — сейчас ничего не идёт.")
             return
         if key.label in ("ctrl+p", "ctrl+n"):
             # Readline-история без стрелок: Ctrl+P — назад, Ctrl+N — вперёд.
@@ -5651,6 +5693,7 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                 # Хуки живого терминала (ЗАДАЧА-20): уровень цвета для fade,
                 # звонок/уведомления, заголовок окна, открытие ссылок, фон.
                 app.color_level = term.caps.color_level
+                app.updater.auto = not fake
                 app.notify_hook = term.write
                 app.title_hook = lambda t: term.write("\x1b]2;" + t + "\a")
                 app.open_hook = _open_external
@@ -5752,7 +5795,7 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
         return RELAUNCH_RELOAD
     if _nm.active():
         # Экран и прокрутка терминала — чисто; временная папка — прочь.
-        sys.stdout.write("[2J[3J[H")
+        sys.stdout.write("\x1b[2J\x1b[3J\x1b[H")
         sys.stdout.flush()
         _nm.wipe()
         print("🌑 Новолуние закончилось. Следов нет.")

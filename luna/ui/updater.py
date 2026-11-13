@@ -29,10 +29,15 @@ class Updater:
         self._result = None         # (что, данные) из потока
         self._next_at = time.monotonic() + 30.0  # первая проверка — не в старт
         self._install_after = False
+        # Фоновая проверка — только в живом чате (run_chat включает):
+        # тесты и витрины не ходят в git по сети.
+        self.auto = False
 
     # --- настройки -------------------------------------------------------------
 
     def _mode(self) -> str:
+        if not self.auto:
+            return "off"
         mode = str(self.app.settings.get("update.check") or "notify")
         if _nm.active() and not self.app.settings.get("update.in_newmoon"):
             return "off"  # без спроса наружу из тёмной стороны не ходим
@@ -118,7 +123,7 @@ class Updater:
                 if not quiet:
                     self._say("Луна актуальна: " + info.branch + " @ " + info.head + ".")
                 return
-            if self._mode() == "install":
+            if quiet and self._mode() == "install":  # /update check — только проверить
                 self._run("install", quiet=True)
                 return
             if not quiet or not getattr(self, "_told", False):
@@ -159,6 +164,9 @@ class Updater:
         return True
 
     def _do_reload(self) -> None:
+        shutdown = getattr(getattr(self.app, "source", None), "shutdown", None)
+        if callable(shutdown):
+            shutdown()
         self.app.handoff = self.snapshot()
         self.app.relaunch = "reload"
         self.app.done = True

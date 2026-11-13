@@ -160,6 +160,12 @@ class Terminal:
         try:
             self.out.write(text)
             self.out.flush()
+        except UnicodeEncodeError:
+            # Одиночная половинка UTF-16 (суррогат) в тексте: склеить пары,
+            # одиночки — заменить. Раньше это ловилось как «пайп закрыли»
+            # и экран навсегда уходил в /dev/null.
+            self.out.write(fix_surrogates(text))
+            self.out.flush()
         except (BrokenPipeError, OSError, ValueError):
             try:  # вывод обрезали (пайп закрыли) — дальше молчим в /dev/null
                 os.dup2(os.open(os.devnull, os.O_WRONLY), self.out.fileno())
@@ -384,6 +390,11 @@ def _windows_raw_mode():
         return None
 
 
+def fix_surrogates(text: str) -> str:
+    """Пары половинок UTF-16 — в настоящий символ, одиночки — в «�»."""
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
 _VK = {0x25: "left", 0x26: "up", 0x27: "right", 0x28: "down", 0x24: "home",
        0x23: "end", 0x21: "pageup", 0x22: "pagedown", 0x2D: "insert", 0x2E: "delete"}
 _VK.update({0x70 + i: f"f{i + 1}" for i in range(12)})
@@ -468,8 +479,16 @@ def _windows_read(timeout, parser) -> list:
                 events.extend(parser.flush())
                 events.append(_keys.Key("backspace", mods=frozenset(mods)))
                 continue
+            if ch and "\ud800" <= ch <= "\udbff":
+                # Смайлик и всё вне BMP консоль отдаёт двумя записями —
+                # половинками UTF-16; первую держим до второй.
+                parser._luna_high = ch
+                continue
+            if ch and "\udc00" <= ch <= "\udfff":
+                high, parser._luna_high = getattr(parser, "_luna_high", ""), ""
+                ch = fix_surrogates(high + ch) if high else ""
             if ch and ch != "\x00":
-                events.extend(parser.feed(ch.encode("utf-8")))
+                events.extend(parser.feed(ch.encode("utf-8", "replace")))
             else:
                 name = _VK.get(kev.wVirtualKeyCode)
                 if name:

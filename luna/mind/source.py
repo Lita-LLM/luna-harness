@@ -57,6 +57,11 @@ class AgentSource:
         if kind in ("guard.answer", "user.answer"):
             self._answer(cmd.get("id", ""), cmd)
             return
+        if kind == "detach":
+            detach = getattr(self._agent, "detach", None)
+            if callable(detach):
+                detach()
+            return
         if kind == "interrupt":
             self._agent.interrupt()
             self._release_all({"decision": "stop", "text": ""})
@@ -125,6 +130,23 @@ class AgentSource:
         self._journal = journal
         if self._agent is not None:
             self._agent.journal = journal
+
+    def shutdown(self) -> None:
+        """Перед горячей перезагрузкой: закрыть MCP-серверы агента и экипажа.
+
+        Новый код поднимет свои; старые процессы иначе висели бы рядом
+        (два юзербота на одном аккаунте мешают друг другу)."""
+        agents = [self._agent]
+        host = getattr(self._agent, "_agents_host", None)
+        for child in list(getattr(host, "children", {}).values()):
+            agents.append(getattr(child, "agent", None))
+        for agent in agents:
+            dropper = getattr(getattr(agent, "tools", None), "_drop_mcp", None)
+            if callable(dropper):
+                try:
+                    dropper()
+                except Exception:  # noqa: BLE001 — выход важнее
+                    pass
 
     # --- внутреннее ---------------------------------------------------------
 

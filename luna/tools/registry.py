@@ -39,6 +39,8 @@ class ToolContext:
     todos: list = field(default_factory=list)
     background: dict = field(default_factory=dict)
     agent: object = None                  # агент-владелец (для тулов детей: assistant, crew)
+    detach_event: object = None           # Ctrl+B человека: идущий bash — в фон, ход дальше
+    on_background_done: Callable | None = None  # (pid, команда, код, лог) — фон закончился
     cancel_event: object = None           # threading.Event прерывания хода (ЗАДАЧА-18):
                                           # ставит агент; долгие тулы (bash) рвут работу
     sandbox: object = None                # рецепт изоляции bash (ЗАДАЧА-21):

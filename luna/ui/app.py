@@ -184,6 +184,24 @@ def run_fullscreen(started_at: float, continue_last: bool = False,
     resume: None — обычный старт; "" — выбиралка сессий до чата;
     иначе — id или префикс сессии для --resume.
     """
+    try:
+        return _run_fullscreen(started_at, continue_last, resume, open_pult, newmoon)
+    except BaseException:
+        # Падение (или Ctrl+Break) в Новолунии: следы стираем и тут, а не
+        # только при чистом выходе — atexit не всегда успевает.
+        from ..core import newmoon as _nm
+
+        if _nm.active():
+            import sys
+
+            sys.stdout.write("\x1b[2J\x1b[3J\x1b[H")
+            sys.stdout.flush()
+            _nm.wipe()
+            print("🌑 Новолуние оборвалось ошибкой — временные следы стёрты.")
+        raise
+
+
+def _run_fullscreen(started_at, continue_last, resume, open_pult, newmoon) -> int:
     from .chat import run_chat
 
     from .chat import RELAUNCH_NEWMOON

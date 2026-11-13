@@ -109,3 +109,15 @@ class ChatTest(NewmoonCase):
         app.submit_text("/новолуние")
         self.assertEqual(app.relaunch, "newmoon")
         self.assertTrue(app.done)
+
+
+class OrphanSweepTest(NewmoonCase):
+    def test_sirota_stiraetsya_svoya_net(self):
+        import tempfile as _tf
+
+        orphan = Path(_tf.mkdtemp(prefix="luna-nm-"))
+        (orphan / "alive.lock").write_bytes(b"")  # замок никто не держит
+        (orphan / "след.txt").write_text("x", encoding="utf-8")
+        newmoon.sweep_orphans()
+        self.assertFalse(orphan.exists())
+        self.assertTrue(Path(self.scratch).exists())  # своя — жива

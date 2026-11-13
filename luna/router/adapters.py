@@ -43,6 +43,16 @@ def _load_args(raw) -> dict:
     return {}
 
 
+def _reasoning(msg: dict) -> str:
+    """Мысли в OpenAI-формате: reasoning_content (DeepSeek, Qwen) или
+    reasoning (OpenRouter, новый vLLM) — у разных серверов по-разному."""
+    for key in ("reasoning_content", "reasoning"):
+        value = msg.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _parts_text(content) -> str:
     if isinstance(content, str):
         return content
@@ -127,7 +137,7 @@ class OpenAIAdapter:
         if choices:
             msg = choices[0].get("message") or {}
             result.text = msg.get("content") or ""
-            result.thinking = msg.get("reasoning_content") or ""
+            result.thinking = _reasoning(msg)
             for call in msg.get("tool_calls") or []:
                 fn = call.get("function") or {}
                 args, intent = _split_intent(_load_args(fn.get("arguments")))
@@ -160,7 +170,7 @@ class OpenAIAdapter:
             if text:
                 result.text += text
                 emit("text", text)
-            thinking = delta.get("reasoning_content") or ""
+            thinking = _reasoning(delta)
             if thinking:
                 result.thinking += thinking
                 emit("thinking", thinking)

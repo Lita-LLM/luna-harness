@@ -194,6 +194,10 @@ class Router:
             result = adapter.parse_full(data, model)
         if note:
             result.notes.append(note)
+        if self.settings.get("model.text_tool_calls", True):
+            from . import textcalls
+
+            textcalls.rescue(result, tools)
         return result
 
     def chat(self, messages, tools=None, *, role: str = "main", ref: str = "",

@@ -121,7 +121,7 @@ COMMANDS = [
     ("bug", "отчёт об ошибке файлом: версия, окружение, ошибки (без секретов)"),
     ("diff", "панель «Git»: ветка, изменения, дифф"),
     ("add-dir", "добавить каталог для @-подсказок: /add-dir <путь>"),
-    ("exit", "выход (алиас /quit)"),
+    ("exit", "выход"),
 ]
 COMMAND_DESCR = dict(COMMANDS)
 # Команды, которым нужен аргумент: из /help они не выполняются, а встают
@@ -175,8 +175,39 @@ _RU_BY_LATIN: dict = {}
 for _ru, _lat in COMMAND_RU.items():
     _RU_BY_LATIN.setdefault(_lat, _ru)
 
+# Латинские алиасы — привычки других агентов: /resume у Claude Code и
+# Codex — это наши /sessions. Свои алиасы — настройка ui.command_aliases.
+COMMAND_ALIASES = {
+    "resume": "sessions", "history": "sessions",
+    "quit": "exit", "q": "exit",
+    "models": "model", "h": "help", "?": "help",
+    "cls": "clear", "reset": "new",
+}
+_USER_ALIASES: dict = {}
 
-def resolve_command(word: str):
+
+def set_user_aliases(spec) -> dict:
+    """Свои алиасы из настройки: «resume=sessions, мод=model».
+
+    Имя слева — новое, справа — существующая команда (или её алиас).
+    Плохие пары молча пропускаем: настройка не должна ронять чат.
+    """
+    _USER_ALIASES.clear()
+    pairs = spec.items() if isinstance(spec, dict) else         (part.split("=", 1) for part in str(spec or "").split(",") if "=" in part)
+    for alias, target in pairs:
+        alias = str(alias).strip().lstrip("/").lower()
+        target = resolve_command(str(target).strip().lstrip("/"))
+        if alias and target and alias not in COMMAND_DESCR:
+            _USER_ALIASES[alias] = target
+    return dict(_USER_ALIASES)
+
+
+def all_aliases(ru: bool = True) -> dict:
+    """Все алиасы: русские имена (если ru), латинские и свои — имя → команда."""
+    return {**(COMMAND_RU if ru else {}), **COMMAND_ALIASES, **_USER_ALIASES}
+
+
+def resolve_command(word: str, layouts: bool = True):
     """Имя команды как набрали → каноническое латинское или None.
 
     Понимает латинские имена, русские имена и любое из них, набранное
@@ -187,14 +218,19 @@ def resolve_command(word: str):
         return None
     if w in COMMAND_DESCR:
         return w
-    if w in COMMAND_RU:
-        return COMMAND_RU[w]
+    # Без layouts (ui.layout_fix выключен) — ни раскладки, ни русских имён:
+    # так решено в ЗАДАЧЕ-17; латинские и свои алиасы работают всегда.
+    aliases = all_aliases(ru=layouts)
+    if w in aliases:
+        return aliases[w]
+    if not layouts:
+        return None
     for cand in _layout.variants(w):
         c = cand.lower()
         if c in COMMAND_DESCR:
             return c
-        if c in COMMAND_RU:
-            return COMMAND_RU[c]
+        if c in aliases:
+            return aliases[c]
     return None
 # Темы оформления (/theme, настройка ui.theme) — палитры данными:
 # встроенные и свои из LUNA_HOME/themes, см. luna/ui/themes.py (ЗАДАЧА-18).
@@ -1011,9 +1047,10 @@ class ChatApp:
         """
         items = [PickerItem(key=name, title="/" + name, detail=desc)
                  for name, desc in COMMANDS]
+        set_user_aliases(self.settings.get("ui.command_aliases") or "")
         items += [PickerItem(key=lat, title="/" + ru,
                              detail=COMMAND_DESCR[lat] + " — то же, что /" + lat)
-                  for ru, lat in COMMAND_RU.items()]
+                  for ru, lat in all_aliases().items() if lat in COMMAND_DESCR]
         self._open_picker("help", "Команды Луны", items,
                           hint="печатайте — поиск · Enter — выполнить "
                                "или вставить заготовку · Esc — закрыть · "
@@ -2058,8 +2095,12 @@ class ChatApp:
         parts = text.split()
         raw = parts[0]
         cmd = raw
-        if self.settings.get("ui.layout_fix") and raw.startswith("/"):
-            canonical = resolve_command(raw[1:])
+        if raw.startswith("/"):
+            # Алиасы и русские имена — всегда; угадывание раскладки
+            # (зфтуд → panel) — только с ui.layout_fix.
+            set_user_aliases(self.settings.get("ui.command_aliases") or "")
+            canonical = resolve_command(raw[1:], layouts=bool(
+                self.settings.get("ui.layout_fix")))
             if canonical is not None:
                 cmd = "/" + canonical
         rest = text[len(raw):].strip()
@@ -3897,7 +3938,7 @@ class ChatApp:
         команды из файлов совместимости и скиллы (ЗАДАЧА-20, раздел 5)."""
         names = list(COMMANDS) + [
             (ru, COMMAND_DESCR[lat] + " (/" + lat + ")")
-            for ru, lat in COMMAND_RU.items()]
+            for ru, lat in all_aliases().items() if lat in COMMAND_DESCR]
         seen = {name for name, _desc in names}
         try:
             from ..mind.compat import list_commands, list_skills

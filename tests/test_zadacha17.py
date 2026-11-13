@@ -368,3 +368,18 @@ class SessionsPickerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AliasTest(unittest.TestCase):
+    def test_resume_i_svoi_aliasy(self):
+        from luna.ui.chat import resolve_command, set_user_aliases
+
+        self.assertEqual(resolve_command("resume"), "sessions")
+        self.assertEqual(resolve_command("quit", layouts=False), "exit")
+        set_user_aliases("ss=sessions, плохой=нет_такой, м=модель")
+        try:
+            self.assertEqual(resolve_command("ss", layouts=False), "sessions")
+            self.assertEqual(resolve_command("м"), "model")
+            self.assertIsNone(resolve_command("плохой"))
+        finally:
+            set_user_aliases("")

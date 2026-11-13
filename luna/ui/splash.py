@@ -114,12 +114,19 @@ def render_frame(buf: Buffer, t: float, *, unicode_ok=None, glyph_mode=None,
                 buf.set(x0 + i, y0, ch, fg=c, bg=bg_here, attrs=_color.BOLD)
             p_fade = ease_in_out(max(0.0, min(1.0, (t - 0.5) / 0.5)))
             if p_fade > 0.0 and phrase:
-                px = max(0, (cols - len(phrase)) // 2)
-                if y0 + 2 < rows:
-                    bg_phrase = buf.cell(px, y0 + 2)[2]
-                    fg_phrase = _color.lerp((40, 45, 70), _color.SILVER, p_fade)
-                    buf.text(px, y0 + 2, phrase, fg=fg_phrase,
-                             bg=bg_phrase, attrs=_color.DIM)
+                # Фраза не режется краем: переносом по центру, строк —
+                # сколько влезает до нижней строки (там подпись старта).
+                from .markdown import wrap_text
+                from .width import str_width
+
+                fg_phrase = _color.lerp((40, 45, 70), _color.SILVER, p_fade)
+                for k, part in enumerate(wrap_text(phrase, max(8, cols - 4))):
+                    py = y0 + 2 + k
+                    if py >= rows - 1:
+                        break
+                    px = max(0, (cols - str_width(part)) // 2)
+                    buf.text(px, py, part, fg=fg_phrase,
+                             bg=buf.cell(px, py)[2], attrs=_color.DIM)
     if startup_ms is not None:
         label = f"старт: {startup_ms:.0f} мс"
         buf.text(cols - len(label) - 1, rows - 1, label,

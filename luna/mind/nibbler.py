@@ -58,10 +58,16 @@ def make_router_brain(settings, secrets=None):
 class Nibbler:
     """Наблюдатель событий агента. emit — куда класть nibbler.say."""
 
-    def __init__(self, settings=None, *, emit=None, brain=None, clock=None):
+    def __init__(self, settings=None, *, emit=None, brain=None, clock=None,
+                 threaded: bool = False):
         self.settings = settings
         self._emit = emit
         self._brain = brain
+        # threaded: мозг зовётся в своём потоке, ответ забирает drain() из
+        # главного цикла чата — иначе экран стоял, пока fast-модель думала.
+        self._threaded = threaded
+        self._thread = None
+        self._ready: list = []
         self._clock = clock or time.time
         self.said: list[dict] = []
         self._notes: list[str] = []
@@ -262,10 +268,40 @@ class Nibbler:
                 parts.append("Что происходило (свежее внизу):\n" + "\n".join(self._digest))
         parts.append("Повод высказаться: " + trigger + ".")
         digest = "\n\n".join(parts)
+        if self._threaded:
+            if self.busy():
+                return  # прошлая мысль ещё не готова — эту пропускаем
+            import threading
+
+            system = self._system_prompt()
+
+            def work():
+                try:
+                    self._ready.append(self._brain(system, digest))
+                except Exception:  # noqa: BLE001 — мозг упал: молчим
+                    pass
+
+            self._thread = threading.Thread(target=work, daemon=True, name="luna-nibbler")
+            self._thread.start()
+            return
         try:
             answer = self._brain(self._system_prompt(), digest)
         except Exception:  # noqa: BLE001 — мозг упал: молчим
             return
+        self._on_answer(answer)
+
+    def busy(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def drain(self) -> None:
+        """Главный цикл чата: готовые ответы мозга — в реплики (в своём потоке)."""
+        while self._ready:
+            try:
+                self._on_answer(self._ready.pop(0))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_answer(self, answer) -> None:
         parsed = _parse_answer(answer)
         if parsed is None:
             return

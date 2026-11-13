@@ -716,7 +716,7 @@ class ChatApp:
             except Exception:  # noqa: BLE001 — мозг не обязателен
                 brain = None
             return Nibbler(self.settings, emit=self._nibbler_say, brain=brain,
-                           clock=time.monotonic)
+                           clock=time.monotonic, threaded=brain is not None)
         except Exception:  # noqa: BLE001 — компаньон не роняет экран
             return None
 
@@ -748,6 +748,8 @@ class ChatApp:
 
     def poll_source(self) -> list:
         self.updater.tick()
+        if self.nibbler is not None:
+            self.nibbler.drain()  # ответ мозга Ниблера — из его потока
         events = []
         if self.trap is not None:
             # Ошибки фоновых потоков приходят событиями error — как от источника.
@@ -2012,6 +2014,8 @@ class ChatApp:
             return True
         if self.trap is not None and self.trap.pending:
             return True
+        if self.nibbler is not None and (self.nibbler.busy() or self.nibbler._ready):
+            return True  # ждём реплику Ниблера: кадры, чтобы забрать её
         pending = getattr(self.source, "has_pending", None)
         if callable(pending) and pending():
             return True

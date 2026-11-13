@@ -370,3 +370,29 @@ class ChatPanelsIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NibblerThreadedTest(unittest.TestCase):
+    def test_mozg_v_potoke_ne_derzhit(self):
+        import threading
+        import time as _t
+
+        from luna.mind.nibbler import Nibbler
+
+        gate = threading.Event()
+
+        def slow(system, digest):
+            gate.wait(5)
+            return "!Агент петляет"
+
+        emitted = []
+        nib = Nibbler(isolated_settings(self), emit=emitted.append, brain=slow,
+                      clock=FakeClock(), threaded=True)
+        started = _t.monotonic()
+        nib.observe({"type": "error", "message": "бум"})
+        self.assertLess(_t.monotonic() - started, 0.5)  # не ждал модель
+        self.assertTrue(nib.busy())
+        gate.set()
+        nib._thread.join(5)
+        nib.drain()
+        self.assertEqual(len(emitted), 1)

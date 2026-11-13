@@ -61,11 +61,13 @@ def parse_ref(ref: str, default_provider: str = "") -> tuple[str, str]:
 
 
 class Router:
-    def __init__(self, settings, secrets, http: HttpClient | None = None, providers: dict | None = None):
+    def __init__(self, settings, secrets, http: HttpClient | None = None, providers: dict | None = None,
+                 registry=None):
         self.settings = settings
         self.secrets = secrets
         self.http = http or HttpClient()
         self._providers = providers or {}
+        self._registry = registry  # реестр провайдеров; None — взять из LUNA_HOME при первом вызове
         self._sleep = time.sleep  # пауза автоповтора сети; тесты подменяют
 
     def cancel_active(self) -> None:
@@ -81,9 +83,24 @@ class Router:
 
     # --- конфигурация ---
 
+    @property
+    def registry(self):
+        if self._registry is None:
+            from .providers import ProviderRegistry
+
+            self._registry = ProviderRegistry()
+        return self._registry
+
     def provider_config(self, name: str) -> ProviderConfig:
         if name in self._providers:
             return self._providers[name]
+        entry = self.registry.get(name) if name else None
+        if entry is not None:
+            # Реестр (пульт) — главный источник; запись не кэшируем в
+            # _providers, чтобы правка адреса в пульте применялась сразу.
+            key = self.secrets.get(secret_name(name)) if self.secrets is not None else None
+            return ProviderConfig(name=name, kind=entry.kind, base_url=entry.base_url,
+                                  api_key=key)
         default_name = self.settings.get("model.provider", "") if self.settings else ""
         if name and name == default_name:
             kind = self.settings.get("model.kind", "openai")

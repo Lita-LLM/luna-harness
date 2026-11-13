@@ -84,6 +84,7 @@ COMMANDS = [
     ("help", "выбиралка всех команд с поиском"),
     ("mode", "режим: /mode [normal|plan|review|auto|yolo], без аргумента — по кругу"),
     ("pult", "пульт ИИ: провайдеры, скан сети, ключи, модели и роли"),
+    ("newmoon", "Новолуние: тёмный режим без следов, каждая модель — с твоего подтверждения"),
     ("model", "модель по ролям — выбиралка, смена на лету"),
     ("cost", "расход сессии: токены и стоимость"),
     ("usage", "расход и лимиты провайдера — что отдали события"),
@@ -136,6 +137,7 @@ COMMAND_RU = {
     "режим": "mode",
     "модель": "model", "модели": "model",
     "пульт": "pult", "провайдеры": "pult",
+    "новолуние": "newmoon",
     "стоимость": "cost", "расход": "usage",
     "контекст": "context",
     "статус": "status",
@@ -182,6 +184,7 @@ for _ru, _lat in COMMAND_RU.items():
 COMMAND_ALIASES = {
     "resume": "sessions", "history": "sessions",
     "providers": "pult", "provider": "pult", "ai": "pult", "setup": "pult",
+    "dark": "newmoon", "incognito": "newmoon", "nm": "newmoon",
     "quit": "exit", "q": "exit",
     "models": "model", "h": "help", "?": "help",
     "cls": "clear", "reset": "new",
@@ -463,6 +466,9 @@ class ChatApp:
         self.picker: Picker | None = None
         self._picker_kind = ""
         self._pult = None  # пульт ИИ (ui/pult.py) — создаётся первым /pult
+        self.relaunch = ""  # "newmoon" — run_chat перезапустит Луну в Новолунии
+        self._nm_stash = None  # сообщение, ждущее подтверждения модели
+        self._nm_extra: list = []  # адреса вне ролей (запасные, пулы), просившие подтверждения
         self.edit_request = None      # путь файла, который run_chat откроет в редакторе
         self._edit_manner_id = ""
         self._pending_switch = None   # путь сессии: переключиться по концу хода
@@ -1061,6 +1067,109 @@ class ChatApp:
                                "панели: F6 или Alt+M",
                           preview_lines=0)
 
+    # --- Новолуние (core/newmoon.py) ------------------------------------------
+
+    def newmoon_command(self, arg: str = "") -> None:
+        """/newmoon: вне режима — перезапуск в Новолунии (эта сессия
+        остаётся как есть); в режиме — подтверждения адресов."""
+        from ..core import newmoon as _nm
+
+        if _nm.active():
+            self.open_newmoon_confirm()
+            return
+        if self.busy:
+            self._add(Entry("notice", text="Идёт ход — дождись конца или прерви (Esc), "
+                                           "потом /newmoon."))
+            return
+        self.relaunch = "newmoon"
+        self.done = True
+
+    def _nm_targets(self) -> list:
+        """[(адрес, модель, [роли])] — куда пойдут запросы ролей и просившие сами."""
+        from ..core.secrets import Secrets
+        from ..router.core import Router
+
+        try:
+            router = Router(self.settings, Secrets(self._data_dir().secrets))
+        except Exception:  # noqa: BLE001
+            return []
+        found: dict = {}
+        for role in ("main", "fast", "guard", "vision"):
+            ref = router.role_ref(role)
+            if not ref:
+                continue
+            try:
+                cfg, model = router.resolve(ref)
+            except Exception:  # noqa: BLE001 — роль без модели: пропускаем
+                continue
+            if cfg.kind == "fake":
+                continue
+            found.setdefault((cfg.base_url, model), []).append(role)
+        for base, model in self._nm_extra:
+            found.setdefault((base, model), []).append("по запросу")
+        return [(b, m, roles) for (b, m), roles in found.items()]
+
+    def open_newmoon_confirm(self, extra=None) -> None:
+        """Подтверждение адресов: Enter по строке — разрешить туда запросы."""
+        from ..core import newmoon as _nm
+
+        if extra and extra[0] and extra not in self._nm_extra:
+            self._nm_extra.append(extra)
+        items = []
+        for base, model, roles in self._nm_targets():
+            ok = _nm.is_confirmed(base, model)
+            items.append(PickerItem(
+                key=_nm.target_key(base, model), payload=(base, model),
+                title=("✓ " if ok else "○ ") + model + " → " + (base or "?"),
+                detail="роли: " + ", ".join(roles) + (" · разрешено" if ok
+                                                      else " · Enter — разрешаю отправлять туда")))
+        items.append(PickerItem(key="__all__", title="Разрешить все из списка"))
+        items.append(PickerItem(key="__pult__", title="Сменить модели — пульт ИИ"))
+        self._open_picker("newmoon", "🌑 Новолуние — куда можно слать запросы", items,
+                          hint="Без подтверждения ни один запрос не уйдёт · "
+                               "Enter — разрешить · Esc — готово",
+                          preview_lines=0)
+
+    def _newmoon_picker_action(self, action) -> None:
+        from ..core import newmoon as _nm
+
+        if action[0] == "close":
+            self.picker = None
+            self._nm_release()
+            return
+        if action[0] != "pick" or action[1] is None:
+            return
+        item = action[1]
+        if item.key == "__pult__":
+            self.picker = None
+            self.open_pult()
+            return
+        targets = [it.payload for it in self.picker.items if it.payload]             if item.key == "__all__" else [item.payload]
+        for base, model in targets:
+            _nm.confirm(base, model)
+        self.open_newmoon_confirm()
+        if self._nm_main_ok():
+            self._nm_release()
+
+    def _nm_main_ok(self) -> bool:
+        from ..core import newmoon as _nm
+
+        for base, model, roles in self._nm_targets():
+            if "main" in roles and not _nm.is_confirmed(base, model):
+                return False
+        return True
+
+    def _nm_release(self) -> None:
+        """Отпустить сообщение, ждавшее подтверждения главной модели."""
+        stash, self._nm_stash = self._nm_stash, None
+        if stash is not None:
+            if self._nm_main_ok():
+                self.picker = None
+                self._send_user_message(*stash)
+            else:
+                self._add(Entry("notice", text="Главная модель не подтверждена — "
+                                               "сообщение не отправлено (оно в истории, ↑)."))
+
     def open_pult(self, arg: str = "") -> None:
         """/pult: провайдеры, скан сети, ключи и модели (ui/pult.py);
         /pult scan — сразу скан."""
@@ -1459,6 +1568,9 @@ class ChatApp:
     def _route_picker_action(self, action) -> None:
         """Действие выбиралки — общий путь для клавиш и кликов мыши."""
         kind = action[0]
+        if self._picker_kind == "newmoon":
+            self._newmoon_picker_action(action)
+            return
         if self._picker_kind == "pult" and self._pult is not None:
             # Пульт ведёт свои экраны сам: Esc у него — шаг назад.
             self._pult.on_action(action)
@@ -1916,6 +2028,10 @@ class ChatApp:
             if detail:
                 text = text + "\n" + detail
             self._add(Entry("error", text=text))
+            if ev.get("code") == "newmoon_unconfirmed":
+                data = ev.get("data") or {}
+                self.open_newmoon_confirm(extra=(str(data.get("base_url") or ""),
+                                                 str(data.get("model") or "")))
         elif kind == "turn.done":
             self.busy = False
             self._notify("Ход Луны завершён")
@@ -1977,6 +2093,14 @@ class ChatApp:
 
     def _send_user_message(self, text: str, display: str | None = None,
                            delivery: str | None = None) -> None:
+        from ..core import newmoon as _nm
+
+        if _nm.active() and not self._nm_main_ok():
+            # Новолуние: сначала человек разрешает адрес главной модели,
+            # потом сообщение уходит само.
+            self._nm_stash = (text, display, delivery)
+            self.open_newmoon_confirm()
+            return
         attachments = [tok[1:] for tok in text.split()
                        if tok.startswith("@") and len(tok) > 1]
         self._add(Entry("user", text=text if display is None else display))
@@ -2071,7 +2195,12 @@ class ChatApp:
             return
         if text.startswith("#"):
             note = text[1:].strip()
-            if note:
+            from ..core import newmoon as _nm
+
+            if note and _nm.active():
+                self._add(Entry("notice", text="Новолуние: в память проекта не пишу — "
+                                               "это след. Скажи словами, если правда надо."))
+            elif note:
                 self._memory_note(note)
             return
         if self.busy:
@@ -2128,6 +2257,8 @@ class ChatApp:
             self.done = True
         elif cmd == "/pult":
             self.open_pult(rest)
+        elif cmd == "/newmoon":
+            self.newmoon_command(rest)
         elif cmd == "/clear":
             self.entries.clear()
             self._add(Entry("notice", text="Лента очищена."))
@@ -3651,6 +3782,8 @@ class ChatApp:
                 self.open_send_picker()
             elif name == "theme":
                 self.open_theme_picker()
+            elif name == "newmoon":
+                self.open_newmoon_confirm()
         elif kind == "block":
             self.panel_focus = False
             self._block_sel = action[1]
@@ -4782,6 +4915,8 @@ class ChatApp:
         # экране первыми уходят тема, мышление и effort — режим, модель,
         # отправка и стоимость остаются всегда.
         effort = str(self.settings.get("model.effort") or "auto")
+        from ..core import newmoon as _nm
+
         segments = [
             (" " + phase + " контекст " + pct + "%", None, "core"),
             (" · ", None, "core"),
@@ -4797,6 +4932,8 @@ class ChatApp:
             (" · тема ", None, "theme"),
             (str(self.settings.get("ui.theme") or "luna"), ("status", "theme"), "theme"),
         ]
+        if _nm.active():
+            segments.insert(0, (" 🌑 новолуние ·", ("status", "newmoon"), "core"))
         if self.layout.leaves() and not self.panel_focus:
             segments.append((" · ", None, "extra"))
             segments.append(("F6 — панели", ("key", Key("f6")), "extra"))
@@ -5192,14 +5329,28 @@ def _open_session(settings, data, continue_last: bool, fake: bool,
     return SessionJournal.create(data, cwd), [], False, None
 
 
+RELAUNCH_NEWMOON = 77  # код run_chat: перезапуститься в Новолунии
+
+
 def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
              continue_last: bool = False, resume: str | None = None,
-             open_pult: bool = False) -> int:
+             open_pult: bool = False, newmoon: bool = False) -> int:
     """Полноэкранный чат: терминал, цикл ввода, источник событий."""
+    import sys
+
+    from ..core import newmoon as _nm
     from .errtrap import ErrorTrap
     from .splash import play_splash
 
+    if newmoon:
+        # До DataDir и журнала: пути уже должны смотреть во временную папку.
+        _nm.enable()
+        continue_last, resume = False, None
     settings = Settings()
+    if _nm.active():
+        settings.ephemeral = True  # настройки режима — только в памяти
+        settings.set("chat.session_log", False)
+        settings.set("ui.theme", "newmoon")
     bus = EventBus()
     term = Terminal(settings=settings)
     if not term.caps.is_tty:
@@ -5272,6 +5423,10 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                 # luna setup и первый запуск без модели — сразу в пульт ИИ.
                 if open_pult or (not fake and not settings.get("model.main")):
                     app.open_pult()
+                elif _nm.active():
+                    app._add(Entry("notice", text=phrases.event_phrase("newmoon")
+                                   or "Новолуние."))
+                    app.open_newmoon_confirm()
                 app.start_source()
                 while not app.done:
                     events = term.read_events(timeout=app.next_timeout())
@@ -5311,6 +5466,15 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                         drop_empty_sessions(data, keep_path=keep)
                 except Exception:  # noqa: BLE001 — выход важнее уборки
                     pass
+    if _nm.active():
+        # Экран и прокрутка терминала — чисто; временная папка — прочь.
+        sys.stdout.write("[2J[3J[H")
+        sys.stdout.flush()
+        _nm.wipe()
+        print("🌑 Новолуние закончилось. Следов нет.")
+        return 0
+    if app is not None and getattr(app, "relaunch", "") == "newmoon":
+        return RELAUNCH_NEWMOON
     print(phrases.event_phrase("end") or "Орёл сел.")
     return 0
 

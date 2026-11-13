@@ -64,7 +64,9 @@ class CheckpointStore:
         self.session_id = str(session_id or "session")
         self.cwd = Path(cwd)
         self.settings = settings
-        base = Path(root) if root is not None else luna_home() / "checkpoints"
+        from . import newmoon
+
+        base = Path(root) if root is not None else             newmoon.redirect(luna_home() / "checkpoints", "checkpoints")
         self.dir = base / self.session_id
         self.objects = self.dir / "objects"
         self.index_path = self.dir / "index.json"

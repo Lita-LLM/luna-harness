@@ -56,6 +56,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try crew             команда на фальшивой модели: спутники, лидер, почта, бюджет
   luna try starfall [N]     звездопад на фальшивой модели: рой ячеек, смета, сводка, замеры
   luna update [--check]     обновление git-копии программы (--check — только проверить)
+  luna --newmoon (nm)       Новолуние: тёмный режим без следов, каждая модель — с подтверждения
   luna setup                пульт ИИ: провайдеры, скан сети, ключи, модели (то же, что /pult в чате)
   luna models               что из моделей настроено и живо ли
   luna manners              манеры речи: в терминале — выбиралка; list — список текстом,
@@ -492,6 +493,10 @@ def main(argv: list[str] | None = None) -> int:
 
     continue_last = "--continue" in argv
     argv = [a for a in argv if a != "--continue"]
+    # Новолуние: `luna --newmoon`, `luna newmoon`, `luna nm`.
+    newmoon = "--newmoon" in argv or argv[:1] in (["newmoon"], ["nm"], ["новолуние"])
+    if newmoon:
+        argv = [a for a in argv if a not in ("--newmoon", "newmoon", "nm", "новолуние")]
     resume: str | None = None
     if "--resume" in argv:
         idx = argv.index("--resume")
@@ -507,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
             from .ui.app import run_fullscreen
 
             return run_fullscreen(started_at=_T0, continue_last=continue_last,
-                                  resume=resume)
+                                  resume=resume, newmoon=newmoon)
         cmd, rest = argv[0], argv[1:]
         if cmd in ("--version", "-V", "version"):
             print(f"Лунапарк {__version__}")

@@ -325,7 +325,9 @@ class Agent:
             path = Path(tempfile.mkdtemp(prefix="luna-cage-"))
             self._temp_dirs.append(path)
             return path
-        return luna_home() / "local" / "outputs"
+        from ..core import newmoon
+
+        return newmoon.redirect(luna_home() / "local" / "outputs", "outputs")
 
     def _cage_allows(self, name: str, tool=None) -> bool:
         cage = self.cage
@@ -565,7 +567,8 @@ class Agent:
             from ..core.errors import HumanError, unexpected
 
             err = exc if isinstance(exc, HumanError) else unexpected(exc, "ход агента")
-            self.publish({"type": "error", "message": err.title, "detail": err.detail or err.hint})
+            self.publish({"type": "error", "message": err.title, "detail": err.detail or err.hint,
+                          "code": err.code, "data": getattr(err, "data", None) or {}})
             reason = "error"
         self.publish({"type": "turn.done", "turn": turn, "reason": reason})
         self._active = False

@@ -140,7 +140,11 @@ def play_splash(term, screen, settings, bus, started_at: float) -> str:
     # Настоящее небо: фаза луны на сегодня — расчёт без сети (ui/astro.py),
     # полушарие — настройка; в полнолуние приветствие особое (ДИЗАЙН.md).
     sky = moon_sky(hemisphere=str(settings.get("ui.hemisphere") or "north"))
-    if sky.is_full:
+    from ..core import newmoon as _nm
+
+    if _nm.active():
+        phrase = phrases.event_phrase("newmoon") or phrases.random_splash()
+    elif sky.is_full:
         phrase = phrases.event_phrase("fullmoon") or phrases.random_splash()
     else:
         phrase = phrases.random_splash()

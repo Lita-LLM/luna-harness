@@ -200,6 +200,10 @@ def build_system_prompt(cwd: Path, mode: str = "normal", settings=None, cage=Non
     if cage is not None:
         return _cage_prompt(Path(cwd), mode, settings, cage)
     parts = [CORE_PROMPT, environment_section(Path(cwd)), self_section(settings)]
+    from ..core import newmoon
+
+    if newmoon.active():
+        parts.append(newmoon.prompt_block())
     if mode == "plan":
         parts.append("Режим plan: тулы записи недоступны. Составь план и исследуй, ничего не меняй.")
     from .compat import is_global_instruction

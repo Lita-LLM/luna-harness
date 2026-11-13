@@ -88,7 +88,10 @@ class Router:
         if self._registry is None:
             from .providers import ProviderRegistry
 
-            self._registry = ProviderRegistry()
+            # Реестр — рядом с настройками (их home), а не всегда LUNA_HOME:
+            # чат и тесты с своим каталогом данных видят свой реестр.
+            home = getattr(self.settings, "home_dir", None)
+            self._registry = ProviderRegistry(home / "providers.json" if home else None)
         return self._registry
 
     def provider_config(self, name: str) -> ProviderConfig:
@@ -158,6 +161,11 @@ class Router:
 
             client = FakeModelClient()
             return client.chat(model, messages, tools, emit)
+        # Новолуние: ни одного запроса туда, что человек не подтвердил.
+        # Здесь — единая точка: главный агент, ассистенты, рой и пулы.
+        from ..core import newmoon
+
+        newmoon.gate(cfg.kind, cfg.base_url, model)
         adapter = adapter_for(cfg.kind, cfg.base_url)
         fields, note = effort_mod.body_fields(
             cfg.kind, cfg.name, model, self._effort_value(role))

@@ -31,6 +31,13 @@ class DataDir:
         self.sessions = self.root / "sessions"
         self.local = self.root / "local"
         self.logs = self.root / "logs"
+        from . import newmoon
+
+        if newmoon.active():
+            # Новолуние: всё пишущееся — во временную папку режима.
+            self.sessions = newmoon.scratch("sessions")
+            self.local = newmoon.scratch("local")
+            self.logs = newmoon.scratch("logs")
 
     def ensure(self) -> None:
         for d in (self.root, self.sessions, self.local, self.logs):

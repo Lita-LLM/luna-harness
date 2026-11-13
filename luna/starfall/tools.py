@@ -151,7 +151,9 @@ def _output_root(ctx) -> Path:
     if raw:
         return Path(raw).expanduser()
     home = Path(settings.home_dir) if settings is not None else luna_home()
-    return home / "local" / "starfall"
+    from ..core import newmoon
+
+    return newmoon.redirect(home / "local" / "starfall", "starfall")
 
 
 def _caps(ctx) -> dict:

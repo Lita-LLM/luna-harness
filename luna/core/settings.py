@@ -381,6 +381,10 @@ class Settings:
         self._project = self._load_project()
         self._trusted = self._compute_trust()
         self._stamps = self._file_stamps()
+        # Слой памяти поверх файлов: Новолуние и временные переопределения.
+        # ephemeral=True — любая set() пишет только сюда, на диск ни байта.
+        self._session: dict = {}
+        self.ephemeral = False
 
     def _load_project(self) -> dict:
         return self._load(self.project_path) if self.project_layer else {}
@@ -589,6 +593,8 @@ class Settings:
     # чтение
 
     def get(self, key: str, default: Any = None) -> Any:
+        if key in self._session:
+            return self._session[key]
         value, found = self._project_value(key)
         if found:
             return value
@@ -603,6 +609,8 @@ class Settings:
         return default
 
     def source(self, key: str) -> str:
+        if key in self._session:
+            return "session"
         if self._project_value(key)[1]:
             return "project"
         if _dig(self._global, key)[1]:
@@ -700,6 +708,13 @@ class Settings:
 
     def set(self, key: str, value: Any, layer: str = "global") -> None:
         value = self.validate(key, value)
+        if layer == "session" or self.ephemeral:
+            old = self.get(key)
+            self._session[key] = value
+            if self.bus is not None:
+                self.bus.publish({"type": "settings.changed", "key": key,
+                                  "value": value, "old": old, "layer": "session"})
+            return
         if layer == "project" and not self.project_layer:
             raise HumanError("settings_layer", "Проектный слой настроек здесь выключен",
                              "Запиши настройку глобально (без --project).")

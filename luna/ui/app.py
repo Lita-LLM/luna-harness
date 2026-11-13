@@ -175,7 +175,8 @@ class MiniApp:
 
 
 def run_fullscreen(started_at: float, continue_last: bool = False,
-                   resume: str | None = None, open_pult: bool = False) -> int:
+                   resume: str | None = None, open_pult: bool = False,
+                   newmoon: bool = False) -> int:
     """Полноэкранный режим: с вехи 1 минимальный экран заменён чатом.
 
     MiniApp выше оставлен как витрина и для тестов; живой путь `luna`
@@ -185,5 +186,14 @@ def run_fullscreen(started_at: float, continue_last: bool = False,
     """
     from .chat import run_chat
 
-    return run_chat(started_at=started_at, splash_first=True, fake=False,
-                    continue_last=continue_last, resume=resume, open_pult=open_pult)
+    from .chat import RELAUNCH_NEWMOON
+
+    code = run_chat(started_at=started_at, splash_first=True, fake=False,
+                    continue_last=continue_last, resume=resume, open_pult=open_pult,
+                    newmoon=newmoon)
+    if code == RELAUNCH_NEWMOON:
+        # /newmoon в обычном чате: та сессия закрыта как есть, дальше —
+        # тёмная сторона в том же процессе.
+        code = run_chat(started_at=started_at, splash_first=True, fake=False,
+                        newmoon=True)
+    return code

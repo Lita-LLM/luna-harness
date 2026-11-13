@@ -948,7 +948,9 @@ def _make_worktree(base_cwd: Path, name: str) -> Path | None:
     if not _git(base_cwd, "rev-parse", "--is-inside-work-tree"):
         return None
     slug = "sat-" + new_id()[:8].lower()
-    path = luna_home() / "worktrees" / slug
+    from ..core import newmoon
+
+    path = newmoon.redirect(luna_home() / "worktrees", "worktrees") / slug
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:  # noqa: BLE001

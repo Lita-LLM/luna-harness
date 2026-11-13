@@ -379,7 +379,8 @@ class Agent:
     def _emit(self, kind: str, text: str) -> None:
         if kind == "thinking":
             self._summarizer.feed(text)
-            self.publish({"type": "agent.thinking", "text": text})
+            self.publish({"type": "agent.thinking", "text": text,
+                          "block": self._summarizer.block})
         elif kind == "retry":
             # Автоповтор сети из роутера: отсчёт — уведомлением, не текстом
             # ответа (ЗАДАЧА-20).

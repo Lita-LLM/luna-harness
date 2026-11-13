@@ -2051,15 +2051,22 @@ class ChatApp:
             entry = self._stream_entry("thinking")
             entry.text += str(ev.get("text", ""))
             entry.chunk_at = self._clock()
+            if ev.get("block") is not None and getattr(entry, "block", None) is None:
+                entry.block = ev.get("block")
         elif kind == "thinking.summary":
             # Пересказ быстрой роли: строкой в запись «думает» (ЗАДАЧА-19).
             # Событие может прийти позже конца шага — крепится к последней
             # записи рассуждений, поток хода оно не задерживает.
             target = None
+            block = ev.get("block")
             for cand in reversed(self.entries):
-                if cand.kind == "thinking":
+                if cand.kind == "thinking" and (
+                        block is None or getattr(cand, "block", None) == block):
                     target = cand
                     break
+            if target is None:  # блок не нашёлся (лента очищена) — к последней
+                target = next((c for c in reversed(self.entries)
+                               if c.kind == "thinking"), None)
             if target is not None:
                 target.summary_lines.append(
                     (str(ev.get("text", "")), self._clock()))

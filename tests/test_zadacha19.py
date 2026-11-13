@@ -243,6 +243,32 @@ class ThinkingSummaryTest(unittest.TestCase):
             summarizer.wait_idle()
             self.assertEqual(len(events), 2)
 
+    def test_vsyo_pokryto_i_po_poryadku(self):
+        import threading
+        import time as _t
+
+        class SlowFirst(FakeSummaryRouter):
+            def chat(self, messages, tools=None, *, role="", ref="", on_event=None):
+                chunk = messages[-1]["content"]
+                if chunk.startswith("А"):
+                    _t.sleep(0.2)  # первый кусок отвечает последним
+                self.calls.append((messages, role))
+                return ChatResult(text="про " + chunk[:1], usage=Usage(1, 1))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            router = SlowFirst()
+            summarizer, events = self.make_summarizer(tmp, router)
+            summarizer.settings.set("ui.thinking_summary_parallel", 3)
+            # Поток мыслей больше трёх кусков разом — раньше брался только хвост.
+            summarizer.feed("А" + "а " * 3500 + "Б" + "б " * 3500 + "В" + "в " * 3500)
+            summarizer.flush()
+            summarizer.wait_idle()
+            texts = [e["text"] for e in events]
+            self.assertGreaterEqual(len(texts), 3)
+            self.assertEqual(texts[0], "про А")
+            seen = "".join(m[-1]["content"] for m, _r in router.calls)
+            self.assertEqual(len(seen), 1 + 7000 + 1 + 7000 + 1 + 7000)
+
     def test_fast_not_configured_disables_quietly(self):
         with tempfile.TemporaryDirectory() as tmp:
             router = FakeSummaryRouter(

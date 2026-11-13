@@ -100,8 +100,20 @@ def _in_ranges(code: int, ranges) -> bool:
     return False
 
 
+_CACHE: dict = {}
+
+
 def char_width(ch: str) -> int:
     """Ширина одного символа: 0, 1 или 2 ячейки."""
+    # Лента считает ширину каждого символа каждого кадра: без памяти
+    # растущий стрим в десятки тысяч символов тормозил кадр до секунды.
+    w = _CACHE.get(ch)
+    if w is None:
+        w = _CACHE[ch] = _char_width(ch)
+    return w
+
+
+def _char_width(ch: str) -> int:
     if not ch:
         return 0
     code = ord(ch)
@@ -119,7 +131,9 @@ def char_width(ch: str) -> int:
 
 def str_width(text: str) -> int:
     """Ширина строки в ячейках (без управляющих последовательностей)."""
-    return sum(char_width(ch) for ch in text)
+    if text.isascii() and text.isprintable():
+        return len(text)
+    return sum(map(char_width, text))
 
 
 def fits(text: str, width: int) -> str:

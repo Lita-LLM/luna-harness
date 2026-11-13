@@ -76,6 +76,21 @@ class RescueTest(unittest.TestCase):
         self.assertEqual(res.thinking, "надо прочитать")
         self.assertTrue(res.notes)
 
+    def test_draft_in_thinking_is_ignored(self):
+        res = ChatResult(thinking="<tool_call><function=bash><parameter=command>rm -rf x"
+                                  "</parameter></function></tool_call>\nнет, лучше иначе.\n"
+                                  "<tool_call><function=read><parameter=path>a</parameter>"
+                                  "</function></tool_call>\n")
+        textcalls.rescue(res, TOOLS)
+        self.assertEqual([c.name for c in res.tool_calls], ["read"])
+        self.assertIn("rm -rf", res.thinking)  # черновик остался мыслью
+
+    def test_thinking_ending_in_talk_gives_nothing(self):
+        res = ChatResult(thinking="<function=bash><parameter=command>ls</parameter></function>"
+                                  "\nхотя нет, сначала спрошу.")
+        textcalls.rescue(res, TOOLS)
+        self.assertEqual(res.tool_calls, [])
+
     def test_native_calls_win(self):
         from luna.router.types import ToolCall
 

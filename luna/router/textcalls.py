@@ -160,8 +160,21 @@ def _schemas(tools) -> dict:
     return out
 
 
-def extract(text: str, tools) -> tuple[list, str]:
-    """([ToolCall], текст без разметки вызовов). Нечего найти — ([], text)."""
+def _filler(piece: str) -> bool:
+    """Между вызовами и после них — только пробелы и обёртки разметки."""
+    piece = _DS_WRAP.sub("", piece)
+    for tag in ("<tool_call>", "</tool_call>", "<function_calls>", "</function_calls>"):
+        piece = piece.replace(tag, "")
+    return not piece.strip()
+
+
+def extract(text: str, tools, trailing: bool = False) -> tuple[list, str]:
+    """([ToolCall], текст без разметки вызовов). Нечего найти — ([], text).
+
+    trailing — только вызовы, которыми текст кончается: в мыслях модель
+    прикидывает черновики («вызову rm… нет, лучше иначе»), и в силе лишь
+    то, после чего она уже ничего не думала.
+    """
     if not text or "<" not in text:
         return [], text
     schemas = _schemas(tools)
@@ -178,6 +191,16 @@ def extract(text: str, tools) -> tuple[list, str]:
     if not spans:
         return [], text
     spans.sort(key=lambda s: s[0])
+    if trailing:
+        keep, after = [], len(text)
+        for span in reversed(spans):
+            if not _filler(text[span[1]:after]):
+                break
+            keep.insert(0, span)
+            after = span[0]
+        spans = keep
+        if not spans:
+            return [], text
     calls, pieces, pos = [], [], 0
     from .adapters import _split_intent
 
@@ -199,7 +222,8 @@ def rescue(result, tools) -> None:
     if result.tool_calls or not tools:
         return
     for field in ("text", "thinking"):
-        calls, rest = extract(getattr(result, field), tools)
+        calls, rest = extract(getattr(result, field), tools,
+                              trailing=(field == "thinking"))
         if calls:
             result.tool_calls.extend(calls)
             setattr(result, field, rest)

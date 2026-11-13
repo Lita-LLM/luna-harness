@@ -336,7 +336,9 @@ def _clip_line(spans, width: int):
 def _split_painted(spans: list, width: int) -> list:
     """Раскрашенную строку [(текст, fg, attrs)] — в куски не шире width;
     продолжения с отступом в два пробела, цвета сохраняются."""
-    if sum(str_width(t) for t, _f, _a in spans) <= width:
+    # Широкий символ — не больше двух ячеек: короткой строке мерить нечего.
+    if sum(len(t) for t, _f, _a in spans) * 2 <= width \
+            or sum(str_width(t) for t, _f, _a in spans) <= width:
         return [spans]
     out, cur, used = [], [], 0
     for text, fg, attrs in spans:
@@ -357,6 +359,43 @@ def _split_painted(spans: list, width: int) -> list:
     if cur and any(t.strip() for t, _f, _a in cur):
         out.append(cur)
     return out
+
+
+_INC_MIN = 2000  # короче — рендерим целиком, дешевле самой бухгалтерии
+_PARA = "\n\n"
+
+
+def _safe_cut(text: str) -> int:
+    """Последняя граница абзаца вне блока кода (-1 — нет такой)."""
+    cut = text.rfind(_PARA)
+    while cut > 0 and text.count("```", 0, cut) % 2:
+        cut = text.rfind(_PARA, 0, cut)
+    return cut
+
+
+def _incremental(entry, tag: str, text: str, width: int, render, gap) -> list:
+    """Строки растущего текста: готовые абзацы — из памяти, заново — хвост.
+
+    Стрим растёт на каждом кадре; полный перерендер десятков тысяч
+    символов на кадр вешал экран, когда модель (или несколько) писала
+    быстро. Абзацы до последней пустой строки уже не меняются.
+    gap — как приклеить хвост: None — хвост рендерится с ведущей пустой
+    строкой (markdown), иначе — строка-разделитель (wrap_text).
+    """
+    if not entry.streaming or len(text) < _INC_MIN:
+        return render(text)
+    cut = _safe_cut(text)
+    if cut <= 0:
+        return render(text)
+    inc = getattr(entry, "_inc", None)
+    if inc is not None and inc[0] == (tag, width, cut) and text.startswith(inc[1]):
+        head = inc[2]
+    else:
+        head = render(text[:cut])
+        entry._inc = ((tag, width, cut), text[:cut], head)
+    if gap is None:
+        return head + render(text[cut:])
+    return head + [gap] + render(text[cut + 2:])
 
 
 def _cells_slice(text: str, a: int, b) -> str:
@@ -1895,7 +1934,10 @@ class ChatApp:
         entry.born = self._clock()
         self.entries.append(entry)
         self._last_change = entry.born
-        self.scroll = 0
+        # Прокрутил вверх и читает — лента не утаскивает вниз сама; вниз
+        # возвращает только своё сообщение (или выключенный ui.scroll_hold).
+        if entry.kind == "user" or not self.settings.get("ui.scroll_hold", True):
+            self.scroll = 0
         return entry
 
     def _stream_entry(self, kind: str) -> Entry:
@@ -3231,6 +3273,12 @@ class ChatApp:
         if key.name == "pagedown":
             self.scroll = max(0, self.scroll - self._page)
             return
+        if key.name == "end" and "ctrl" in key.mods:
+            self.scroll = 0  # к свежему — скролл больше не держит
+            return
+        if key.name == "home" and "ctrl" in key.mods:
+            self.scroll = 100000
+            return
         if key.name == "enter":
             if "alt" in key.mods and self.busy and self.editor.text.strip():
                 # Alt+Enter во время хода — разово: прервать и отправить.
@@ -3953,7 +4001,17 @@ class ChatApp:
             if pos is not None:
                 self.selection = (self._sel_anchor, pos)
         elif mouse.kind == "release" and mouse.button == 0:
+            if self._sel_anchor is not None and self.selection is not None \
+                    and self.selection[0] == self.selection[1]:
+                self._soft_click(mouse)
             self._finish_selection_copy()
+
+    def _soft_click(self, mouse: Mouse) -> None:
+        """Простой клик (без протяжки) по телу мыслей — свернуть/развернуть.
+        На отпускании, а не на нажатии: протяжка по мыслям — выделение."""
+        zone = self._zone_at(mouse.x - 1, mouse.y - 1)
+        if zone is not None and zone[4][0] == "soft_block":
+            self._toggle_entry(zone[4][1])
 
     def _finish_selection_copy(self) -> None:
         """Отпустили мышь после протяжки: выделение — в буфер обмена."""
@@ -4002,6 +4060,8 @@ class ChatApp:
             self._feed_drag = None
             if was_select or had_anchor:
                 self._finish_selection_copy()
+            elif not drag["moved"]:
+                self._soft_click(mouse)
             return True
         return False
 
@@ -4348,7 +4408,21 @@ class ChatApp:
         if key is not None and entry._cache_key == key \
                 and entry._cache_lines is not None:
             return entry._cache_lines
+        # Стрим: запись меняется каждый кадр. Перерисовываем не чаще, чем
+        # позволяет её цена (≈20% времени), — огромный текст от быстрой
+        # модели (или нескольких сразу) больше не вешает экран.
+        cost = getattr(entry, "_render_cost", 0.0)
+        stale = getattr(entry, "_render_lines", None)
+        if entry.streaming and stale is not None and cost > 0.008 \
+                and getattr(entry, "_render_w", None) == width \
+                and time.monotonic() - getattr(entry, "_render_at", 0.0) < cost * 4:
+            return stale
+        started = time.monotonic()
         lines = self._entry_lines_fresh(entry, width, now)
+        entry._render_at = time.monotonic()
+        entry._render_cost = entry._render_at - started
+        entry._render_w = width
+        entry._render_lines = lines
         if key is not None:
             entry._cache_key = key
             entry._cache_lines = lines
@@ -4371,7 +4445,8 @@ class ChatApp:
                 prefix = "› " if i == 0 else "  "
                 add([(prefix, "amber")] + [(s.text, "user") for s in line])
         elif entry.kind == "agent":
-            md_lines = render_markdown(entry.text, w)
+            md_lines = _incremental(entry, "md", entry.text, w,
+                                    lambda s: render_markdown(s, w), None)
             faded = self._fade_last_line(entry, md_lines, now)
             for idx, line in enumerate(md_lines):
                 if faded is not None and idx == len(md_lines) - 1:
@@ -4410,7 +4485,8 @@ class ChatApp:
                 raw.append((self._paint(spans, line_alpha), None))
 
             if self._exp(entry) or mode == "full":
-                for line in wrap_text(entry.text, w - 2):
+                for line in _incremental(entry, "wt", entry.text, w - 2,
+                                         lambda s: wrap_text(s, w - 2), ""):
                     add([("◦ ", "dim"), (line, "comment")])
             elif mode == "summary":
                 for text_line, line_born in entry.summary_lines:
@@ -5140,6 +5216,13 @@ class ChatApp:
         sb_gap = 0 if str(self.settings.get("ui.scrollbar") or "auto") == "off" else 1
         feed_w = max(4, chat_w - sb_gap)
         lines = self._feed_lines(feed_w, now)
+        # Скролл держится на месте, пока Луна пишет: scroll считается от
+        # низа, поэтому выросшую ленту добавляем к нему — вид не едет.
+        prev = getattr(self, "_feed_prev", None)
+        if self.scroll > 0 and prev is not None and prev[0] == feed_w \
+                and self.settings.get("ui.scroll_hold", True):
+            self.scroll += len(lines) - prev[1]
+        self._feed_prev = (feed_w, len(lines))
         max_scroll = max(0, len(lines) - feed_h)
         self.scroll = max(0, min(self.scroll, max_scroll))
         end = len(lines) - self.scroll
@@ -5160,6 +5243,11 @@ class ChatApp:
             mapped = self._line_map[start + row] if start + row < len(self._line_map) else None
             if mapped is not None and mapped[1] and self._expandable(mapped[0]):
                 self.zones.append((0, row, chat_w, row + 1, ("block", mapped[0])))
+            elif mapped is not None and mapped[0].kind == "thinking" \
+                    and self._expandable(mapped[0]):
+                # Тело мыслей — тоже кнопка, но мягкая: по отпусканию без
+                # протяжки (_soft_click), чтобы выделение мышью работало.
+                self.zones.append((0, row, chat_w, row + 1, ("soft_block", mapped[0])))
             line_text = self._feed_texts[start + row] if start + row < len(self._feed_texts) else ""
             for a, b, token in _find_links(line_text):
                 self.zones.append((a, row, b + 1, row + 1, ("link", token)))

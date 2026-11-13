@@ -394,8 +394,13 @@ class MoonPanel(PanelContent):
         from .. import color as _c
         from ..disc import draw_disc
 
+        from ..markdown import wrap_text
+
         data = panel_data(app)
-        stats = self._stats(app)
+        # Строки сводки — переносом в ширину панели: длинный «прогноз
+        # $…/мин» уезжал за правый край колонки.
+        stats = [part for line in self._stats(app)
+                 for part in (wrap_text(line, max(4, w - 2)) or [""])]
         disc_rows = self._disc_rows(w, max(3, h - len(stats) - 1))
         r = max(2.0, min(w / 2.0 - 1.0, disc_rows * 0.72))
         draw_disc(buf, x + w / 2.0, y + disc_rows / 2.0, r,

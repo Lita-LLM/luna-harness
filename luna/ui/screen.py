@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import contextmanager
 
 from . import color as _color
 from .width import char_width
@@ -23,12 +24,37 @@ MARKER_ENV = "LUNA_FIRST_FRAME_FILE"  # протокол замеров, см. d
 
 BLANK = (" ", None, None, 0)
 
+# Аудит наложений (luna try overlap, тесты): пока это список, каждая
+# попытка написать видимый символ вне своей клип-зоны записывается сюда.
+# В обычной работе None — проверка стоит одно сравнение.
+AUDIT: list | None = None
+
 
 class Buffer:
     def __init__(self, cols: int, rows: int):
         self.cols = max(1, cols)
         self.rows = max(1, rows)
         self.cells = [[BLANK] * self.cols for _ in range(self.rows)]
+        self._clip = None  # (x0, y0, x1, y1, имя) — куда сейчас можно писать
+
+    @contextmanager
+    def clip(self, x: int, y: int, w: int, h: int, name: str = ""):
+        """Зона кадра: внутри with всё, что вне прямоугольника, отрезается.
+
+        Части кадра не обязаны помнить о соседях — вылезти за свою зону
+        физически нельзя. Вложенные зоны пересекаются.
+        """
+        prev = self._clip
+        x0, y0, x1, y1 = x, y, x + max(0, w), y + max(0, h)
+        if prev is not None:
+            x0, y0 = max(x0, prev[0]), max(y0, prev[1])
+            x1, y1 = min(x1, prev[2]), min(y1, prev[3])
+            name = name or prev[4]
+        self._clip = (x0, y0, max(x0, x1), max(y0, y1), name)
+        try:
+            yield self
+        finally:
+            self._clip = prev
 
     def resize(self, cols: int, rows: int) -> None:
         cols, rows = max(1, cols), max(1, rows)
@@ -46,13 +72,25 @@ class Buffer:
         self.cells = [[blank] * self.cols for _ in range(self.rows)]
 
     def set(self, x: int, y: int, ch: str, fg=None, bg=None, attrs: int = 0) -> None:
-        if not (0 <= x < self.cols and 0 <= y < self.rows) or not ch:
+        if not ch:
+            return
+        clip = self._clip
+        if clip is not None and not (clip[0] <= x < clip[2] and clip[1] <= y < clip[3]):
+            if AUDIT is not None and ch.strip():
+                AUDIT.append((clip[4], x, y, ch))
+            return
+        if not (0 <= x < self.cols and 0 <= y < self.rows):
+            if AUDIT is not None and ch.strip():
+                AUDIT.append((clip[4] if clip else "экран", x, y, ch))
             return
         w = char_width(ch)
         if w == 0:
             return
-        if w == 2 and x + 1 >= self.cols:
-            ch, w = " ", 1  # широкий символ у правого края не влезает
+        right = self.cols if clip is None else min(self.cols, clip[2])
+        if w == 2 and x + 1 >= right:
+            if AUDIT is not None:
+                AUDIT.append((clip[4] if clip else "экран", x + 1, y, ch))
+            ch, w = " ", 1  # широкий символ у правого края зоны не влезает
         self._unwide(x, y)
         if w == 2:
             self._unwide(x + 1, y)
@@ -71,8 +109,14 @@ class Buffer:
     def text(self, x: int, y: int, s: str, fg=None, bg=None, attrs: int = 0) -> int:
         """Написать строку с учётом ширины символов; вернуть занятую ширину."""
         used = 0
-        for ch in s:
-            if x + used >= self.cols:
+        limit = self.cols if self._clip is None else min(self.cols, self._clip[2])
+        for i, ch in enumerate(s):
+            if x + used >= limit:
+                # Текст не влез в зону — для аудита это вылезание, если
+                # отрезанный хвост видимый (пробелы-добивки не в счёт).
+                if AUDIT is not None and s[i:].strip():
+                    AUDIT.append((self._clip[4] if self._clip else "экран",
+                                  x + used, y, s[i:].strip()[:20]))
                 break
             w = char_width(ch)
             if w == 0:

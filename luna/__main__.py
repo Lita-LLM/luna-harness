@@ -48,6 +48,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try splash           заставка ещё раз
   luna try chat             чат-экран с фальшивым агентом (сценарии событий)
   luna try snapshot <экран> снимок экрана в HTML: splash | render | main | chat | sessions
+  luna try overlap [--json] аудит наложений: все экраны на сетке размеров
   luna try measure [--json] замеры: старт, память и ЦП в простое
   luna try brain            мозг на фальшивой модели: ход с тулом, без сети
   luna try undo             откат на фальшивой модели: пишет → /undo → прежние → /redo
@@ -593,6 +594,10 @@ def main(argv: list[str] | None = None) -> int:
                 from .devtools.measure import run_measure
 
                 return run_measure(as_json="--json" in rest)
+            if what == "overlap":
+                from .devtools.overlap import run_overlap
+
+                return run_overlap(rest[1:])
             if what == "snapshot":
                 from .devtools.snapshot import run_snapshot
 

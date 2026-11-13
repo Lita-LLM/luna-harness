@@ -287,6 +287,32 @@ def _clip_line(spans, width: int):
     return out
 
 
+def _split_painted(spans: list, width: int) -> list:
+    """Раскрашенную строку [(текст, fg, attrs)] — в куски не шире width;
+    продолжения с отступом в два пробела, цвета сохраняются."""
+    if sum(str_width(t) for t, _f, _a in spans) <= width:
+        return [spans]
+    out, cur, used = [], [], 0
+    for text, fg, attrs in spans:
+        piece = ""
+        for ch in text:
+            cw = char_width(ch)
+            if used + cw > width:
+                if piece:
+                    cur.append((piece, fg, attrs))
+                out.append(cur)
+                cur, used, piece = [("  ", fg, 0)], 2, ""
+                if ch == " ":
+                    continue
+            piece += ch
+            used += cw
+        if piece:
+            cur.append((piece, fg, attrs))
+    if cur and any(t.strip() for t, _f, _a in cur):
+        out.append(cur)
+    return out
+
+
 def _cells_slice(text: str, a: int, b) -> str:
     """Срез строки по колонкам ячеек [a..b] включительно; b=None — до конца."""
     out = []
@@ -4268,7 +4294,12 @@ class ChatApp:
                 add([("· ", "dim"), (line, "comment")])
         elif entry.kind == "shell":
             add(_clip_line([("$ ", "cyan"), (entry.text, "text")], w))
-        return raw
+        # Страховка ширины: строка любого вида не шире ленты, иначе она
+        # уезжает под полосу прокрутки и панели. Лишнее — переносом.
+        fitted: list = []
+        for spans, bg in raw:
+            fitted.extend((part, bg) for part in _split_painted(spans, w))
+        return fitted
 
     _DECISIONS = {"yes": "да", "no": "нет", "edit": "да, с правкой",
                   "always": "да, дальше без вопросов",
@@ -4586,26 +4617,31 @@ class ChatApp:
             if pw <= 0 or ph <= 0:
                 continue
             buf.fill_rect(px, py, pw, ph, " ", bg=PANEL_BG)
-            content = self._panel_content(panel_id)
-            title = content.title if content is not None else panel_id
-            focused = bool(self.panel_focus and tree.focused == panel_id)
-            self._draw_panel_header(buf, px, py, pw, title, focused)
-            if content is None:
-                continue
-            content.height_hint = max(0, ph - 1)
-            if content.draw_into(buf, self, px, py + 1, pw, max(0, ph - 1)):
-                continue
-            lines = content.lines(self, max(1, pw - 2))
-            row = py + 1
-            for line in lines:
+            with buf.clip(px, py, pw, ph, "панель " + panel_id):
+                self._draw_one_panel(buf, tree, panel_id, px, py, pw, ph)
+        self._draw_panel_dividers(buf, rects)
+
+    def _draw_one_panel(self, buf: Buffer, tree, panel_id: str,
+                        px: int, py: int, pw: int, ph: int) -> None:
+        content = self._panel_content(panel_id)
+        title = content.title if content is not None else panel_id
+        focused = bool(self.panel_focus and tree.focused == panel_id)
+        self._draw_panel_header(buf, px, py, pw, title, focused)
+        if content is None:
+            return
+        content.height_hint = max(0, ph - 1)
+        if content.draw_into(buf, self, px, py + 1, pw, max(0, ph - 1)):
+            return
+        lines = content.lines(self, max(1, pw - 2))
+        row = py + 1
+        for line in lines:
+            if row >= py + ph:
+                break
+            for visual in wrap_text(line, max(1, pw - 2)):
                 if row >= py + ph:
                     break
-                for visual in wrap_text(line, max(1, pw - 2)):
-                    if row >= py + ph:
-                        break
-                    buf.text(px + 1, row, visual, fg=_color.SILVER, bg=PANEL_BG)
-                    row += 1
-        self._draw_panel_dividers(buf, rects)
+                buf.text(px + 1, row, visual, fg=_color.SILVER, bg=PANEL_BG)
+                row += 1
 
     def _draw_panel_dividers(self, buf: Buffer, rects: dict) -> None:
         """Тонкие разделители на стыках панелей: ─ по горизонтали, │ по вертикали."""
@@ -4634,6 +4670,9 @@ class ChatApp:
         if self._anim_on():
             alpha = ease_in_out((now - picker.born) / 0.25)
         lines, sel_row = picker.render_block(max(10, width - 2), max(3, height - 1))
+        # Оверлей закрывает свою зону целиком: раньше под коротким списком
+        # просвечивала лента и мешалась с пунктами.
+        buf.fill_rect(0, 0, width, height, " ", bg=PICKER_BG)
         for row, spans in enumerate(lines[:height]):
             bg = SELECT_BG if row == sel_row else PICKER_BG
             buf.fill_rect(0, row, width, 1, " ", bg=bg)
@@ -4703,25 +4742,41 @@ class ChatApp:
                 break
             segments = [s for s in segments if s[2] != drop]
         x = 0
+        avail = max(0, cols - right_w - 1)
         for text, action, _tag in segments:
             w = str_width(text)
-            if x + w > cols:
+            if x + w > avail:
+                # Даже без лишних сегментов не влезло (узкий терминал) —
+                # режем с многоточием: стоимость справа видна всегда.
+                room = avail - x - 1
+                if room > 0:
+                    cut = _cells_slice(text, 0, room - 1) + "…"
+                    buf.text(x, y, cut, fg=_color.SILVER, bg=STATUS_BG)
+                    if action is not None:
+                        self.zones.append((x, y, x + str_width(cut), y + 1, action))
+                    x += str_width(cut)
                 break
             buf.text(x, y, text, fg=_color.SILVER, bg=STATUS_BG)
             if action is not None and w:
                 self.zones.append((x, y, x + w, y + 1, action))
             x += w
-        left = "".join(t for t, _a, _tag in segments)
-        if self.busy:
-            phrase, alpha = self.wheel.text_alpha(now)
-            spin = "  " + self.spinner.glyph(now) + " " + phrase + "…"
-            fg = _color.lerp(STATUS_BG, _color.AMBER, alpha)
-            buf.text(x, y, spin, fg=fg, bg=STATUS_BG)
-            x += str_width(spin)
         cost = format(self.cost, ".4f")
         right = "$" + cost
         if self.queue:
             right += " · очередь: " + str(len(self.queue))
+        if self.busy:
+            # Декоративная фраза — только если влезает целиком рядом со
+            # стоимостью; иначе один глиф крутилки, иначе ничего.
+            phrase, alpha = self.wheel.text_alpha(now)
+            glyph = self.spinner.glyph(now)
+            room = cols - x - str_width(right) - 2
+            for spin in ("  " + glyph + " " + phrase + "…", "  " + glyph):
+                if str_width(spin) <= room:
+                    fg = _color.lerp(STATUS_BG, _color.AMBER, alpha) \
+                        if len(spin) > 3 else _color.AMBER
+                    buf.text(x, y, spin, fg=fg, bg=STATUS_BG)
+                    x += str_width(spin)
+                    break
         rx = max(x + 1, cols - str_width(right) - 1)
         if rx < cols:
             buf.text(rx, y, right, fg=DIM_FG, bg=STATUS_BG, attrs=_color.DIM)
@@ -4823,10 +4878,14 @@ class ChatApp:
                       and not self._guard_replace) or (
             guard is None and ask is not None and not self.editor.text)
         if guard is not None and not self.guard_editing and not self._guard_replace:
-            input_lines, cursor_pos = ["Enter — да · n — нет · e — править · "
-                                       "a — без вопросов · p — в проекте без вопросов · "
-                                       "r — нет, и вот что вместо · q — стоп"], (0, 0)
-            input_h = 1
+            # Подсказка — кнопки ответа: переносом в ширину ленты, иначе
+            # хвост с «q — стоп» уезжал за край и терялся.
+            input_lines = wrap_text("Enter — да · n — нет · e — править · "
+                                    "a — без вопросов · p — в проекте без вопросов · "
+                                    "r — нет, и вот что вместо · q — стоп",
+                                    max(4, chat_w - 3))[:4]
+            cursor_pos = (0, 0)
+            input_h = len(input_lines)
         elif ask is not None and not self.editor.text:
             input_lines, cursor_pos = ["↑↓ — выбор · Enter — ответить"], (0, 0)
             input_h = 1
@@ -4846,7 +4905,11 @@ class ChatApp:
         meta_h = len(meta_lines)
         feed_h = max(1, rows - 1 - input_h - completion_h - nib_h - meta_h)
         self._page = feed_h
-        lines = self._feed_lines(chat_w, now)
+        # Под полосу прокрутки — постоянный зазор: полоса не садится на
+        # последний символ строк, а лента не перетекает, когда она появилась.
+        sb_gap = 0 if str(self.settings.get("ui.scrollbar") or "auto") == "off" else 1
+        feed_w = max(4, chat_w - sb_gap)
+        lines = self._feed_lines(feed_w, now)
         max_scroll = max(0, len(lines) - feed_h)
         self.scroll = max(0, min(self.scroll, max_scroll))
         end = len(lines) - self.scroll
@@ -4860,8 +4923,9 @@ class ChatApp:
             if bg is not None:
                 buf.fill_rect(0, row, chat_w, 1, " ", bg=bg)
             x = 0
-            for text, fg, attrs in spans:
-                x += buf.text(x, row, text, fg=fg, bg=bg or _color.SPACE_BG, attrs=attrs)
+            with buf.clip(0, 0, feed_w, feed_h, "лента"):
+                for text, fg, attrs in spans:
+                    x += buf.text(x, row, text, fg=fg, bg=bg or _color.SPACE_BG, attrs=attrs)
             # Зоны ленты: заголовок раскрываемого блока и ссылки/пути.
             mapped = self._line_map[start + row] if start + row < len(self._line_map) else None
             if mapped is not None and mapped[1] and self._expandable(mapped[0]):
@@ -4883,16 +4947,20 @@ class ChatApp:
             if self.panel_focus and self.layout.leaves():
                 # В режиме панелей внизу колонки — подсказка управления.
                 hint_lines = wrap_text(self._PANEL_HINT, max(4, panel_w - 2))[:5]
-            self._draw_panels(buf, chat_w, 0, panel_w,
-                              total_h - len(hint_lines), now, tree=tree)
+            with buf.clip(chat_w, 0, panel_w, total_h, "панели"):
+                self._draw_panels(buf, chat_w, 0, panel_w,
+                                  total_h - len(hint_lines), now, tree=tree)
             for i, line in enumerate(hint_lines):
                 hy = total_h - len(hint_lines) + i
-                buf.text(chat_w + 1, hy, line, fg=DIM_FG, bg=PANEL_BG,
-                         attrs=_color.DIM)
+                with buf.clip(chat_w, hy, panel_w, 1, "подсказка панелей"):
+                        buf.text(chat_w + 1, hy, line, fg=DIM_FG, bg=PANEL_BG,
+                             attrs=_color.DIM)
                 self._key_zones(buf, line, chat_w + 1, hy, cols)
         else:
             self._panel_rects = {}
         cy = feed_h
+        bottom = buf.clip(0, feed_h, chat_w, rows - 1 - feed_h, "низ чата")
+        bottom.__enter__()
         if self.cmd_completions:
             # Окно списка команд вокруг выбранной: список полный (раздел 5
             # ЗАДАЧИ-20), показ прокручивается за completion_index.
@@ -4908,14 +4976,14 @@ class ChatApp:
                 attrs = _color.BOLD if i == self.completion_index else _color.DIM
                 buf.text(2, cy + j,
                          _cells_slice("/" + name + " — " + desc, 0,
-                                      max(0, chat_w - 2)),
+                                      max(0, chat_w - 3)),
                          fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
         else:
             for i, candidate in enumerate(self.completions[:completion_h]):
                 style_fg = _color.CYAN if i == self.completion_index else DIM_FG
                 attrs = _color.BOLD if i == self.completion_index else _color.DIM
                 buf.text(2, cy + i,
-                         _cells_slice("@" + candidate, 0, max(0, chat_w - 2)),
+                         _cells_slice("@" + candidate, 0, max(0, chat_w - 3)),
                          fg=style_fg, bg=_color.SPACE_BG, attrs=attrs)
         if nib_h:
             # Строка Ниблера — между лентой и вводом; в конце жизни затухает.
@@ -4929,7 +4997,7 @@ class ChatApp:
             # уезжала поверх колонки панелей — Ниблер писал вне раскладки
             # (ЗАДАЧА-22). Весь вывод — только внутри своего места кадра.
             buf.text(2, feed_h + completion_h,
-                     _cells_slice(label + text, 0, max(0, chat_w - 2)), fg=fg,
+                     _cells_slice(label + text, 0, max(0, chat_w - 3)), fg=fg,
                      bg=_color.SPACE_BG, attrs=_color.ITALIC)
         my = feed_h + completion_h + nib_h
         for i, line in enumerate(meta_lines):
@@ -4946,12 +5014,15 @@ class ChatApp:
             buf.text(2, iy + i, line, fg=_color.SILVER, bg=_color.SPACE_BG, attrs=attrs)
             if guard_hint:
                 self._key_zones(buf, line, 2, iy + i, chat_w)
+        bottom.__exit__(None, None, None)
         if self._pastes and any(ph in self.editor.text for ph in self._pastes):
             # Клик по полю ввода со свёрнутой вставкой — развернуть её.
             self.zones.append((0, iy, chat_w, iy + input_h, ("paste",)))
-        self._status_line(buf, rows - 1, cols, now)
+        with buf.clip(0, rows - 1, cols, 1, "статус"):
+            self._status_line(buf, rows - 1, cols, now)
         if self.picker is not None:
-            self._draw_picker(buf, chat_w, feed_h, now)
+            with buf.clip(0, 0, chat_w, feed_h, "выбиралка"):
+                self._draw_picker(buf, chat_w, feed_h, now)
             return buf, None
         if guard is not None and not self.guard_editing and not self._guard_replace:
             return buf, None

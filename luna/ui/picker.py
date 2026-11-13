@@ -25,6 +25,7 @@ from . import color as _color
 from .keys import Key
 from .markdown import wrap_text
 from .screen import Buffer
+from .width import char_width, str_width
 
 DIM_FG = (0x8B, 0x94, 0xAC)
 PICKER_BG = (0x10, 0x13, 0x24)
@@ -229,11 +230,11 @@ class Picker:
         if self.mode == "confirm":
             lines.append([(self._confirm_prompt, "accent")])
             lines.append([("Enter — да · Esc — назад", "hint")])
-            return lines, None
+            return [_fit_spans(line, w) for line in lines], None
         if self.mode == "input":
             lines.append([(self._input_prompt + self._input_text + "▌", "accent")])
             lines.append([("Enter — создать · Esc — назад", "hint")])
-            return lines, None
+            return [_fit_spans(line, w) for line in lines], None
         current = self.current()
         preview: list = []
         if current is not None and current.preview and self.preview_lines > 0:
@@ -274,9 +275,31 @@ class Picker:
                     lines.append([("  " + item.detail, "dim")] if item.detail
                                  else [("", "dim")])
         lines.extend(preview)
+        # Строки блока не шире блока: пункты и шапка — с многоточием,
+        # подсказка клавиш внизу — переносом (её режут последней).
+        lines = [_fit_spans(line, w) for line in lines]
         if self.hint:
-            lines.append([(self.hint, "hint")])
+            for part in wrap_text(self.hint, w):
+                lines.append([(part, "hint")])
         return lines, sel_row
+
+
+def _fit_spans(spans: list, width: int) -> list:
+    """Спаны строки, обрезанные по ширине; отрезанное — многоточием."""
+    if sum(str_width(text) for text, _role in spans) <= width:
+        return spans
+    out, used = [], 0
+    for text, role in spans:
+        piece = ""
+        for ch in text:
+            w = char_width(ch)
+            if used + w > width - 1:
+                out.append((piece + "…", role))
+                return out
+            piece += ch
+            used += w
+        out.append((piece, role))
+    return out
 
 
 # --- пункты: сессии и манеры ---------------------------------------------------

@@ -46,6 +46,7 @@ _PANEL_KEYS = {"alt+m": "moon", "alt+l": "limits", "alt+b": "backside",
                "alt+c": "context", "alt+g": "git", "alt+p": "processes",
                "alt+t": "tree"}
 _PANEL_ANIM_SEC = 0.22   # мягкое появление/закрытие колонки панелей
+_TIDE_SHINE_SEC = 1.6    # блик по разделителю прилива после сжатия
 _NIBBLER_SHOW_SEC = 9.0  # сколько живёт строка Ниблера над вводом
 STATUS_BG = (0x16, 0x1B, 0x30)
 PANEL_BG = (0x10, 0x13, 0x24)
@@ -251,14 +252,14 @@ HELP_TEXT = """Команды и клавиши Луны
 /panels — все тайлы выбиралкой: пробел открывает/закрывает панель сразу, список не закрывается · Alt+M/L/B/F/N — Луна, Лимиты, Обратная сторона, Файлы, Ниблер · Alt+C/G/P/T — Контекст, Git, Процессы, Дерево
 Команды не зависят от раскладки (ui.layout_fix): /панель = /panel, а .зфтуд в ЙЦУКЕН — тоже /panel; аргументы и Ctrl/Alt-клавиши понимаются в любой раскладке
 Ctrl+R — поиск по истории ввода · Ctrl+L — перерисовать экран · Ctrl+V — вставить (картинка — по пути к файлу из буфера) · Ctrl+G — промпт во внешнем редакторе · ? на пустом вводе — эта справка
-Правка как в readline: Ctrl+A/E — начало/конец строки · Ctrl+U/K — вырезать до начала/конца строки · Ctrl+W — слово назад · Ctrl+Y — вернуть вырезанное · Alt+←/→ — по словам · Ctrl+_ (Ctrl+Shift+-) — отмена правки ввода · Ctrl+Z — свернуть в фон (Unix; fg — вернуться)
-Esc Esc на пустом вводе — откат к ходу выбиралкой · Esc во время хода — прервать ход одним нажатием · Ctrl+C во время хода — прервать; без хода — очистить ввод, второй подряд за секунду — выход
+Правка как в readline: Ctrl+A/E — начало/конец строки · Ctrl+U/K — вырезать до начала/конца строки · Ctrl+W — путь/слово до пробела назад · Ctrl+Backspace / Alt+Backspace — слово назад · Ctrl+Delete / Alt+D — слово вперёд · Ctrl+Y — вернуть вырезанное, Alt+Y следом — по кольцу дальше · Ctrl+←/→ — по словам (до знаков препинания) · Alt+←/→ — по словам до пробела · Ctrl+P/N — история назад/вперёд · Ctrl+_ (Ctrl+Shift+-) — отмена правки ввода · Ctrl+Z — свернуть в фон (Unix; fg — вернуться)
+Esc Esc на пустом вводе — откат к ходу выбиралкой, с текстом — убрать набросок в историю (↑ вернёт; Ctrl+C тоже не теряет) · Esc во время хода — прервать ход одним нажатием · Ctrl+C во время хода — прервать; без хода — очистить ввод, второй подряд за секунду — выход
 Отправка во время хода (chat.send_mode, видна в строке состояния): inject — вставка в ход · queue — очередь · interrupt — прервать и отправить · Alt+S — сменить режим по кругу · /send — выбиралка · Alt+Enter — разово прервать и отправить · ↑ на пустом поле — вернуть сообщение из очереди
 Ctrl+S — спрятать промпт в заначку (как в Claude Code): на пустом поле — вернуть с курсором, на непустом — поменять местами
 Мышление: /thinking — показ рассуждений по кругу summary (шапка «думает» и пересказ быстрой роли) → hidden → full, Alt+O — тот же круг на лету; /effort — глубина рассуждений, Alt+E — уровень по кругу на лету
 !команда — выполнить самому, без вопросов Предохранителя: вывод — в контекст, ход модели — по настройке chat.bang_triggers · #текст — дописать в AGENTS.md проекта · @файл — вложить файл (нечёткий поиск; Tab — дополнить; Tab после / — дополнить команду)
 Enter — отправить · Alt+Enter, Shift+Enter и \\+Enter — новая строка · стрелки — история и курсор · Tab / Shift+Tab — режим по кругу
-Ctrl+O — развернуть/Свернуть ВСЕ блоки ленты (настройка ui.expand_all) · Alt+↑/↓ — курсор по блокам, Enter/пробел на пустом вводе — раскрыть блок · клик по заголовку блока (▸/▾) — только его
+Ctrl+O — развернуть/Свернуть ВСЕ блоки ленты (настройка ui.expand_all) · Alt+↑/↓ — курсор по блокам, Enter/пробел на пустом вводе — раскрыть блок · клик по заголовку блока (▸/▾) — только его, мысли — клик по любой их строке · PageUp/PageDown — лента, Ctrl+Home/End — к началу/к свежему; прокрученная лента стоит, пока Луна пишет (ui.scroll_hold)
 Строка состояния кликабельна: режим, модель, effort, мышление, отправка и тема открывают свои выбиралки · клик по ссылке/пути в ленте — по настройке ui.click_link · мышь — ui.mouse (full/scroll/off)
 Раскладка панелей запоминается (ui.remember_layout): /panels reset — забыть · F6 — в режим панелей (панели открыты) или открыть «План»
 В режиме панелей: ↑↓ — фокус, ←→ — размер, Tab / Shift+Tab — переставить, Enter — развернуть, x — закрыть, Esc — назад к вводу; мышь: клик по заголовку — фокус, тянуть заголовок — переставить, разделитель — размер, ✕ — закрыть, колесо — прокрутка
@@ -359,6 +360,67 @@ def _split_painted(spans: list, width: int) -> list:
     if cur and any(t.strip() for t, _f, _a in cur):
         out.append(cur)
     return out
+
+
+def _tide_spans(entry, width: int, now: float, anim: bool, glyph_mode: str) -> list:
+    """Строка прилива (/compact): пока идёт сводка — бегущая волна,
+    потом — разделитель «прилив · было → стало» с одним бликом."""
+    import math
+
+    waves = ".~=" if glyph_mode == "ascii" else "·~≈"
+    if entry.streaming:
+        label = " прилив: сводка старых ходов… "
+    else:
+        label = " прилив · " + entry.text + \
+            (" · ходов в сводке: " + entry.summary if entry.summary else "") + " "
+    width = max(4, width)
+    label = label[:max(0, width - 4)]
+    lw = str_width(label)
+    left = max(0, (width - lw) // 2)
+    shine = None
+    if not entry.streaming and anim and entry.finished_at:
+        t = now - entry.finished_at
+        if 0 <= t < _TIDE_SHINE_SEC:
+            shine = t / _TIDE_SHINE_SEC * (width + 12) - 6
+    cells = []
+    for x in range(width):
+        if left <= x < left + lw:
+            continue
+        if entry.streaming:
+            phase = now * 5.0 if anim else 0.0
+            v = math.sin(x * 0.45 - phase) + 0.5 * math.sin(x * 0.17 + phase * 0.45)
+            ch = waves[2] if v > 0.8 else (waves[1] if v > -0.3 else waves[0])
+            style = "cyan" if v > 0.8 else ("comment" if v > -0.3 else "dim")
+        else:
+            ch = waves[2]
+            style = "cyan" if shine is not None and abs(x - shine) < 3 else "dim"
+        cells.append((x, ch, style))
+    spans, cur, cur_style = [], "", None
+    lab_style = "cyan" if entry.streaming or shine is not None else "notice"
+
+    def push(text, style):
+        nonlocal cur, cur_style
+        if style != cur_style and cur:
+            spans.append((cur, cur_style))
+            cur = ""
+        cur_style = style
+        cur += text
+
+    it = iter(cells)
+    nxt = next(it, None)
+    x = 0
+    while x < width:
+        if x == left and lw:
+            push(label, lab_style)
+            x += lw
+            continue
+        if nxt is not None and nxt[0] == x:
+            push(nxt[1], nxt[2])
+            nxt = next(it, None)
+        x += 1
+    if cur:
+        spans.append((cur, cur_style))
+    return spans
 
 
 _INC_MIN = 2000  # короче — рендерим целиком, дешевле самой бухгалтерии
@@ -1910,6 +1972,10 @@ class ChatApp:
             return True
         if self._panel_anim is not None:
             return True
+        for entry in self.entries[-8:]:
+            if entry.kind == "tide" and self._anim_on() and (
+                    entry.streaming or now - (entry.finished_at or 0.0) < _TIDE_SHINE_SEC):
+                return True
         if self._nibbler_line and now < self._nibbler_until + 0.3:
             return True
         if self.trap is not None and self.trap.pending:
@@ -2075,8 +2141,33 @@ class ChatApp:
                 self.context_pct = int(round(float(ev.get("context_pct") or 0)))
         elif kind == "mode.changed":
             self.mode = str(ev.get("mode") or self.mode)
+        elif kind == "context.compacting":
+            self._add(Entry("tide", streaming=True))
+        elif kind in ("context.compacted", "context.compact_end"):
+            tide = next((e for e in reversed(self.entries)
+                         if e.kind == "tide" and e.streaming), None)
+            if kind == "context.compact_end":
+                if tide is not None:
+                    self.entries.remove(tide)
+            else:
+                if tide is None:  # журнал старых сессий: начала не было
+                    tide = self._add(Entry("tide"))
+                tide.streaming = False
+                # Из журнала (--continue) — без блика: он про «сейчас».
+                tide.finished_at = 0.0 if self._restoring else self._clock()
+                def pct(v):
+                    return format(v, "g") if isinstance(v, (int, float)) else "?"
+
+                tide.text = pct(ev.get("before_pct")) + "% → " + pct(ev.get("after_pct")) + "%"
+                turns = ev.get("summarized_turns")
+                tide.summary = str(len(turns)) if isinstance(turns, list) else ""
+                self._tide_notice = True  # notice «Прилив: …» — уже в разделителе
         elif kind == "notice":
-            self._add(Entry("notice", text=str(ev.get("text", ""))))
+            text = str(ev.get("text", ""))
+            if getattr(self, "_tide_notice", False) and text.startswith("Прилив: контекст сжат"):
+                self._tide_notice = False
+                return
+            self._add(Entry("notice", text=text))
         elif kind == "btw.answer":
             # Ответ «в сторону»: отдельной записью, ход и история не тронуты.
             self._add(Entry("btw", text=str(ev.get("text", ""))))
@@ -3120,10 +3211,22 @@ class ChatApp:
         """Общие клавиши редактирования; True — клавиша съедена."""
         if key.char and not key.mods:
             self.editor.insert(key.char)
+        elif key.name == "backspace" and ("ctrl" in key.mods or "alt" in key.mods):
+            self.editor.kill_word_back_fine()
+        elif key.name == "delete" and ("ctrl" in key.mods or "alt" in key.mods):
+            self.editor.kill_word_forward()
+        elif key.label == "alt+d":
+            self.editor.kill_word_forward()
+        elif key.label == "alt+y":
+            self.editor.yank_pop()
         elif key.name == "backspace":
             self.editor.backspace()
         elif key.name == "delete":
             self.editor.delete()
+        elif key.name == "left" and "ctrl" in key.mods:
+            self.editor.word_left_fine()
+        elif key.name == "right" and "ctrl" in key.mods:
+            self.editor.word_right_fine()
         elif key.name == "left" and "alt" in key.mods:
             self.editor.word_left()
         elif key.name == "right" and "alt" in key.mods:
@@ -3214,6 +3317,13 @@ class ChatApp:
             return
         if key.label == "alt+o":
             self._cycle_thinking()
+            return
+        if key.label in ("ctrl+p", "ctrl+n"):
+            # Readline-история без стрелок: Ctrl+P — назад, Ctrl+N — вперёд.
+            if key.label == "ctrl+p":
+                self.editor.history_prev()
+            else:
+                self.editor.history_next()
             return
         if key.label == "ctrl+r":
             self.open_history_picker()
@@ -3357,6 +3467,13 @@ class ChatApp:
         if double and not self.editor.text.strip():
             # Esc Esc на пустом вводе — к выбору хода для отката (как у эталонов).
             self.open_rewind_picker()
+        elif double:
+            # Esc Esc с текстом — очистить, но не потерять: набросок в
+            # истории ввода, стрелка вверх вернёт (как у Клод Кода).
+            self.editor.push_history(self.editor.text)
+            self.editor.clear()
+            self._last_esc = -10.0
+            self._flash_hint("Набросок убран в историю ввода — ↑ вернёт.")
 
     # --- прерывание и режимы отправки (ЗАДАЧА-18) ---------------------------
 
@@ -3375,6 +3492,7 @@ class ChatApp:
             self._ctrl_c_at = -10.0
             return
         if self.editor.text.strip():
+            self.editor.push_history(self.editor.text)  # ↑ вернёт очищенное
             self.editor.clear()
             self._ctrl_c_at = -10.0
             return
@@ -4363,6 +4481,9 @@ class ChatApp:
         """
         if entry.streaming:
             return None
+        if entry.kind == "tide" and self._anim_on() \
+                and now - (entry.finished_at or 0.0) < _TIDE_SHINE_SEC:
+            return None  # по разделителю ещё бежит блик
         if entry.kind == "tool" and entry.status == "running":
             return None
         if entry.kind == "thinking":
@@ -4456,6 +4577,8 @@ class ChatApp:
                 if entry.streaming and idx == len(md_lines) - 1:
                     spans.append(("▌", "dim"))  # живой курсор стрима — в той же строке
                 add(spans)
+        elif entry.kind == "tide":
+            add(_tide_spans(entry, w, now, self._anim_on(), self.glyph_mode))
         elif entry.kind == "thinking":
             mode = self._thinking_mode()
             elapsed = max(0.0, (entry.finished_at or now) - entry.born) \

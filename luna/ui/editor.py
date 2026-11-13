@@ -139,10 +139,68 @@ class TextEditor:
         j, self.cursor = self.cursor, start
         self._kill(j, start)
 
+    # Ctrl+стрелки и Ctrl+Backspace/Delete — «мелкие» слова, как в
+    # редакторах: останавливаются на / . - и прочей пунктуации, а не только
+    # на пробелах (Alt+стрелки и Ctrl+W по-прежнему берут путь целиком).
+
+    @staticmethod
+    def _cls(ch: str) -> int:
+        return 0 if ch.isspace() else (1 if ch.isalnum() or ch == "_" else 2)
+
+    def _fine_left(self) -> int:
+        i = self.cursor
+        while i > 0 and self.text[i - 1].isspace():
+            i -= 1
+        if i > 0:
+            kind = self._cls(self.text[i - 1])
+            while i > 0 and self._cls(self.text[i - 1]) == kind:
+                i -= 1
+        return i
+
+    def _fine_right(self) -> int:
+        i, n = self.cursor, len(self.text)
+        while i < n and self.text[i].isspace():
+            i += 1
+        if i < n:
+            kind = self._cls(self.text[i])
+            while i < n and self._cls(self.text[i]) == kind:
+                i += 1
+        return i
+
+    def word_left_fine(self) -> None:
+        self.cursor = self._fine_left()
+
+    def word_right_fine(self) -> None:
+        """Курсор — на конец следующего слова (Ctrl+→)."""
+        self.cursor = self._fine_right()
+
+    def kill_word_back_fine(self) -> None:
+        """Ctrl+Backspace / Alt+Backspace: одно слово назад — в кольцо."""
+        self._kill(self._fine_left(), self.cursor)
+
+    def kill_word_forward(self) -> None:
+        """Ctrl+Delete / Alt+D: до конца слова вперёд — в кольцо."""
+        self._kill(self.cursor, self._fine_right())
+
     def yank(self) -> None:
         """Ctrl+Y: вставить последнее вырезанное из кольца."""
         if self.kill_ring:
+            start = self.cursor
             self.insert(self.kill_ring[-1])
+            self._yanked = (start, self.cursor, len(self.kill_ring) - 1)
+
+    def yank_pop(self) -> bool:
+        """Alt+Y сразу после Ctrl+Y: заменить вставленное предыдущим из кольца."""
+        info = getattr(self, "_yanked", None)
+        if not info or len(self.kill_ring) < 2 or self.cursor != info[1]:
+            return False
+        start, end, idx = info
+        idx = (idx - 1) % len(self.kill_ring)
+        piece = self.kill_ring[idx]
+        self.text = self.text[:start] + piece + self.text[end:]
+        self.cursor = start + len(piece)
+        self._yanked = (start, self.cursor, idx)
+        return True
 
     def push_history(self, text: str) -> None:
         """Положить текст в историю ввода (его достанут стрелкой вверх)."""

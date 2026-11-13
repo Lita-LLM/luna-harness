@@ -459,6 +459,15 @@ def _windows_read(timeout, parser) -> list:
                 events.extend(parser.flush())
                 events.append(_keys.Key("esc"))
                 continue
+            if vk == 0x08 and state & 0x000F:
+                # Ctrl/Alt+Backspace: символом приходит тот же 0x7F/0x08,
+                # что и у голого Backspace, — сочетание видно только по vk.
+                mods = {"ctrl"} if state & 0x000C else set()
+                if state & 0x0003:
+                    mods.add("alt")
+                events.extend(parser.flush())
+                events.append(_keys.Key("backspace", mods=frozenset(mods)))
+                continue
             if ch and ch != "\x00":
                 events.extend(parser.feed(ch.encode("utf-8")))
             else:

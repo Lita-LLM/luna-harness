@@ -1090,17 +1090,21 @@ class Agent:
         before_chars = history_chars(self._history)
         before_count = len(self._history)
         before_pct = round(self._context_pct, 1)
+        # Начало и конец — событиями: чат катит волну прилива, пока идёт сводка.
+        self.publish({"type": "context.compacting", "before_pct": before_pct})
         try:
             outcome = compact_history(self.router, self._history, self._turn_marks,
                                       keep_turns=keep, hint=hint,
                                       prompt_template=template,
                                       todos=list(self.ctx.todos))
         except Exception as exc:  # noqa: BLE001 — модель сводки упала: история цела
+            self.publish({"type": "context.compact_end"})
             self.publish({"type": "notice", "level": "warn",
                           "text": "Прилив не удался (" + str(exc)[:120] +
                                   ") — история не тронута."})
             return
         if outcome is None:
+            self.publish({"type": "context.compact_end"})
             self.publish({"type": "notice", "level": "info",
                           "text": "Сжимать пока нечего: история короткая."})
             return

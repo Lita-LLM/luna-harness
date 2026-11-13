@@ -57,5 +57,27 @@ class ThinkingClickTest(unittest.TestCase):
         self.assertNotEqual(app._exp(entry), before)
 
 
+
+class TideTest(unittest.TestCase):
+    def test_volna_i_razdelitel(self):
+        app = make_app(self)
+        app.on_agent_event({"type": "context.compacting", "before_pct": 62.0})
+        self.assertTrue(app.entries[-1].streaming)
+        self.assertTrue(app.needs_frame(app._clock()))
+        app.on_agent_event({"type": "context.compacted", "before_pct": 62.0,
+                            "after_pct": 18.5, "summarized_turns": [1, 2]})
+        app.on_agent_event({"type": "notice", "text": "Прилив: контекст сжат — было ~62%"})
+        tide = [e for e in app.entries if e.kind == "tide"]
+        self.assertEqual(len(tide), 1)
+        self.assertEqual(tide[0].text, "62% → 18.5%")
+        self.assertFalse(any(e.kind == "notice" for e in app.entries))
+
+    def test_neudacha_ubiraet_volnu(self):
+        app = make_app(self)
+        app.on_agent_event({"type": "context.compacting"})
+        app.on_agent_event({"type": "context.compact_end"})
+        self.assertFalse(any(e.kind == "tide" for e in app.entries))
+
+
 if __name__ == "__main__":
     unittest.main()

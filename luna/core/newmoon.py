@@ -90,6 +90,17 @@ def is_confirmed(base_url: str, model: str) -> bool:
         return target_key(base_url, model) in _confirmed
 
 
+def confirmed_keys() -> set:
+    with _lock:
+        return set(_confirmed)
+
+
+def restore_confirmed(keys) -> None:
+    """После горячей перезагрузки: модуль новый, подтверждения — прежние."""
+    with _lock:
+        _confirmed.update(str(k) for k in keys or ())
+
+
 def forget_all() -> None:
     with _lock:
         _confirmed.clear()

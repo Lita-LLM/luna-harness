@@ -196,4 +196,29 @@ def run_fullscreen(started_at: float, continue_last: bool = False,
         # тёмная сторона в том же процессе.
         code = run_chat(started_at=started_at, splash_first=True, fake=False,
                         newmoon=True)
+    return _reload_loop(code, started_at)
+
+
+def _reload_loop(code: int, started_at: float) -> int:
+    """/reload и /update: свежий код Луны в том же процессе, сессия — из снимка."""
+    from ..core import hotreload
+    from . import chat as chat_mod
+
+    while code == chat_mod.RELAUNCH_RELOAD:
+        handoff = chat_mod.HANDOFF
+        old_mod = chat_mod
+        saved = hotreload.purge()
+        try:
+            chat_mod = hotreload.fresh_chat_module()
+            chat_mod.HANDOFF = None
+            code = chat_mod.run_chat(started_at=started_at, fake=False, handoff=handoff)
+        except Exception as exc:  # noqa: BLE001 — сломанный новый код не теряет сессию
+            # Снимок свежее исходного, если новый чат успел поработать.
+            newer = getattr(chat_mod, "HANDOFF", None) if chat_mod is not old_mod else None
+            hotreload.restore(saved)
+            chat_mod = old_mod
+            handoff = dict(newer or handoff or {})
+            handoff["note"] = ("Новый код не поднялся (" + type(exc).__name__ + ": " +
+                               str(exc)[:200] + ") — Луна осталась на прежнем.")
+            code = chat_mod.run_chat(started_at=started_at, fake=False, handoff=handoff)
     return code

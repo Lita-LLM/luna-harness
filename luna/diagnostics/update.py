@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..core.errors import HumanError
@@ -74,8 +75,18 @@ def _git_fail(err: str, doing: str) -> HumanError:
                   "отслеживает сервер (git branch --set-upstream-to).")
 
 
-def run_update(check_only: bool = False, root: Path | None = None) -> int:
-    ensure_utf8_stdio()  # печатаем сами — кодировка наша забота, не main()
+@dataclass
+class UpdateInfo:
+    branch: str
+    head: str           # короткий хеш текущего коммита
+    behind: int         # новых коммитов на сервере
+    ahead: int          # своих, которых на сервере нет
+    log: list           # «хеш тема» новых коммитов
+
+
+def check(root: Path | None = None, fetch: bool = True) -> UpdateInfo:
+    """Что нового на сервере. Ничего не меняет; HumanError, если обновляться
+    отсюда нельзя (архив, нет git, правки, нет upstream)."""
     root = Path(root) if root is not None else PROGRAM_DIR
     if shutil.which("git") is None:
         raise _error("Не найден git",
@@ -97,7 +108,23 @@ def run_update(check_only: bool = False, root: Path | None = None) -> int:
                      "Обновляться можно из клона с отслеживаемой веткой: "
                      "git branch --set-upstream-to=origin/" + branch + ".")
 
-    code, status, _ = _git(root, "status", "--porcelain", "--untracked-files=no")
+    if fetch:
+        code, _, err = _git(root, "fetch", "--quiet", timeout=180)
+        if code != 0:
+            raise _git_fail(err, "получить коммиты с сервера")
+    _, behind_text, _ = _git(root, "rev-list", "--count", "HEAD..@{u}")
+    _, ahead_text, _ = _git(root, "rev-list", "--count", "@{u}..HEAD")
+    _, head_short, _ = _git(root, "rev-parse", "--short", "HEAD")
+    behind = int(behind_text or 0)
+    log = []
+    if behind:
+        _, text, _ = _git(root, "log", "--format=%h %s", "HEAD..@{u}")
+        log = text.splitlines()
+    return UpdateInfo(branch, head_short, behind, int(ahead_text or 0), log)
+
+
+def _local_changes(root: Path) -> None:
+    _, status, _ = _git(root, "status", "--porcelain", "--untracked-files=no")
     changed = [ln[3:] for ln in status.splitlines() if ln.strip()]
     if changed:
         shown = ", ".join(changed[:5])
@@ -108,43 +135,52 @@ def run_update(check_only: bool = False, root: Path | None = None) -> int:
                      "Обновление ничего не тронуло. Зафиксируй правки "
                      "коммитом или перенеси их из папки программы и повтори.")
 
-    code, _, err = _git(root, "fetch", "--quiet", timeout=180)
-    if code != 0:
-        raise _git_fail(err, "получить коммиты с сервера")
-    _, behind_text, _ = _git(root, "rev-list", "--count", "HEAD..@{u}")
-    _, ahead_text, _ = _git(root, "rev-list", "--count", "@{u}..HEAD")
-    _, head_short, _ = _git(root, "rev-parse", "--short", "HEAD")
-    behind = int(behind_text or 0)
-    ahead = int(ahead_text or 0)
 
-    if behind and ahead:
+def install(root: Path | None = None, info: UpdateInfo | None = None) -> str:
+    """Поставить новые коммиты (только fast-forward); вернуть новый короткий хеш."""
+    root = Path(root) if root is not None else PROGRAM_DIR
+    info = info or check(root)
+    if info.behind and info.ahead:
         raise _error("Локальная ветка разошлась с сервером",
                      "Есть и свои коммиты, и чужие. Автоматическое обновление "
                      "их не переписывает — нужен ручной разбор (git log, merge или rebase).")
-    if not behind:
-        if ahead:
-            print(f"На сервере нового нет: ветка {branch} опережает его на {ahead} коммит(ов), "
-                  f"текущий {head_short}.")
+    _local_changes(root)
+    code, _, err = _git(root, "pull", "--ff-only", timeout=180)
+    if code != 0:
+        raise _git_fail(err, "поставить новые коммиты")
+    _, new_short, _ = _git(root, "rev-parse", "--short", "HEAD")
+    return new_short
+
+
+def run_update(check_only: bool = False, root: Path | None = None) -> int:
+    ensure_utf8_stdio()  # печатаем сами — кодировка наша забота, не main()
+    root = Path(root) if root is not None else PROGRAM_DIR
+    info = check(root, fetch=False)  # сперва дешёвые проверки, без сети
+    _local_changes(root)
+    info = check(root)
+    if info.behind and info.ahead:
+        raise _error("Локальная ветка разошлась с сервером",
+                     "Есть и свои коммиты, и чужие. Автоматическое обновление "
+                     "их не переписывает — нужен ручной разбор (git log, merge или rebase).")
+    if not info.behind:
+        if info.ahead:
+            print(f"На сервере нового нет: ветка {info.branch} опережает его на "
+                  f"{info.ahead} коммит(ов), текущий {info.head}.")
         else:
-            print(f"Лунапарк актуален: ветка {branch}, коммит {head_short}.")
+            print(f"Лунапарк актуален: ветка {info.branch}, коммит {info.head}.")
         return 0
 
-    _, log, _ = _git(root, "log", "--format=%h %s", "HEAD..@{u}")
-    lines = log.splitlines()
-    print(f"Есть обновление ветки {branch}: новых коммитов — {behind}.")
-    for ln in lines[:10]:
+    print(f"Есть обновление ветки {info.branch}: новых коммитов — {info.behind}.")
+    for ln in info.log[:10]:
         print(f"  {ln}")
-    if len(lines) > 10:
-        rest = len(lines) - 10
+    if len(info.log) > 10:
+        rest = len(info.log) - 10
         print(f"  … и ещё {rest}")
     if check_only:
         print("Поставить: luna update")
         return 0
 
-    code, _, err = _git(root, "pull", "--ff-only", timeout=180)
-    if code != 0:
-        raise _git_fail(err, "поставить новые коммиты")
-    _, new_short, _ = _git(root, "rev-parse", "--short", "HEAD")
-    print(f"Обновлено: {head_short} → {new_short}. "
-          "Если Луна сейчас запущена — перезапусти её.")
+    new_short = install(root, info)
+    print(f"Обновлено: {info.head} → {new_short}. "
+          "Если Луна сейчас открыта — /reload в чате применит обновление на лету.")
     return 0

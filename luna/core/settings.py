@@ -193,6 +193,12 @@ _f("ui.thinking", "choice", "summary",
    ("hidden", "summary", "full"))
 _f("ui.thinking_summary_s", "int", 15,
    "Раз в сколько секунд рассуждений делать пересказ быстрой ролью (и ещё раз — по концу размышления)")
+_f("update.check", "choice", "notify",
+   "Обновления с GitHub (git-копия): notify — проверять фоном и показывать «↻ обновление» в статусе, install — ставить и применять на лету самой, когда Луна свободна, off — только руками (/update)",
+   ("off", "notify", "install"))
+_f("update.interval_min", "int", 60, "Раз в сколько минут проверять обновления фоном")
+_f("update.in_newmoon", "bool", False,
+   "Проверять обновления фоном и в Новолунии (это запрос наружу, к GitHub)")
 _f("model.text_tool_calls", "bool", True,
    "Распознавать вызовы тулов, которые модель написала текстом или в мыслях (<tool_call>, <function=…>, <invoke>, токены DeepSeek), если штатных вызовов в ответе нет")
 _f("model.effort", "choice", "auto",

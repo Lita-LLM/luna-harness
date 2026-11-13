@@ -85,6 +85,8 @@ COMMANDS = [
     ("mode", "режим: /mode [normal|plan|review|auto|yolo], без аргумента — по кругу"),
     ("pult", "пульт ИИ: провайдеры, скан сети, ключи, модели и роли"),
     ("newmoon", "Новолуние: тёмный режим без следов, каждая модель — с твоего подтверждения"),
+    ("update", "обновить Луну с GitHub и применить на лету, сессия не теряется; /update check — только проверить"),
+    ("reload", "горячая перезагрузка: свежий код с диска, сессия и настройки остаются (и в Новолунии)"),
     ("model", "модель по ролям — выбиралка, смена на лету"),
     ("cost", "расход сессии: токены и стоимость"),
     ("usage", "расход и лимиты провайдера — что отдали события"),
@@ -137,6 +139,7 @@ COMMAND_RU = {
     "режим": "mode",
     "модель": "model", "модели": "model",
     "пульт": "pult", "провайдеры": "pult",
+    "обновить": "update", "обновление": "update", "перезагрузка": "reload",
     "новолуние": "newmoon",
     "стоимость": "cost", "расход": "usage",
     "контекст": "context",
@@ -188,6 +191,7 @@ COMMAND_ALIASES = {
     "quit": "exit", "q": "exit",
     "models": "model", "h": "help", "?": "help",
     "cls": "clear", "reset": "new",
+    "upgrade": "update", "hot": "reload", "restart": "reload",
 }
 _USER_ALIASES: dict = {}
 
@@ -466,7 +470,14 @@ class ChatApp:
         self.picker: Picker | None = None
         self._picker_kind = ""
         self._pult = None  # пульт ИИ (ui/pult.py) — создаётся первым /pult
-        self.relaunch = ""  # "newmoon" — run_chat перезапустит Луну в Новолунии
+        from .updater import Updater
+
+        self.updater = Updater(self)
+        self.relaunch = ""  # "newmoon" — перезапуск в Новолунии, "reload" — горячая перезагрузка
+        self.handoff = None  # снимок сессии для горячей перезагрузки (ui/updater.py)
+        # Записи сессии в памяти, когда журнала нет (Новолуние, журнал
+        # выключен): из них горячая перезагрузка поднимет ленту и память.
+        self.tape: list = []
         self._nm_stash = None  # сообщение, ждущее подтверждения модели
         self._nm_extra: list = []  # адреса вне ролей (запасные, пулы), просившие подтверждения
         self.edit_request = None      # путь файла, который run_chat откроет в редакторе
@@ -631,6 +642,7 @@ class ChatApp:
         self.poll_source()
 
     def poll_source(self) -> list:
+        self.updater.tick()
         events = []
         if self.trap is not None:
             # Ошибки фоновых потоков приходят событиями error — как от источника.
@@ -729,6 +741,8 @@ class ChatApp:
     def send_command(self, cmd: dict) -> None:
         if self.journal is not None:
             self.journal.append_command(cmd)
+        elif not self._restoring:
+            self.tape.append({"kind": "command", "data": dict(cmd)})
         self.sent_commands.append(dict(cmd))
         handler = getattr(self.source, "handle_command", None)
         if callable(handler):
@@ -1870,7 +1884,7 @@ class ChatApp:
 
     def next_timeout(self):
         if not self.needs_frame(self._clock()):
-            return None
+            return self.updater.timeout()
         if self._low_perf():
             return max(self.scheduler.frame_interval, self._LOW_INTERVAL)
         return self.scheduler.frame_interval
@@ -1899,6 +1913,8 @@ class ChatApp:
     def on_agent_event(self, ev: dict) -> None:
         if self.journal is not None and not self._restoring:
             self.journal.append_event(ev)
+        elif not self._restoring:
+            self.tape.append({"kind": "event", "data": ev})
         kind = ev.get("type")
         self._observe_panels(ev, kind)
         self._last_change = self._clock()
@@ -2259,6 +2275,10 @@ class ChatApp:
             self.open_pult(rest)
         elif cmd == "/newmoon":
             self.newmoon_command(rest)
+        elif cmd == "/reload":
+            self.updater.reload_command()
+        elif cmd == "/update":
+            self.updater.update_command(rest)
         elif cmd == "/clear":
             self.entries.clear()
             self._add(Entry("notice", text="Лента очищена."))
@@ -3784,6 +3804,8 @@ class ChatApp:
                 self.open_theme_picker()
             elif name == "newmoon":
                 self.open_newmoon_confirm()
+            elif name == "update":
+                self.updater.update_command()
         elif kind == "block":
             self.panel_focus = False
             self._block_sel = action[1]
@@ -4934,6 +4956,8 @@ class ChatApp:
         ]
         if _nm.active():
             segments.insert(0, (" 🌑 новолуние ·", ("status", "newmoon"), "core"))
+        if self.updater.available:
+            segments.insert(0, (" ↻ обновление ·", ("status", "update"), "core"))
         if self.layout.leaves() and not self.panel_focus:
             segments.append((" · ", None, "extra"))
             segments.append(("F6 — панели", ("key", Key("f6")), "extra"))
@@ -5330,12 +5354,20 @@ def _open_session(settings, data, continue_last: bool, fake: bool,
 
 
 RELAUNCH_NEWMOON = 77  # код run_chat: перезапуститься в Новолунии
+RELAUNCH_RELOAD = 78   # код run_chat: горячая перезагрузка, снимок — в HANDOFF
+HANDOFF = None         # последний снимок сессии (ui/updater.py: Updater.snapshot)
 
 
 def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
              continue_last: bool = False, resume: str | None = None,
-             open_pult: bool = False, newmoon: bool = False) -> int:
-    """Полноэкранный чат: терминал, цикл ввода, источник событий."""
+             open_pult: bool = False, newmoon: bool = False,
+             handoff: dict | None = None) -> int:
+    """Полноэкранный чат: терминал, цикл ввода, источник событий.
+
+    handoff — снимок сессии от горячей перезагрузки: без заставки и без
+    выбора сессии, лента и память — из него (ui/updater.py).
+    """
+    global HANDOFF
     import sys
 
     from ..core import newmoon as _nm
@@ -5351,6 +5383,10 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
         settings.ephemeral = True  # настройки режима — только в памяти
         settings.set("chat.session_log", False)
         settings.set("ui.theme", "newmoon")
+    if handoff:
+        splash_first = False
+        settings._session.update(handoff.get("settings_session") or {})
+        _nm.restore_confirmed(handoff.get("confirmed") or ())
     bus = EventBus()
     term = Terminal(settings=settings)
     if not term.caps.is_tty:
@@ -5372,8 +5408,15 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
     # Пока экран наш, ошибки потоков и stderr уходят в лог, а не поверх
     # ленты (ЗАДАЧА-06, п. 2): лог — LUNA_HOME/logs/chat-<время>.log.
     trap = ErrorTrap(data.logs / ("chat-" + time.strftime("%Y%m%d-%H%M%S") + ".log"))
-    journal, restored, picker_first, open_note = _open_session(
-        settings, data, continue_last, fake, resume)
+    if handoff:
+        journal, restored, picker_first, open_note = None, list(handoff.get("tape") or []), False, None
+        if handoff.get("journal_path"):
+            from ..core.sessions import SessionJournal
+
+            journal, restored = SessionJournal.resume(data, handoff["journal_path"])
+    else:
+        journal, restored, picker_first, open_note = _open_session(
+            settings, data, continue_last, fake, resume)
     with RunLock(data.root):
         with term:
             trap.install()
@@ -5409,6 +5452,18 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                 if restored:
                     app.restore(restored)
                     app.attach_history(restored)
+                if handoff:
+                    if journal is None:
+                        app.tape = list(restored)
+                    if handoff.get("titled"):
+                        app.session_title = str(handoff.get("title") or "")
+                        app._session_titled = True
+                    if handoff.get("draft"):
+                        app.editor.set_text(str(handoff["draft"]))
+                    app._add(Entry("notice", text=handoff.get("note") or
+                                   "↻ Луна перезагрузилась на лету: свежий код, сессия на месте."))
+                elif restored:
+                    pass
                 elif picker_first:
                     app._want_journal = True
                     app.open_sessions_picker()
@@ -5421,7 +5476,9 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                         note = "Продолжить нечего: прошлых сессий в этом каталоге нет."
                     app._add(Entry("notice", text=note))
                 # luna setup и первый запуск без модели — сразу в пульт ИИ.
-                if open_pult or (not fake and not settings.get("model.main")):
+                if handoff:
+                    pass
+                elif open_pult or (not fake and not settings.get("model.main")):
                     app.open_pult()
                 elif _nm.active():
                     app._add(Entry("notice", text=phrases.event_phrase("newmoon")
@@ -5453,6 +5510,13 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                     screen.present(buf, cursor=cursor)
             finally:
                 trap.uninstall()
+                if app is not None:
+                    # Снимок — всегда: упадёт новый код после горячей
+                    # перезагрузки — прежний поднимется с последнего места.
+                    try:
+                        HANDOFF = app.handoff or app.updater.snapshot()
+                    except Exception:  # noqa: BLE001
+                        pass
                 current = app.journal if app is not None else journal
                 if current is not None:
                     current.close()
@@ -5466,6 +5530,8 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                         drop_empty_sessions(data, keep_path=keep)
                 except Exception:  # noqa: BLE001 — выход важнее уборки
                     pass
+    if app is not None and getattr(app, "relaunch", "") == "reload":
+        return RELAUNCH_RELOAD
     if _nm.active():
         # Экран и прокрутка терминала — чисто; временная папка — прочь.
         sys.stdout.write("[2J[3J[H")

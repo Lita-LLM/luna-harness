@@ -762,6 +762,19 @@ class AgentHost:
             except Exception:  # noqa: BLE001
                 pass
 
+    def busy_children(self) -> int:
+        """Сколько детей сейчас работает (горячая перезагрузка ждёт нуля)."""
+        busy = 0
+        for child in list(self.children.values()):
+            if child.dismissed:
+                continue
+            if child.kind == "assistant":
+                if child.turn_active or (child.thread is not None and child.thread.is_alive()):
+                    busy += 1
+            elif child.turn_active or child.pending > 0:
+                busy += 1
+        return busy
+
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Дождаться, пока все дети хозяина закончат ходы (для try и тестов)."""
         deadline = time.monotonic() + timeout

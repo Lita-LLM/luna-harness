@@ -14,7 +14,7 @@ from luna.core.secrets import Secrets
 from luna.core.settings import Settings
 from luna.headless import run_headless
 from luna.router.core import ProviderConfig, Router
-from luna.setup import run_models, run_setup
+from luna.setup import run_models
 
 
 def fake_router(settings, secrets) -> Router:
@@ -43,24 +43,6 @@ class SetupTest(unittest.TestCase):
         self.settings = Settings(home=self.tmp / "home", cwd=self.tmp)
         self.secrets = Secrets(self.tmp / "home" / "secrets.json")
         self.outputs: list[str] = []
-
-    def test_setup_flow_saves_key_only_to_secrets(self):
-        answers = iter(["fake", "", "1", "", "", ""])
-        key_value = "sk-setup-secret-111222"
-        code = run_setup(settings=self.settings, secrets=self.secrets,
-                         input_fn=lambda prompt="": next(answers),
-                         getpass_fn=lambda prompt="": key_value,
-                         router=fake_router(self.settings, self.secrets),
-                         out=self.outputs.append)
-        self.assertEqual(code, 0)
-        self.assertEqual(self.settings.get("model.provider"), "fake")
-        main_ref = self.settings.get("model.main")
-        self.assertTrue(main_ref.startswith("fake:"))
-        self.assertEqual(self.secrets.get("provider:fake"), key_value)
-        joined = "\n".join(self.outputs)
-        self.assertNotIn(key_value, joined)
-        settings_text = (self.tmp / "home" / "settings.json").read_text(encoding="utf-8")
-        self.assertNotIn(key_value, settings_text)
 
     def test_models_command_reports_roles_and_liveness(self):
         self.settings.set("model.provider", "fake")

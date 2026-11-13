@@ -71,6 +71,7 @@ class Picker:
         self._input_prompt = ""
         self._input_text = ""
         self._input_action = None
+        self._input_secret = False
 
     # --- состояние ---------------------------------------------------------
 
@@ -112,10 +113,18 @@ class Picker:
         self._confirm_prompt = prompt
         self._confirm_action = action
 
-    def ask_input(self, prompt: str, action, initial: str = "") -> None:
+    def ask_input(self, prompt: str, action, initial: str = "",
+                  secret: bool = False) -> None:
+        """Поле ввода; secret — ключи: на экране точки, не текст."""
         self._input_prompt = prompt
         self._input_text = initial
         self._input_action = action
+        self._input_secret = secret
+
+    def paste(self, text: str) -> None:
+        """Вставка в поле ввода: одной строкой, переводы строк — прочь."""
+        if self.mode == "input":
+            self._input_text += " ".join((text or "").split()) if not self._input_secret                 else "".join((text or "").split())
 
     # --- клавиши -------------------------------------------------------------
 
@@ -137,10 +146,13 @@ class Picker:
                 action, self._input_action = self._input_action, None
                 self._input_prompt = ""
                 self._input_text = ""
+                self._input_secret = False
                 return ("input", text, action)
             if key.name == "esc":
                 self._input_prompt = ""
+                self._input_text = ""
                 self._input_action = None
+                self._input_secret = False
                 return None
             if key.name == "backspace":
                 self._input_text = self._input_text[:-1]
@@ -232,7 +244,8 @@ class Picker:
             lines.append([("Enter — да · Esc — назад", "hint")])
             return [_fit_spans(line, w) for line in lines], None
         if self.mode == "input":
-            lines.append([(self._input_prompt + self._input_text + "▌", "accent")])
+            shown = ("•" * min(len(self._input_text), 24)) if self._input_secret                 else self._input_text
+            lines.append([(self._input_prompt + shown + "▌", "accent")])
             lines.append([("Enter — создать · Esc — назад", "hint")])
             return [_fit_spans(line, w) for line in lines], None
         current = self.current()

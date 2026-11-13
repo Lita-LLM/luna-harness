@@ -83,6 +83,7 @@ _STYLE_MAP = {
 COMMANDS = [
     ("help", "выбиралка всех команд с поиском"),
     ("mode", "режим: /mode [normal|plan|review|auto|yolo], без аргумента — по кругу"),
+    ("pult", "пульт ИИ: провайдеры, скан сети, ключи, модели и роли"),
     ("model", "модель по ролям — выбиралка, смена на лету"),
     ("cost", "расход сессии: токены и стоимость"),
     ("usage", "расход и лимиты провайдера — что отдали события"),
@@ -134,6 +135,7 @@ COMMAND_RU = {
     "помощь": "help", "справка": "help",
     "режим": "mode",
     "модель": "model", "модели": "model",
+    "пульт": "pult", "провайдеры": "pult",
     "стоимость": "cost", "расход": "usage",
     "контекст": "context",
     "статус": "status",
@@ -179,6 +181,7 @@ for _ru, _lat in COMMAND_RU.items():
 # Codex — это наши /sessions. Свои алиасы — настройка ui.command_aliases.
 COMMAND_ALIASES = {
     "resume": "sessions", "history": "sessions",
+    "providers": "pult", "provider": "pult", "ai": "pult", "setup": "pult",
     "quit": "exit", "q": "exit",
     "models": "model", "h": "help", "?": "help",
     "cls": "clear", "reset": "new",
@@ -459,6 +462,7 @@ class ChatApp:
         # Выбиралка поверх ленты (/sessions, /manners) и её дела (ЗАДАЧА-10):
         self.picker: Picker | None = None
         self._picker_kind = ""
+        self._pult = None  # пульт ИИ (ui/pult.py) — создаётся первым /pult
         self.edit_request = None      # путь файла, который run_chat откроет в редакторе
         self._edit_manner_id = ""
         self._pending_switch = None   # путь сессии: переключиться по концу хода
@@ -1057,6 +1061,18 @@ class ChatApp:
                                "панели: F6 или Alt+M",
                           preview_lines=0)
 
+    def open_pult(self, arg: str = "") -> None:
+        """/pult: провайдеры, скан сети, ключи и модели (ui/pult.py);
+        /pult scan — сразу скан."""
+        from .pult import Pult
+
+        if self._pult is None:
+            self._pult = Pult(self)
+        if arg.strip() in ("scan", "скан"):
+            self._pult.start_scan("fast")
+        else:
+            self._pult.open()
+
     def open_models_picker(self) -> None:
         """/model: роли выбиралкой; Enter — задать ссылку роли на лету."""
         from .panels.models import ROLES
@@ -1443,6 +1459,10 @@ class ChatApp:
     def _route_picker_action(self, action) -> None:
         """Действие выбиралки — общий путь для клавиш и кликов мыши."""
         kind = action[0]
+        if self._picker_kind == "pult" and self._pult is not None:
+            # Пульт ведёт свои экраны сам: Esc у него — шаг назад.
+            self._pult.on_action(action)
+            return
         if kind == "close":
             self.picker = None
             if self.journal is None and self._want_journal:
@@ -2106,6 +2126,8 @@ class ChatApp:
         rest = text[len(raw):].strip()
         if cmd in ("/exit", "/quit"):
             self.done = True
+        elif cmd == "/pult":
+            self.open_pult(rest)
         elif cmd == "/clear":
             self.entries.clear()
             self._add(Entry("notice", text="Лента очищена."))
@@ -3450,6 +3472,12 @@ class ChatApp:
 
     def handle_paste(self, paste: Paste) -> None:
         if self.pending_guard is not None and not self.guard_editing:
+            return
+        if self.picker is not None and self.picker.mode == "input":
+            # Вставка — в поле выбиралки (ключ в пульте, путь, имя), а не
+            # в поле чата под ней.
+            self.picker.paste(paste.text)
+            self._last_change = self._clock()
             return
         self._insert_paste(paste.text)
         self._update_completions()
@@ -5165,7 +5193,8 @@ def _open_session(settings, data, continue_last: bool, fake: bool,
 
 
 def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool = True,
-             continue_last: bool = False, resume: str | None = None) -> int:
+             continue_last: bool = False, resume: str | None = None,
+             open_pult: bool = False) -> int:
     """Полноэкранный чат: терминал, цикл ввода, источник событий."""
     from .errtrap import ErrorTrap
     from .splash import play_splash
@@ -5240,6 +5269,9 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                     else:
                         note = "Продолжить нечего: прошлых сессий в этом каталоге нет."
                     app._add(Entry("notice", text=note))
+                # luna setup и первый запуск без модели — сразу в пульт ИИ.
+                if open_pult or (not fake and not settings.get("model.main")):
+                    app.open_pult()
                 app.start_source()
                 while not app.done:
                     events = term.read_events(timeout=app.next_timeout())

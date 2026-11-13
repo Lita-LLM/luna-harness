@@ -56,7 +56,7 @@ USAGE = """Лунапарк — сессионный ИИ-агент.
   luna try crew             команда на фальшивой модели: спутники, лидер, почта, бюджет
   luna try starfall [N]     звездопад на фальшивой модели: рой ячеек, смета, сводка, замеры
   luna update [--check]     обновление git-копии программы (--check — только проверить)
-  luna setup                настройка провайдера и моделей (ключ — скрытым вводом)
+  luna setup                пульт ИИ: провайдеры, скан сети, ключи, модели (то же, что /pult в чате)
   luna models               что из моделей настроено и живо ли
   luna manners              манеры речи: в терминале — выбиралка; list — список текстом,
                             show <имя> — текст, use <имя> — включить, off — свой голос,
@@ -526,15 +526,11 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "untrust":
             return _cmd_trust(rest, untrust=True)
         if cmd == "setup":
-            from .core.paths import DataDir
-            from .core.secrets import Secrets
-            from .core.settings import Settings
-            from .setup import run_setup
+            # Настройка живёт в пульте ИИ внутри Луны (/pult): провайдеры,
+            # скан сети, ключи скрытым полем, модели, поиск и пулы.
+            from .ui.app import run_fullscreen
 
-            data = DataDir()
-            data.ensure()
-            return run_setup(settings=Settings(), secrets=Secrets(data.secrets),
-                             ask_search_keys=True, ask_pool_keys=True)
+            return run_fullscreen(_T0, open_pult=True)
         if cmd == "pool":
             from .core.paths import DataDir
             from .core.secrets import Secrets

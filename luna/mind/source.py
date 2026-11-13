@@ -39,7 +39,7 @@ class AgentSource:
         model = getattr(self._agent, "_model_label", lambda: "")()
         if not model:
             self._events.put({"type": "notice", "level": "warn", "ts": time.time(),
-                              "text": "Модель не настроена — запусти luna setup в обычном терминале."})
+                              "text": "Модель не настроена — открой /pult (пульт ИИ): найди провайдера сканом сети или добавь, выбери модель."})
 
     def has_pending(self) -> bool:
         return not self._events.empty() or self._busy()

@@ -154,11 +154,11 @@ class EffortRouterTest(unittest.TestCase):
         def __init__(self):
             self.bodies = []
 
-        def stream_lines(self, url, body, headers):
+        def stream_lines(self, url, body, headers, timeout=None):
             self.bodies.append(body)
             return iter([])
 
-        def post_json(self, url, body, headers):
+        def post_json(self, url, body, headers, timeout=None):
             self.bodies.append(body)
             return {"choices": [{"message": {"content": "ок"}}]}
 
@@ -420,11 +420,12 @@ class ChatThinkingTest(unittest.TestCase):
         app.on_agent_event({"type": "thinking.summary",
                             "text": "Пересказ одной строкой", "seconds": 3})
         self.assertIn("Пересказ одной строкой", feed_text(app))
-        # По кругу: summary → hidden → full.
+        # По кругу: summary → folded → full; hidden — только явно.
         app.submit_text("/thinking")
-        self.assertEqual(app.settings.get("ui.thinking"), "hidden")
-        self.assertFalse(app.settings.get("ui.show_thinking"))
-        self.assertNotIn("думала", feed_text(app))
+        self.assertEqual(app.settings.get("ui.thinking"), "folded")
+        self.assertIn("думала", feed_text(app))
+        self.assertNotIn("Пересказ одной строкой", feed_text(app))
+        self.assertNotIn("секретная мысль", feed_text(app))
         app.submit_text("/thinking")
         self.assertEqual(app.settings.get("ui.thinking"), "full")
         self.assertIn("секретная мысль", feed_text(app))
@@ -435,9 +436,12 @@ class ChatThinkingTest(unittest.TestCase):
         self.assertEqual(app._thinking_mode(), "hidden")
         app.submit_text("/thinking summary")
         self.assertEqual(app._thinking_mode(), "summary")
-        # Alt+O — тот же круг на лету: summary → hidden.
+        # Alt+O — тот же круг на лету: summary → folded.
         app.handle_key(key("o", "o", mods=frozenset({"alt"})))
-        self.assertEqual(app._thinking_mode(), "hidden")
+        self.assertEqual(app._thinking_mode(), "folded")
+        app.submit_text("/thinking hidden")
+        self.assertFalse(app.settings.get("ui.show_thinking"))
+        self.assertNotIn("думала", feed_text(app))
 
     def test_effort_command_and_key(self):
         app = make_app(self)

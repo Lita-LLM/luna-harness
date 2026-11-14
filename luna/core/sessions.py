@@ -420,7 +420,9 @@ def build_state(records: list) -> dict:
             continue
         if kind == "command":
             if data.get("type") == "user.message":
-                text = str(data.get("text") or "")
+                from .envelope import compose
+
+                text = compose(str(data.get("text") or ""), data.get("notes"))
                 delivery = data.get("delivery") or "inject"
                 if active and delivery == "inject":
                     # Вставка в идущий ход: в историю — там, где её взял
@@ -473,6 +475,17 @@ def build_state(records: list) -> dict:
                             "content": str(data.get("output") or "")})
         elif etype == "turn.start":
             active = True
+        elif etype == "session.unsent":
+            # /undo снял непрочитанное сообщение: из ожидающих — последнее такое.
+            gone = str(data.get("text") or "")
+            for pool in (injects, deferred, carry):
+                hit = next((i for i in range(len(pool) - 1, -1, -1)
+                            if pool[i] == gone or (gone and pool[i].endswith(gone))), None)
+                if hit is not None:
+                    pool.pop(hit)
+                    break
+        elif etype == "session.redone" and data.get("message") == "unsent":
+            (injects if active else carry).append(str(data.get("text") or ""))
         elif etype == "user.inject":
             if injects:
                 injects.pop(0)

@@ -95,6 +95,9 @@ class Agent:
         # поставить клиент (agent.journal = SessionJournal), тогда откат
         # и сжатие пишут в него записи своих видов (kind: rewind/compact).
         self._context_pct = 0.0
+        # Символов на токен — подстраивается по настоящему usage; нужен для
+        # оценки, когда usage нет (прерванный стрим, загрузка, откат, сжатие).
+        self._chars_per_token = 3.5
         self._turn_marks: list = []
         self._redo_stack: list = []
         self._compact_pending: str | None = None
@@ -143,19 +146,22 @@ class Agent:
     def handle_command(self, command: dict):
         kind = command.get("type")
         if kind == "user.message":
+            from ..core.envelope import compose
+
             text = command.get("text", "")
-            # Почта команды (ЗАДАЧА-11): письма и отчёты детей — пометками
-            # в начало хода хозяина, как замечания Ниблера.
+            # Пометки не от человека (Ниблер из клиента, почта команды
+            # ЗАДАЧА-11, фон) — в подписанный конверт перед его словами.
+            notes = [dict(n) for n in command.get("notes") or [] if isinstance(n, dict)]
             host = getattr(self, "_agents_host", None)
             if host is not None:
-                notes = host.take_owner_notes()
-                if notes:
-                    text = notes + ("\n\n" + text if text else "")
+                notes += [{"from": "mail", "text": n} for n in host.take_owner_notes_list()]
             if self._bg_notes:
-                notes, self._bg_notes = "\n".join("[фон] " + n for n in self._bg_notes), []
-                text = notes + ("\n\n" + text if text else "")
+                notes += [{"from": "bg", "text": n} for n in self._bg_notes]
+                self._bg_notes = []
+            text = compose(text, notes)
             if self._turn_active:
-                item = {"text": text, "attachments": command.get("attachments") or []}
+                item = {"text": text, "attachments": command.get("attachments") or [],
+                        "raw": command.get("text", "")}  # /undo вернёт в поле это
                 # delivery (ЗАДАЧА-18, docs/СОБЫТИЯ.md): inject — подмешать
                 # в текущий ход перед следующим вызовом модели; queue —
                 # отдельным ходом после; interrupt — прервать и сразу им.
@@ -437,11 +443,43 @@ class Agent:
             price_in = float(self.settings.get("model.price_in", 0.0) or 0.0)
             price_out = float(self.settings.get("model.price_out", 0.0) or 0.0)
         cost = (self._total_in * price_in + self._total_out * price_out) / 1_000_000.0
-        pct = min(100.0, 100.0 * result.usage.input / context_tokens) if context_tokens else 0.0
+        if result.usage.input > 0:
+            pct = min(100.0, 100.0 * result.usage.input / context_tokens) if context_tokens else 0.0
+            chars = self._history_chars()
+            if chars:
+                self._chars_per_token = max(1.0, min(8.0, chars / result.usage.input))
+        else:
+            # Прерванный стрим и часть провайдеров не отдают usage — ноль
+            # был бы враньём, лучше оценка по длине истории.
+            pct = self._estimate_pct()
         self._context_pct = pct
         self.publish({"type": "usage", "model": result.model or self._model_label(),
                       "input": result.usage.input, "output": result.usage.output,
                       "cost": round(cost, 6), "context_pct": round(pct, 2)})
+
+    def _history_chars(self) -> int:
+        from .compact import history_chars
+
+        return history_chars(self._history)
+
+    def _estimate_pct(self) -> float:
+        window = 128000
+        if self.settings is not None:
+            window = int(self.settings.get("model.context_tokens", 128000) or 128000)
+        tokens = self._history_chars() / self._chars_per_token
+        return min(100.0, 100.0 * tokens / window) if window else 0.0
+
+    def publish_context(self) -> None:
+        """Оценка заполнения контекста — экрану, без вызова модели."""
+        self._context_pct = self._estimate_pct()
+        price_in = price_out = 0.0
+        if self.settings is not None:
+            price_in = float(self.settings.get("model.price_in", 0.0) or 0.0)
+            price_out = float(self.settings.get("model.price_out", 0.0) or 0.0)
+        cost = (self._total_in * price_in + self._total_out * price_out) / 1_000_000.0
+        self.publish({"type": "usage", "model": self._model_label(), "input": 0,
+                      "output": 0, "cost": round(cost, 6), "estimate": True,
+                      "context_pct": round(self._context_pct, 2)})
 
     # --- история и системный промпт ---
 
@@ -896,8 +934,94 @@ class Agent:
         return out
 
     def undo(self):
-        """Откатить последний ход целиком: файлы и разговор."""
+        """Откатить последнее сообщение человека, каким бы оно ни было.
+
+        Порядок — от свежего: ещё не прочитанное моделью (вставка в идущий
+        ход, очередь, перенос) — просто снимается, даже посреди хода;
+        вставка, которую модель уже взяла, — разговор режется перед ней
+        (файлы не трогаем: чекпоинты — по ходам); сообщение, начавшее
+        ход, — откат хода целиком, как раньше.
+        """
+        for store, where in ((self._queue, "queue"), (self._deferred, "deferred"),
+                             (self._carry, "carry")):
+            if store:
+                item = store.pop()
+                self._redo_stack.append({"kind": "unsent", "item": item, "where": where})
+                del self._redo_stack[:-5]
+                text = str(item.get("raw", item.get("text")) or "")
+                self.publish({"type": "session.unsent", "text": text})
+                if where == "carry":
+                    self.publish({"type": "user.carry", "count": len(self._carry)})
+                self.publish({"type": "notice", "level": "info",
+                              "text": "Сообщение снято, модель его не видела. "
+                                      "/redo — вернуть."})
+                return None
+        if self._active:
+            self.publish({"type": "notice", "level": "warn",
+                          "text": "Идёт ход — откатить можно только ещё не "
+                                  "прочитанное; остальное — когда ход закончится."})
+            return None
+        last_user = next((i for i in range(len(self._history) - 1, -1, -1)
+                          if self._history[i].get("role") == "user"), None)
+        turn_starts = {i for _t, i in self._turn_marks}
+        if last_user is not None and last_user not in turn_starts \
+                and self._turn_marks and last_user > self._turn_marks[-1][1]:
+            return self._undo_inject(last_user)
         return self.rewind_to(self._turn - 1, "both")
+
+    def _undo_inject(self, index: int):
+        """Срезать разговор перед вставкой, которую модель уже прочла."""
+        tail = self._history[index:]
+        self._history = self._history[:index]
+        self._last_sig = ""
+        self._same_count = 0
+        self._redo_stack.append({"kind": "inject", "history_tail": tail,
+                                 "cut_index": index})
+        del self._redo_stack[:-5]
+        content = tail[0].get("content")
+        text = content if isinstance(content, str) else ""
+        self._journal("rewind", {"to_turn": self._turn, "from_turn": self._turn,
+                                 "scope": "talk", "message": True, "files": [],
+                                 "skipped": []})
+        self.publish({"type": "session.rewound", "turn": self._turn, "scope": "talk",
+                      "message": True, "text": text, "files": 0})
+        self.publish_context()
+        self.publish({"type": "notice", "level": "info",
+                      "text": "Снято сообщение, отправленное во время хода: модель "
+                              "забыла его и всё, что было после. Файлы не тронуты. "
+                              "/redo — вернуть."})
+        return None
+
+    def _redo_message(self, entry: dict):
+        if entry["kind"] == "unsent":
+            if self._active and entry["where"] != "carry":
+                getattr(self, "_" + entry["where"]).append(entry["item"])
+            else:
+                self._carry.append(entry["item"])
+                self.publish({"type": "user.carry", "count": len(self._carry)})
+            self._redo_stack.pop()
+            self.publish({"type": "session.redone", "message": "unsent",
+                          "text": str(entry["item"].get("raw", entry["item"].get("text")) or "")})
+            self.publish({"type": "notice", "level": "info",
+                          "text": "Сообщение возвращено — модель его получит."})
+            return None
+        if self._active:
+            self.publish({"type": "notice", "level": "warn",
+                          "text": "Идёт ход — redo возможен, когда он закончится."})
+            return None
+        self._redo_stack.pop()
+        if len(self._history) != entry["cut_index"]:
+            self.publish({"type": "notice", "level": "info",
+                          "text": "Разговор изменился после отката — вернуть нельзя."})
+            return None
+        self._history = self._history + entry["history_tail"]
+        self._journal("redo", {"turn": self._turn, "scope": "talk", "message": True,
+                               "files": []})
+        self.publish({"type": "session.redone", "turn": self._turn, "message": "inject"})
+        self.publish_context()
+        self.publish({"type": "notice", "level": "info",
+                      "text": "Сообщение и то, что было после, — снова в памяти."})
+        return None
 
     def rewind_command(self, turn=None, scope: str = "both"):
         """Команда rewind: без номера — список ходов, с номером — откат."""
@@ -992,6 +1116,8 @@ class Agent:
                                  "skipped": report["conflicts"] + report["failed"]})
         self.publish({"type": "session.rewound", "turn": target, "scope": scope,
                       "files": len(report["restored"])})
+        if scope in ("talk", "both"):
+            self.publish_context()
         parts = ["Откат к состоянию после хода " + str(target) +
                  " (был ход " + str(from_turn) + ")."]
         if scope in ("talk", "both") and removed_history:
@@ -1037,6 +1163,8 @@ class Agent:
 
     def redo(self):
         """Вернуть последний откат (хотя бы на шаг): файлы и разговор."""
+        if self._redo_stack and self._redo_stack[-1].get("kind") in ("unsent", "inject"):
+            return self._redo_message(self._redo_stack[-1])
         if self._active:
             self.publish({"type": "notice", "level": "warn",
                           "text": "Идёт ход — redo возможен, когда он закончится."})
@@ -1077,6 +1205,7 @@ class Agent:
         if talk_back:
             # Лента возвращает срезанный откатом хвост по этому событию.
             self.publish({"type": "session.redone", "turn": entry["from_turn"]})
+            self.publish_context()
         parts = ["Откат возвращён: снова состояние после хода " +
                  str(entry["from_turn"]) + "."]
         if restored_files:
@@ -1148,7 +1277,7 @@ class Agent:
             template = str(self.settings.get("compact.prompt", "") or "")
         before_chars = history_chars(self._history)
         before_count = len(self._history)
-        before_pct = round(self._context_pct, 1)
+        before_pct = round(self._context_pct or self._estimate_pct(), 1)
         # Начало и конец — событиями: чат катит волну прилива, пока идёт сводка.
         self.publish({"type": "context.compacting", "before_pct": before_pct})
         try:
@@ -1171,7 +1300,8 @@ class Agent:
         self._turn_marks = outcome["marks"]
         self._redo_stack.clear()
         after_chars = history_chars(self._history)
-        after_pct = round(before_pct * after_chars / before_chars, 1) if before_chars else 0.0
+        after_pct = round(before_pct * after_chars / before_chars, 1) if before_chars \
+            else round(self._estimate_pct(), 1)
         self._context_pct = after_pct
         self._journal("compact", {"before_pct": before_pct, "after_pct": after_pct,
                                   "summary": outcome["summary"],
@@ -1181,7 +1311,11 @@ class Agent:
                       "after_pct": after_pct,
                       "before_messages": before_count,
                       "after_messages": len(self._history),
-                      "summarized_turns": outcome["summarized"]})
+                      "summarized_turns": outcome["summarized"],
+                      # Сводку и список «перечитать» видит и человек (клик
+                      # по разделителю прилива), а не только модель.
+                      "summary": outcome["summary"],
+                      "reread": outcome.get("reread") or []})
         self.publish({"type": "notice", "level": "info",
                       "text": "Прилив: контекст сжат — было ~" + str(before_pct) +
                               "%, стало ~" + str(after_pct) + "% (сводкой заменено ходов: " +

@@ -176,7 +176,10 @@ class Router:
             url = adapter.url()
         gen_probe = getattr(self.http, "cancel_generation", None)
         gen0 = gen_probe() if callable(gen_probe) else None
-        lines = self.http.stream_lines(url, body, adapter.headers(cfg.api_key))
+        # Долгий префилл (большой контекст на локальной модели) — тишина
+        # до первого токена; потолок тишины настраивается.
+        wait = float(self.settings.get("model.timeout_s", 300) or 300) if self.settings else None
+        lines = self.http.stream_lines(url, body, adapter.headers(cfg.api_key), timeout=wait)
         try:
             result = adapter.parse_stream(lines, model, emit)
         except Exception:
@@ -190,7 +193,7 @@ class Router:
             data = self.http.post_json(url if cfg.kind != "gemini" else adapter.full_url(model),
                                        adapter.body(model, messages, tools, False,
                                                     extra=fields),
-                                       adapter.headers(cfg.api_key))
+                                       adapter.headers(cfg.api_key), timeout=wait)
             result = adapter.parse_full(data, model)
         if note:
             result.notes.append(note)

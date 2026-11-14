@@ -36,6 +36,7 @@ class AgentSource:
             self._agent.load_history(self._pending_history, **self._pending_state)
             self._pending_history = None
         self._agent.listen(self._events.put)
+        self._publish_context()
         model = getattr(self._agent, "_model_label", lambda: "")()
         if not model:
             self._events.put({"type": "notice", "level": "warn", "ts": time.time(),
@@ -124,6 +125,13 @@ class AgentSource:
         except Exception:  # noqa: BLE001 — команда не мешает продолжению сессии
             pass
         self._agent.listen(self._events.put)
+        self._publish_context()
+
+    def _publish_context(self) -> None:
+        # Без этого экран до первого ответа модели показывал бы 0%.
+        pub = getattr(self._agent, "publish_context", None)
+        if callable(pub) and getattr(self._agent, "_history", None):
+            pub()
 
     def set_journal(self, journal) -> None:
         """Журнал сессии для записей отката и сжатия (kind: rewind/compact)."""

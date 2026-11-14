@@ -308,8 +308,13 @@ class ChatPanelsIntegrationTest(unittest.TestCase):
         app.submit_text("привет")
         cmd = app.sent_commands[-1]
         self.assertEqual(cmd["type"], "user.message")
-        self.assertTrue(cmd["text"].startswith("[Ниблер:"))
-        self.assertTrue(cmd["text"].endswith("привет"))
+        self.assertEqual(cmd["text"], "привет")
+        self.assertEqual(cmd["notes"][0]["from"], "nibbler")
+        from luna.core.envelope import compose
+
+        wrapped = compose(cmd["text"], cmd["notes"])
+        self.assertIn("не человек", wrapped)
+        self.assertTrue(wrapped.endswith("<человек>\nпривет\n</человек>"))
         user_entries = [e for e in app.entries if e.kind == "user"]
         self.assertEqual(user_entries[-1].text, "привет")
 

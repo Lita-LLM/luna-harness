@@ -107,7 +107,7 @@ class CommandsTest(unittest.TestCase):
         app = make_app(self)
         app.submit_text("/details")
         self.assertFalse(app.settings.get("ui.details"))
-        app.submit_text("/thinking")
+        app.submit_text("/thinking hidden")
         self.assertFalse(app.settings.get("ui.show_thinking"))
         # Выключенные детали прячут вывод тула и рассуждения из ленты.
         app.on_agent_event({"type": "agent.thinking", "text": "думаю"})

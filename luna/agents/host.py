@@ -699,11 +699,12 @@ class AgentHost:
 
     def take_owner_notes(self) -> str:
         """Письма и отчёты детей хозяину: в начало его следующего хода."""
-        notes = self.root._owner_notes
-        if not notes:
-            return ""
+        return "\n".join("[Почта команды] " + note for note in self.take_owner_notes_list())
+
+    def take_owner_notes_list(self) -> list:
+        notes = list(self.root._owner_notes or [])
         self.root._owner_notes = []
-        return "\n".join("[Почта команды] " + note for note in notes)
+        return notes
 
     # --- управление спутниками ------------------------------------------------
 

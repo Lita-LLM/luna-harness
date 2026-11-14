@@ -190,5 +190,62 @@ class VisualArrowsTest(unittest.TestCase):
         self.assertEqual(ed.offset_at(4, 0, 99), 3)  # конец переноса — на своей строке
 
 
+class UndoEveryMessageTest(TempHomeBase):
+    def _agent(self, router):
+        agent = Agent(settings=self.settings, secrets=self.secrets,
+                      router=router, cwd=self.work)
+        agent.publish = self.events.append
+        return agent
+
+    def test_neprochitannoe_snimaetsya_dazhe_v_hodu(self):
+        router = BlockingRouter(["ответ"])
+        agent = self._agent(router)
+        worker = threading.Thread(target=lambda: agent.run_turn("старт"), daemon=True)
+        worker.start()
+        self.assertTrue(router.entered.wait(5))
+        agent.handle_command({"type": "user.message", "text": "лишнее",
+                              "delivery": "inject"})
+        agent.undo()
+        self.assertEqual(agent._queue, [])
+        self.assertTrue(any(e.get("type") == "session.unsent" and e["text"] == "лишнее"
+                            for e in self.events))
+        agent.redo()
+        self.assertEqual([q["raw"] for q in agent._queue], ["лишнее"])
+        router.release.set()
+        worker.join(timeout=5)
+
+    def test_prochitannaya_vstavka_otkatyvaetsya_otdelno(self):
+        agent = self._agent(BlockingRouter([]))
+        agent.load_history([{"role": "user", "content": "ход"},
+                            {"role": "assistant", "content": "шаг"},
+                            {"role": "user", "content": "вставка"},
+                            {"role": "assistant", "content": "ответ"}],
+                           turn=1, marks=[(1, 0)])
+        agent.undo()
+        self.assertEqual([m["content"] for m in agent._history], ["ход", "шаг"])
+        self.assertEqual(agent._turn, 1)
+        agent.undo()  # теперь — сам ход
+        self.assertEqual(agent._history, [])
+        agent.redo()
+        self.assertEqual([m["content"] for m in agent._history], ["ход", "шаг"])
+        agent.redo()
+        self.assertEqual(len(agent._history), 4)
+
+    def test_lenta_snimaet_odno_soobshchenie(self):
+        app = make_app(self)
+        app.submit_text("ход")
+        app.submit_text("вставка")  # busy — вставкой
+        app.on_agent_event({"type": "agent.text", "text": "пишу"})
+        app.on_agent_event({"type": "session.unsent", "text": "вставка"})
+        self.assertEqual([e.text for e in app.entries if e.kind == "user"], ["ход"])
+        self.assertTrue(any(e.kind == "agent" for e in app.entries))
+        self.assertEqual(app.editor.text, "вставка")
+        app.on_agent_event({"type": "session.redone", "message": "unsent",
+                            "text": "вставка"})
+        self.assertEqual(app.editor.text, "")
+        self.assertEqual([e.text for e in app.entries if e.kind == "user"],
+                         ["ход", "вставка"])
+
+
 if __name__ == "__main__":
     unittest.main()

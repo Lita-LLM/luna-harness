@@ -86,6 +86,7 @@ COMMANDS = [
     ("mode", "режим: /mode [normal|plan|review|auto|yolo], без аргумента — по кругу"),
     ("pult", "пульт ИИ: провайдеры, скан сети, ключи, модели и роли"),
     ("newmoon", "Новолуние: тёмный режим без следов, каждая модель — с твоего подтверждения"),
+    ("keep", "Новолуние: сохранить сессию в файл под паролем; /keep open <файл> — открыть"),
     ("update", "обновить Луну с GitHub и применить на лету, сессия не теряется; /update check — только проверить"),
     ("reload", "горячая перезагрузка: свежий код с диска, сессия и настройки остаются (и в Новолунии)"),
     ("model", "модель по ролям — выбиралка, смена на лету; ★ — одна на все роли"),
@@ -584,6 +585,10 @@ class ChatApp:
         # Записи сессии в памяти, когда журнала нет (Новолуние, журнал
         # выключен): из них горячая перезагрузка поднимет ленту и память.
         self.tape: list = []
+        # Ввод секрета точками (пароль /keep): мимо поля, истории и отмены
+        # правок — {label, on_done, buf}; None — обычный ввод.
+        self._secret = None
+        self._kept_path = None  # файл сейфа этой сессии Новолуния (/keep)
         self._nm_stash = None  # сообщение, ждущее подтверждения модели
         self._nm_extra: list = []  # адреса вне ролей (запасные, пулы), просившие подтверждения
         self.edit_request = None      # путь файла, который run_chat откроет в редакторе
@@ -1198,7 +1203,7 @@ class ChatApp:
         items = [PickerItem(key=m, title=m,
                             detail=self._THINKING_TITLES[m],
                             mark="→" if m == current else "")
-                 for m in self._THINKING_ORDER]
+                 for m in self._THINKING_ALL]
         self._open_picker("thinking", "Показ рассуждений", items,
                           hint="Enter — включить · Esc — закрыть",
                           preview_lines=0)
@@ -2076,10 +2081,24 @@ class ChatApp:
             self.scroll = 0
         return entry
 
+    _STREAM_BARRIER = ("agent", "thinking", "tool", "user", "shell", "tide")
+
     def _stream_entry(self, kind: str) -> Entry:
+        # Дописываем только в запись, после которой ничего содержательного
+        # не появилось: модели с чередованием (мысли → текст/тул → снова
+        # мысли в одном ответе) иначе продолжали думать в старом блоке
+        # над уже вызванным тулом.
         for entry in reversed(self.entries):
             if entry.kind == kind and entry.streaming:
                 return entry
+            if entry.kind in self._STREAM_BARRIER:
+                break
+        now_clock = self._clock()
+        for entry in self.entries:
+            if entry.kind == kind and entry.streaming:
+                entry.streaming = False
+                if kind == "thinking":
+                    entry.finished_at = now_clock
         return self._add(Entry(kind, streaming=True))
 
     def _find(self, kind: str, entry_id: str):
@@ -2101,6 +2120,33 @@ class ChatApp:
             self.mode = str(ev.get("mode") or self.mode)
             if ev.get("cwd"):
                 self.cwd = str(ev.get("cwd"))
+        elif kind == "session.unsent":
+            # Снято сообщение, которого модель не видела: убрать только его.
+            text = str(ev.get("text") or "")
+            users = [e for e in self.entries if e.kind == "user"]
+            gone = next((e for e in reversed(users) if e.turn == -1 and e.text == text),
+                        None) or next((e for e in reversed(users) if e.text == text), None)
+            if gone is not None:
+                self.entries.remove(gone)
+            if not self._restoring:
+                self._restore_prompt(text)
+        elif kind == "session.rewound" and ev.get("message"):
+            # Снята вставка, которую модель уже прочла: лента — с неё.
+            cut = next((i for i in range(len(self.entries) - 1, -1, -1)
+                        if self.entries[i].kind == "user" and self.entries[i].turn == -1),
+                       None)
+            if cut is not None:
+                tail = self.entries[cut:]
+                self.entries = self.entries[:cut]
+                self._feed_redo.append(tail)
+                del self._feed_redo[:-5]
+                if not self._restoring:
+                    self._restore_prompt(tail[0].text)
+        elif kind == "session.redone" and ev.get("message") == "unsent":
+            text = str(ev.get("text") or "")
+            if text and self.editor.text == text:
+                self.editor.clear()
+            self._add(Entry("user", text=text, turn=-1))
         elif kind == "session.rewound":
             if ev.get("scope") in ("talk", "both"):
                 turn = int(ev.get("turn") or 0)
@@ -2239,6 +2285,8 @@ class ChatApp:
                 tide.text = pct(ev.get("before_pct")) + "% → " + pct(ev.get("after_pct")) + "%"
                 turns = ev.get("summarized_turns")
                 tide.summary = str(len(turns)) if isinstance(turns, list) else ""
+                tide.output = str(ev.get("summary") or "")
+                tide.items = [str(x) for x in ev.get("reread") or []]
                 self._tide_notice = True  # notice «Прилив: …» — уже в разделителе
         elif kind == "notice":
             text = str(ev.get("text", ""))
@@ -2345,17 +2393,16 @@ class ChatApp:
                 except Exception:  # noqa: BLE001 — имя не важнее хода
                     pass
                 self._update_title()
-        out_text = text
+        cmd = {"type": "user.message", "text": text,
+               "attachments": attachments}
         if self.nibbler is not None:
             self.nibbler.observe({"type": "user.message", "text": text})
             # Серьёзные замечания Ниблера уходят агенту пометкой в этот ход;
-            # в ленте виден только текст человека, пометка — в команде.
+            # в ленте виден только текст человека, пометка — в команде,
+            # агент кладёт её в подписанный конверт (core/envelope.py).
             notes = self.nibbler.take_notes()
             if notes:
-                marks = "\n".join("[Ниблер: " + note + "]" for note in notes)
-                out_text = marks + "\n\n" + text
-        cmd = {"type": "user.message", "text": out_text,
-               "attachments": attachments}
+                cmd["notes"] = [{"from": "nibbler", "text": n} for n in notes]
         if delivery:
             cmd["delivery"] = delivery  # контракт: docs/СОБЫТИЯ.md
         self.send_command(cmd)
@@ -2492,6 +2539,10 @@ class ChatApp:
             self.open_pult(rest)
         elif cmd == "/newmoon":
             self.newmoon_command(rest)
+        elif cmd == "/keep":
+            from .keep import keep_command
+
+            keep_command(self, rest)
         elif cmd == "/profile":
             self.open_profiles(rest)
         elif cmd == "/reload":
@@ -2642,10 +2693,15 @@ class ChatApp:
 
     # --- мышление и усилие (ЗАДАЧА-19) ------------------------------------
 
-    _THINKING_ORDER = ("summary", "hidden", "full")
+    # hidden — не в круге (Alt+O, /thinking без аргумента): свёрнутая
+    # шапка честнее пустоты; включается явно, /thinking hidden.
+    _THINKING_ORDER = ("summary", "folded", "full")
+    _THINKING_ALL = ("summary", "folded", "full", "hidden")
     _THINKING_TITLES = {
         "summary": "summary — шапка «думает» и пересказ одной строкой; "
                    "полный текст — Ctrl+O",
+        "folded": "folded — свёрнутая шапка «думала · N с» без пересказа; "
+                  "клик или Ctrl+O разворачивает",
         "full": "full — полный текст рассуждений сразу",
         "hidden": "hidden — рассуждения не показываются (Ctrl+O развернёт)",
     }
@@ -2663,13 +2719,13 @@ class ChatApp:
             mode = "hidden"
         elif arg in ("on",):
             mode = "full"
-        elif arg in self._THINKING_ORDER:
+        elif arg in self._THINKING_ALL:
             mode = arg
         elif not arg:
             mode = self._next_thinking_mode()
         else:
             self._add(Entry("notice", text="Режимы рассуждений: summary, "
-                                           "full, hidden. Сейчас: "
+                                           "folded, full, hidden. Сейчас: "
                                            + self._thinking_mode()))
             return
         self._set_thinking_mode(mode)
@@ -2678,7 +2734,7 @@ class ChatApp:
 
     def _next_thinking_mode(self) -> str:
         current = self._thinking_mode()
-        idx = self._THINKING_ORDER.index(current)
+        idx = self._THINKING_ORDER.index(current) if current in self._THINKING_ORDER else -1
         return self._THINKING_ORDER[(idx + 1) % len(self._THINKING_ORDER)]
 
     def _cycle_thinking(self) -> None:
@@ -3150,6 +3206,8 @@ class ChatApp:
             return bool(entry.output) or bool(self._guards_for(entry))
         if entry.kind == "todo":
             return bool(entry.items)
+        if entry.kind == "tide":
+            return bool(entry.output)
         return False
 
     def _toggle_expand_all(self) -> None:
@@ -3351,6 +3409,9 @@ class ChatApp:
         self._reload_settings()
         if key.name == "eof":
             self.done = True
+            return
+        if self._secret is not None:
+            self._secret_key(key)
             return
         if key.label == "ctrl+c":
             self._ctrl_c_key()
@@ -3881,7 +3942,29 @@ class ChatApp:
         """Устаревший путь ЗАДАЧИ-18 — теперь это общий Ctrl+O (ЗАДАЧА-20)."""
         self._toggle_expand_all()
 
+    def ask_secret(self, label: str, on_done) -> None:
+        """Спросить секрет точками; on_done(текст) по Enter, Esc — отмена."""
+        self._secret = {"label": label, "on_done": on_done, "buf": ""}
+
+    def _secret_key(self, key: Key) -> None:
+        sec = self._secret
+        if key.name == "esc" or key.label == "ctrl+c":
+            self._secret = None
+            self._add(Entry("notice", text="Отменено."))
+        elif key.name == "enter":
+            self._secret = None  # on_done может спросить следующий секрет
+            sec["on_done"](sec["buf"])
+        elif key.name == "backspace":
+            sec["buf"] = sec["buf"][:-1]
+        elif key.label == "ctrl+u":
+            sec["buf"] = ""
+        elif key.char and not ({"ctrl", "alt"} & set(key.mods)):
+            sec["buf"] += key.char
+
     def handle_paste(self, paste: Paste) -> None:
+        if self._secret is not None:
+            self._secret["buf"] += paste.text.strip("\r\n")
+            return
         if self.pending_guard is not None and not self.guard_editing:
             return
         if self.picker is not None and self.picker.mode == "input":
@@ -4622,6 +4705,8 @@ class ChatApp:
         if entry.kind in ("tool", "guard"):
             stamp.append(tuple(sorted((k, str(v)[:40])
                                       for k, v in (entry.args or {}).items())))
+        if entry.kind == "tide":
+            stamp.append(tuple(entry.items))
         if entry.kind == "todo":
             items = entry.items or self.todos
             stamp.append(tuple((str(it.get("text", "")), str(it.get("status", "")))
@@ -4693,6 +4778,17 @@ class ChatApp:
                 add(spans)
         elif entry.kind == "tide":
             add(_tide_spans(entry, w, now, self._anim_on(), self.glyph_mode))
+            if entry.items:
+                for line in wrap_text("перечитать: " + ", ".join(entry.items), w - 4):
+                    add([("  ↻ ", "cyan"), (line, "dim")])
+            if entry.output and not entry.streaming:
+                if self._exp(entry):
+                    for out_line in entry.output.split("\n"):
+                        for visual in wrap_text(out_line, w - 4):
+                            add([("  │ ", "comment"), (visual, "text")])
+                else:
+                    add([("  ▸ ", "cyan"),
+                         ("что модель помнит после прилива — клик или Ctrl+O", "dim")])
         elif entry.kind == "thinking":
             mode = self._thinking_mode()
             elapsed = max(0.0, (entry.finished_at or now) - entry.born) \
@@ -4741,6 +4837,8 @@ class ChatApp:
                     label = ""
                 if label:
                     add([("◦ ", "dim"), (label, "dim")])
+            elif mode == "folded":
+                pass  # только шапка; ▸ и клик разворачивают
             else:  # hidden, но запись раскрыта (Ctrl+O/клик)
                 for line in wrap_text(entry.text, w - 2):
                     add([("◦ ", "dim"), (line, "comment")])
@@ -4927,7 +5025,7 @@ class ChatApp:
         mode = str(self.settings.get("ui.thinking") or "summary")
         if mode == "hidden" or not self.settings.get("ui.show_thinking"):
             return "hidden"
-        return mode if mode in ("summary", "full") else "summary"
+        return mode if mode in ("summary", "full", "folded") else "summary"
 
     def _fade_last_line(self, entry: Entry, md_lines, now: float):
         """Проявление стрима (ЗАДАЧА-20): спаны последней строки ответа,
@@ -5420,7 +5518,12 @@ class ChatApp:
         guard_hint = (guard is not None and not self.guard_editing
                       and not self._guard_replace) or (
             guard is None and ask is not None and not self.editor.text)
-        if guard is not None and not self.guard_editing and not self._guard_replace:
+        if self._secret is not None:
+            shown = "🔒 " + self._secret["label"] + ": " + "•" * len(self._secret["buf"])
+            input_lines, cursor_pos = [shown], (0, str_width(shown))
+            input_h = 1
+            self._input_geom = None
+        elif guard is not None and not self.guard_editing and not self._guard_replace:
             # Подсказка — кнопки ответа: переносом в ширину ленты, иначе
             # хвост с «q — стоп» уезжал за край и терялся.
             input_lines = wrap_text("Enter — да · n — нет · e — править · "

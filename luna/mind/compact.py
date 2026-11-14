@@ -28,7 +28,41 @@ DEFAULT_SUMMARY_PROMPT = """Ты сжимаешь начало разговор�
 - открытые вопросы и незаконченные дела.
 
 Выкинь: вежливость, повторы, рассуждения вслух, подробные выводы тулов.
-Пиши по-русски, кратко, пунктами по темам, от лица агента («человек попросил…», «я сделал…»). Только сводка, без предисловий."""
+Пиши по-русски, кратко, пунктами по темам, от лица агента («человек попросил…», «я сделал…»). Только сводка, без предисловий.
+
+В самом конце — раздел «Перечитать:» и под ним списком «- путь» файлы (до 10), которые агенту надо открыть заново, чтобы продолжить незаконченное: их содержимое из контекста уйдёт. Нечего перечитывать — раздел не пиши."""
+
+REREAD_HEAD = "Перечитать"
+REREAD_NOTE = ("Перед продолжением открой заново файлы из раздела «Перечитать», "
+               "если они нужны для текущей задачи: их текста в контексте больше нет.")
+
+
+def parse_reread(summary: str) -> list:
+    """Пути из раздела «Перечитать:» сводки (до 10, без повторов)."""
+    paths: list = []
+    inside = False
+    for raw in summary.splitlines():
+        line = raw.strip()
+        bare = line.strip("#*_ ").rstrip(":").strip()
+        if bare.lower().startswith(REREAD_HEAD.lower()):
+            inside = True
+            continue
+        if not inside:
+            continue
+        if not line:
+            if paths:
+                break
+            continue
+        if line[0] not in "-*•" and not line[:1].isdigit():
+            break  # пошёл другой раздел
+        item = line.lstrip("-*•0123456789.) ").strip().strip("`").strip()
+        item = item.split(" — ")[0].split(" - ")[0].strip().strip("`")
+        if item and item not in paths:
+            paths.append(item)
+        if len(paths) >= 10:
+            break
+    return paths
+
 
 TRANSCRIPT_CAP = 80_000   # общий потолок транскрипта для сводящей модели
 MESSAGE_CAP = 2_000       # потолок одного сообщения в транскрипте
@@ -140,7 +174,10 @@ def compact_history(router, history: list, marks: list, *, keep_turns: int = 2,
     summary = (result.text or "").strip()
     if not summary:
         return None
+    reread = parse_reread(summary)
     block = SUMMARY_HEAD + "\n" + summary
+    if reread:
+        block += "\n\n" + REREAD_NOTE
     if todos:
         lines = []
         for item in todos:
@@ -159,4 +196,5 @@ def compact_history(router, history: list, marks: list, *, keep_turns: int = 2,
             new_marks.append((turn, len(new_history)))
         new_history.extend(messages)
     return {"history": new_history, "marks": new_marks, "summary": summary,
+            "reread": reread,
             "summarized": [turn for turn, _ in old], "kept": [turn for turn, _ in kept]}

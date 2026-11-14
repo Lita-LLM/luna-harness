@@ -73,6 +73,9 @@ class Agent:
         self._active = False
         self._queue: list[dict] = []
         self._deferred: list[dict] = []  # delivery=queue: отдельные ходы после текущего
+        # Вставки, не дошедшие до модели (ход прервали раньше): уходят
+        # в начало следующего хода, а не теряются молча.
+        self._carry: list[dict] = []
         self._interrupt = threading.Event()
         self.ctx.cancel_event = self._interrupt  # долгие тулы рвутся вместе с ходом
         self._detach = threading.Event()
@@ -449,7 +452,7 @@ class Agent:
                 "turn": self._turn,
                 "marks": [[t, i - offset] for t, i in self._turn_marks if i >= offset]}
 
-    def load_history(self, messages, *, turn=None, marks=None) -> None:
+    def load_history(self, messages, *, turn=None, marks=None, carry=None) -> None:
         """Принять историю прошлой сессии (продолжение, luna --continue).
 
         Сообщения — как их собрал core.sessions.build_history: без
@@ -466,6 +469,7 @@ class Agent:
         self._turn_marks = [(int(t), int(i)) for t, i in marks]
         self._turn = int(turn) if turn is not None else len(self._turn_marks)
         self._queue = []
+        self._carry = [dict(c) for c in (carry or [])]
         self._last_sig = ""
         self._same_count = 0
         self._prompt_sig = None  # промпт вставится в новую историю заново
@@ -540,6 +544,7 @@ class Agent:
         self._turn += 1
         turn = self._turn
         self._redo_stack.clear()  # новый ход хоронит отмену отката
+        text, attachments = self._take_carry(text, attachments)
         if self._checkpoints is not None:
             self._checkpoints.begin_turn(turn)
         if not self._started:
@@ -591,10 +596,36 @@ class Agent:
             self.publish({"type": "error", "message": err.title, "detail": err.detail or err.hint,
                           "code": err.code, "data": getattr(err, "data", None) or {}})
             reason = "error"
+        self._stash_leftovers()
         self.publish({"type": "turn.done", "turn": turn, "reason": reason})
         self._active = False
         self._after_turn()
         return reason
+
+    def _stash_leftovers(self) -> None:
+        """Вставки, которые ход не успел отдать модели, — в перенос."""
+        if not self._queue:
+            return
+        left, self._queue = self._queue, []
+        self._carry.extend(left)
+        self.publish({"type": "user.carry", "count": len(self._carry)})
+        self.publish({"type": "notice", "level": "info",
+                      "text": "Луна не успела прочесть сообщений: " + str(len(self._carry)) +
+                              ". Они уйдут вместе со следующим сообщением "
+                              "(Enter на пустом поле — отправить сейчас)."})
+
+    def _take_carry(self, text: str, attachments):
+        """Начало хода: перенесённые вставки — перед текстом человека."""
+        if self._queue:  # пришли в щель между концом прошлого хода и этим
+            self._carry.extend(self._queue)
+            self._queue = []
+        if not self._carry:
+            return text, attachments
+        carried, self._carry = self._carry, []
+        head = "\n\n".join(c["text"] for c in carried if c.get("text"))
+        text = head + ("\n\n" + text if text else "")
+        extra = [a for c in carried for a in (c.get("attachments") or [])]
+        return text, extra + list(attachments or [])
 
     def _steps(self, max_steps: int) -> str:
         for _step in range(max_steps):
@@ -638,6 +669,7 @@ class Agent:
                 if self._queue:
                     nxt = self._queue.pop(0)
                     self._history.append({"role": "user", "content": nxt["text"]})
+                    self.publish({"type": "user.inject", "text": nxt["text"]})
                     self.publish({"type": "notice", "level": "info",
                                   "text": "Сообщение из очереди ушло следующим шагом"})
                     continue
@@ -650,6 +682,7 @@ class Agent:
             if self._queue:
                 nxt = self._queue.pop(0)
                 self._history.append({"role": "user", "content": nxt["text"]})
+                self.publish({"type": "user.inject", "text": nxt["text"]})
                 self.publish({"type": "notice", "level": "info",
                               "text": "Сообщение из очереди ушло следующим шагом"})
         self.publish({"type": "notice", "level": "warn",
@@ -1016,6 +1049,7 @@ class Agent:
         scope = entry["scope"]
         restored_files: list = []
         skipped_files: list = []
+        talk_back = False
         if scope in ("files", "both") and self._checkpoints is not None:
             todo = {}
             for path, prev in entry["file_prev"].items():
@@ -1034,11 +1068,15 @@ class Agent:
                 self._history = self._history + entry["history_tail"]
                 self._turn_marks = self._turn_marks + entry["marks_tail"]
                 self._turn = entry["from_turn"]
+                talk_back = True
             else:
                 skipped_files.append("(разговор изменился после отката)")
         self._redo_stack.pop()
         self._journal("redo", {"turn": entry["from_turn"], "scope": scope,
                                "files": restored_files})
+        if talk_back:
+            # Лента возвращает срезанный откатом хвост по этому событию.
+            self.publish({"type": "session.redone", "turn": entry["from_turn"]})
         parts = ["Откат возвращён: снова состояние после хода " +
                  str(entry["from_turn"]) + "."]
         if restored_files:

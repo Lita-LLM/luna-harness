@@ -310,6 +310,53 @@ class TextEditor:
         (пробелы — тоже текст): смещения строк поэтому точны, и курсор
         считается честно по символам до него.
         """
+        lines, spans = self._layout(width)
+        cursor_pos = (len(lines) - 1, str_width(lines[-1]) if lines else 0)
+        for idx, (start, length) in enumerate(spans):
+            if start <= self.cursor <= start + length:
+                cursor_pos = (idx, str_width(lines[idx][:self.cursor - start]))
+                break
+        if self.text.endswith("\n"):
+            cursor_pos = (len(lines) - 1, 0) if self.cursor == len(self.text) else cursor_pos
+        return lines, cursor_pos
+
+    def offset_at(self, width: int, row: int, col: int) -> int:
+        """Визуальная (строка, колонка ячеек) → позиция в тексте: клик
+        мышью и стрелки по перенесённым строкам."""
+        lines, spans = self._layout(width)
+        row = max(0, min(row, len(spans) - 1))
+        start, length = spans[row]
+        pos, used = start, 0
+        for ch in lines[row]:
+            w = str_width(ch)
+            if used + w > col:
+                break
+            used += w
+            pos += 1
+        nxt = spans[row + 1][0] if row + 1 < len(spans) else None
+        if nxt == start + length and pos == nxt and length:
+            # Конец перенесённой строки и начало следующей — одна позиция
+            # текста; курсор должен остаться на этой строке.
+            pos -= 1
+        return pos
+
+    def up_visual(self, width: int) -> bool:
+        """Курсор визуальной строкой выше (перенос учитывается, как у Клод
+        Кода); False — выше некуда, зовущий листает историю."""
+        _lines, (row, col) = self.visual_lines(width)
+        if row == 0:
+            return False
+        self.cursor = self.offset_at(width, row - 1, col)
+        return True
+
+    def down_visual(self, width: int) -> bool:
+        lines, (row, col) = self.visual_lines(width)
+        if row >= len(lines) - 1:
+            return False
+        self.cursor = self.offset_at(width, row + 1, col)
+        return True
+
+    def _layout(self, width: int) -> tuple:
         width = max(1, width)
         lines: list = []
         spans: list = []  # (начало в тексте, длина) каждой визуальной строки
@@ -334,11 +381,4 @@ class TextEditor:
                 lines.append(cur)
                 spans.append((start, len(cur)))
             offset += len(chunk) + 1
-        cursor_pos = (len(lines) - 1, str_width(lines[-1]) if lines else 0)
-        for idx, (start, length) in enumerate(spans):
-            if start <= self.cursor <= start + length:
-                cursor_pos = (idx, str_width(lines[idx][:self.cursor - start]))
-                break
-        if self.text.endswith("\n"):
-            cursor_pos = (len(lines) - 1, 0) if self.cursor == len(self.text) else cursor_pos
-        return lines, cursor_pos
+        return lines, spans

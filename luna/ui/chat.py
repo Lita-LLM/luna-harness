@@ -528,6 +528,7 @@ class Entry:
     born: float = 0.0
     streaming: bool = False
     guard_of: str = ""     # guard: id тула, к которому относится подтверждение
+    turn: int = 0          # user: -1 — вставка в идущий ход (ходом не считается)
     # Мышление (ЗАДАЧА-19): строки пересказа быстрой ролью — пары
     # (текст, момент рождения) для градиента появления; finished_at —
     # когда рассуждение кончилось; chunk_at — последний кусок (вспышка звёзд).
@@ -679,6 +680,9 @@ class ChatApp:
         # геометрия полосы последнего кадра), замеры кадров для ui.perf.
         self._sb_drag = None             # (смещение захвата в ползунке)
         self._sb_geom = None             # (всего строк, высота ленты, макс. прокрутка, верх ползунка, высота ползунка)
+        self._feed_redo: list = []       # хвосты ленты, срезанные откатом, — для /redo
+        self._carry_count = 0            # вставок, не дошедших до прерванного хода
+        self._input_geom = None          # (y, высота, сдвиг, ширина) поля ввода — для клика
         self._feed_drag = None           # жест перетаскивания ленты / долгого нажатия
         self._frame_times: list = []     # длительности последних кадров, с
         self._auto_low = False           # слабый режим, включённый автоматически
@@ -770,8 +774,14 @@ class ChatApp:
         сессии помечаются «прервано» — отвечать на них некому.
         """
         self._restoring = True
+        # Старые журналы: /redo не оставлял события для ленты — берём запись.
+        old_redo = not any(r.get("kind") == "event" and (r.get("data") or {}).get("type")
+                           == "session.redone" for r in records)
         try:
             for rec in records:
+                if old_redo and rec.get("kind") == "redo" and \
+                        (rec.get("data") or {}).get("scope", "both") in ("talk", "both"):
+                    self._feed_redone()
                 if rec.get("kind") == "title":
                     # Имя сессии уже задано — автоназвание не перезапишет.
                     self.session_title = str(rec.get("title") or self.session_title)
@@ -817,21 +827,44 @@ class ChatApp:
         self._flash_hint("Промпт откатанного хода — в поле ввода "
                          "(прежний набросок — в истории, ↑).")
 
-    def _cut_feed_after_turn(self, turn: int) -> None:
+    def _cut_feed_after_turn(self, turn: int) -> list:
         """Лента после отката разговора: ходы после turn убираются — и вживую,
-        и при --continue (событие session.rewound лежит в журнале)."""
+        и при --continue (событие session.rewound лежит в журнале).
+        Вставки во время хода — тоже записи user, но ходов не начинают:
+        счёт по ним уводил откат далеко назад. Срезанное — в стопку для
+        /redo; возвращается хвост."""
+        cut = None
         seen = 0
         for idx, entry in enumerate(self.entries):
-            if entry.kind == "user":
+            if entry.kind == "user" and entry.turn != -1:
                 seen += 1
                 if seen > turn:
-                    self.entries = self.entries[:idx]
-                    return
+                    cut = idx
+                    break
+        if cut is None:
+            return []
+        tail = self.entries[cut:]
+        self.entries = self.entries[:cut]
+        self._feed_redo.append(tail)
+        del self._feed_redo[:-5]
+        return tail
+
+    def _feed_redone(self) -> None:
+        """/redo вернул разговор — вернуть и срезанный хвост ленты."""
+        if not self._feed_redo:
+            return
+        tail = self._feed_redo.pop()
+        prompt = tail[0].text if tail and tail[0].kind == "user" else ""
+        if prompt and self.editor.text == prompt:
+            self.editor.clear()  # промпт, поднятый откатом, снова в ленте
+        self.entries.extend(tail)
 
     def _restore_command(self, cmd: dict) -> None:
         kind = cmd.get("type")
         if kind == "user.message":
-            self._add(Entry("user", text=str(cmd.get("text", ""))))
+            inject = self.busy and (cmd.get("delivery") or "inject") == "inject"
+            self._add(Entry("user", text=str(cmd.get("text", "")),
+                            turn=-1 if inject else 0))
         elif kind == "shell":
             self._add(Entry("shell", text=str(cmd.get("command", ""))))
         elif kind == "guard.answer":
@@ -877,7 +910,8 @@ class ChatApp:
         if callable(loader):
             state = build_state(records)
             try:
-                loader(state["history"], turn=state["turn"], marks=state["marks"])
+                loader(state["history"], turn=state["turn"], marks=state["marks"],
+                       carry=state.get("carry") or [])
             except TypeError:  # подмена со старой сигнатурой — только история
                 loader(state["history"])
 
@@ -2072,15 +2106,16 @@ class ChatApp:
                 turn = int(ev.get("turn") or 0)
                 # /undo возвращает промпт откатанного хода в поле ввода
                 # (ЗАДАЧА-20): текст берём из ленты ДО её обрезки.
-                prompt = ""
-                if not self._restoring:
-                    users = [e for e in self.entries if e.kind == "user"]
-                    if len(users) > turn:
-                        prompt = users[turn].text
-                self._cut_feed_after_turn(turn)
-                if prompt:
-                    self._restore_prompt(prompt)
+                tail = self._cut_feed_after_turn(turn)
+                if tail and tail[0].kind == "user" and not self._restoring:
+                    self._restore_prompt(tail[0].text)
+        elif kind == "session.redone":
+            self._feed_redone()
+        elif kind == "user.carry":
+            self._carry_count = int(ev.get("count") or 0)
         elif kind == "turn.start":
+            self._carry_count = 0
+            self._feed_redo.clear()  # новый ход хоронит /redo и у агента
             self.busy = True
             self._update_title()
         elif kind == "agent.thinking":
@@ -2295,7 +2330,9 @@ class ChatApp:
             return
         attachments = [tok[1:] for tok in text.split()
                        if tok.startswith("@") and len(tok) > 1]
-        self._add(Entry("user", text=text if display is None else display))
+        inject = self.busy and (delivery or "inject") == "inject"
+        self._add(Entry("user", text=text if display is None else display,
+                        turn=-1 if inject else 0))
         # Автоназвание сессии по первому сообщению (ЗАДАЧА-20).
         if (not self._session_titled and self.journal is not None
                 and self.settings.get("chat.auto_title")):
@@ -2366,6 +2403,10 @@ class ChatApp:
             text = self.editor.submit()
         text = text.strip("\n")
         if not text.strip():
+            if self._carry_count and not self.busy:
+                # Enter на пустом поле — дослать недошедшее прерванному ходу.
+                self._carry_count = 0
+                self._send_user_message("", display="(дослать написанное во время хода)")
             return
         # Свёрнутые вставки разворачиваются обратно в полный текст.
         for placeholder, full in list(self._pastes.items()):
@@ -3472,7 +3513,7 @@ class ChatApp:
             elif not self.editor.text and self.queue:
                 # Отозвать последнее сообщение из очереди обратно в редактор.
                 self.editor.set_text(self.queue.pop())
-            elif not self.editor.up():
+            elif not self.editor.up_visual(self._input_width()):
                 self.editor.history_prev()
             return
         if key.name == "down":
@@ -3480,7 +3521,7 @@ class ChatApp:
                 self.completion_index = (self.completion_index + 1) % len(self.cmd_completions)
             elif self.completions:
                 self.completion_index = (self.completion_index + 1) % len(self.completions)
-            elif not self.editor.down():
+            elif not self.editor.down_visual(self._input_width()):
                 self.editor.history_next()
             return
         if key.char == "?" and not self.editor.text \
@@ -4166,6 +4207,8 @@ class ChatApp:
         elif mouse.kind == "press" and mouse.button == 0:
             # Клик по ленте или вводу снимает фокус с панели (ЗАДАЧА-18).
             self.panel_focus = False
+            if self._input_click(mouse):
+                return
             self._mouse_press(mouse)
         elif mouse.kind == "move" and self._sel_anchor is not None:
             pos = self._feed_pos(mouse)
@@ -4237,6 +4280,24 @@ class ChatApp:
         return False
 
     # --- выделение мышью и копирование ------------------------------------------------
+
+    def _input_width(self) -> int:
+        geom = self._input_geom
+        return geom[-1] if geom else max(4, (self._feed_geom[0] or 80) - 2)
+
+    def _input_click(self, mouse: Mouse) -> bool:
+        """Клик по полю ввода — курсор туда, как у Клод Кода."""
+        geom = self._input_geom
+        if not geom or len(geom) != 4:
+            return False
+        iy, input_h, offset, width = geom
+        x, y = mouse.x - 1, mouse.y - 1
+        if not (iy <= y < iy + input_h) or x >= width + 2:
+            return False
+        self.editor.cursor = self.editor.offset_at(width, offset + y - iy, max(0, x - 2))
+        self.selection = None
+        self._sel_anchor = None
+        return True
 
     def _feed_pos(self, mouse: Mouse):
         """Мышь → (индекс визуальной строки ленты, колонка ячеек) или None."""
@@ -5368,13 +5429,17 @@ class ChatApp:
                                     max(4, chat_w - 3))[:4]
             cursor_pos = (0, 0)
             input_h = len(input_lines)
+            self._input_geom = None
         elif ask is not None and not self.editor.text:
             input_lines, cursor_pos = ["↑↓ — выбор · Enter — ответить"], (0, 0)
             input_h = 1
+            self._input_geom = None
         else:
             full_lines, full_cursor = self.editor.visual_lines(max(4, chat_w - 2))
             input_h = min(5, len(full_lines))
-            offset = len(full_lines) - input_h
+            # Окно поля идёт за курсором: стрелками уехал выше — видно.
+            offset = min(len(full_lines) - input_h, full_cursor[0])
+            self._input_geom = (input_h, offset, max(4, chat_w - 2))
             input_lines = full_lines[offset:]
             cursor_pos = (max(0, min(input_h - 1, full_cursor[0] - offset)),
                           full_cursor[1])
@@ -5395,8 +5460,12 @@ class ChatApp:
         # Скролл держится на месте, пока Луна пишет: scroll считается от
         # низа, поэтому выросшую ленту добавляем к нему — вид не едет.
         prev = getattr(self, "_feed_prev", None)
-        if self.scroll > 0 and prev is not None and prev[0] == feed_w \
-                and self.settings.get("ui.scroll_hold", True):
+        selecting = self._sel_anchor is not None or bool(
+            self._feed_drag is not None and self._feed_drag.get("select"))
+        # Пока тянут выделение, лента замирает и внизу: иначе стрим
+        # уводит текст из-под мыши (как у Клод Кода).
+        if (self.scroll > 0 or selecting) and prev is not None and prev[0] == feed_w \
+                and (selecting or self.settings.get("ui.scroll_hold", True)):
             self.scroll += len(lines) - prev[1]
         self._feed_prev = (feed_w, len(lines))
         max_scroll = max(0, len(lines) - feed_h)
@@ -5500,6 +5569,8 @@ class ChatApp:
                      fg=DIM_FG, bg=_color.SPACE_BG, attrs=_color.DIM)
             self._key_zones(buf, line, 2, my + i, chat_w - 1)
         iy = my + meta_h
+        if self._input_geom is not None:
+            self._input_geom = (iy,) + self._input_geom[-3:]
         for i, line in enumerate(input_lines):
             prefix = "› " if i == 0 else "  "
             fg = _color.AMBER if guard is not None else _color.CYAN

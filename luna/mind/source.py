@@ -90,7 +90,7 @@ class AgentSource:
                 return
             self._run_in_worker(cmd)
 
-    def load_history(self, messages, *, turn=None, marks=None) -> None:
+    def load_history(self, messages, *, turn=None, marks=None, carry=None) -> None:
         """История прошлой сессии для агента (продолжение и переключение).
 
         Агент ещё не построен — запомнить и отдать при start(). Агент жив —
@@ -99,7 +99,7 @@ class AgentSource:
         очищается: события прошлой сессии новой ленте не нужны.
         """
         self._pending_history = [dict(m) for m in messages]
-        self._pending_state = {"turn": turn, "marks": marks}
+        self._pending_state = {"turn": turn, "marks": marks, "carry": carry}
         if self._agent is None:
             return
         self._agent.interrupt()

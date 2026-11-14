@@ -337,6 +337,9 @@ def build_history(records: list) -> list:
     return build_state(records)["history"]
 
 
+SEP = "\n\n"  # склейка переноса с сообщением — как в mind.loop
+
+
 def build_state(records: list) -> dict:
     """История сообщений агента из записей журнала (ЗАДАЧА-10, п. 1).
 
@@ -380,6 +383,29 @@ def build_state(records: list) -> dict:
                             "name": name, "content": INTERRUPTED_RESULT})
         open_calls.clear()
 
+    active = False                # между turn.start и turn.done
+    injects: list = []            # вставки, ждущие user.inject
+    carry: list = []              # не дошли до прерванного хода — в следующий
+    deferred: list = []           # queue/interrupt во время хода
+
+    def flush_text() -> None:
+        close_dangling()
+        if text_parts:
+            history.append({"role": "assistant", "content": "".join(text_parts)})
+            text_parts.clear()
+
+    def start_turn(text: str) -> None:
+        nonlocal turn, carry
+        flush_text()
+        if carry:
+            # Как loop._take_carry: перенос — перед текстом человека.
+            head = SEP.join(c for c in carry if c)
+            text = head + (SEP + text if text else "")
+            carry = []
+        turn += 1
+        marks.append((turn, len(history)))
+        history.append({"role": "user", "content": text})
+
     for rec in records:
         kind = rec.get("kind")
         data = rec.get("data") or {}
@@ -394,15 +420,20 @@ def build_state(records: list) -> dict:
             continue
         if kind == "command":
             if data.get("type") == "user.message":
-                close_dangling()
-                if text_parts:
-                    history.append({"role": "assistant",
-                                    "content": "".join(text_parts)})
-                    text_parts.clear()
-                turn += 1
-                marks.append((turn, len(history)))
-                history.append({"role": "user",
-                                "content": str(data.get("text") or "")})
+                text = str(data.get("text") or "")
+                delivery = data.get("delivery") or "inject"
+                if active and delivery == "inject":
+                    # Вставка в идущий ход: в историю — там, где её взял
+                    # агент (событие user.inject), не дошла — в перенос.
+                    injects.append(text)
+                elif active:
+                    # queue/interrupt: агент запустит их ходами после этого.
+                    if delivery == "interrupt":
+                        deferred.insert(0, text)
+                    else:
+                        deferred.append(text)
+                else:
+                    start_turn(text)
             continue
         if kind != "event":
             continue
@@ -440,13 +471,28 @@ def build_state(records: list) -> dict:
             history.append({"role": "tool", "tool_call_id": call_id,
                             "name": name,
                             "content": str(data.get("output") or "")})
+        elif etype == "turn.start":
+            active = True
+        elif etype == "user.inject":
+            if injects:
+                injects.pop(0)
+            flush_text()
+            history.append({"role": "user", "content": str(data.get("text") or "")})
         elif etype == "turn.done":
             if text_parts:
                 history.append({"role": "assistant",
                                 "content": "".join(text_parts)})
                 text_parts.clear()
             seal_pending()
+            active = False
+            carry.extend(injects)
+            injects.clear()
+            if deferred:
+                start_turn(deferred.pop(0))
+                active = True  # отложенный ход идёт сразу следом
     if text_parts:
         history.append({"role": "assistant", "content": "".join(text_parts)})
     close_dangling()
-    return {"history": history, "turn": turn, "marks": marks}
+    carry.extend(injects)
+    return {"history": history, "turn": turn, "marks": marks,
+            "carry": [{"text": c} for c in carry if c]}

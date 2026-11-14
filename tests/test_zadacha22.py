@@ -127,7 +127,7 @@ class ScrollbarTest(unittest.TestCase):
 
 class DragScrollTest(unittest.TestCase):
     def test_vertical_drag_scrolls_feed(self):
-        app = make_app(self)
+        app = make_app(self, **{"ui.drag_scroll": True})
         long_feed(app)
         app.draw(60, 16, app._clock())
         app.scroll = 10
@@ -140,7 +140,7 @@ class DragScrollTest(unittest.TestCase):
         self.assertIsNone(app.selection)
 
     def test_horizontal_drag_still_selects(self):
-        app = make_app(self)
+        app = make_app(self, **{"ui.drag_scroll": True})
         copied = []
         app.copy_hook = copied.append
         app.entries.append(Entry("agent", text="альфа бета гамма"))
@@ -151,7 +151,7 @@ class DragScrollTest(unittest.TestCase):
         self.assertEqual(copied, ["льфа б"])
 
     def test_long_press_selects(self):
-        app = make_app(self)
+        app = make_app(self, **{"ui.drag_scroll": True})
         now = [1000.0]
         app._clock = lambda: now[0]
         copied = []

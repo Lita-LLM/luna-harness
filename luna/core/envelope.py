@@ -15,7 +15,13 @@ SOURCES = {
     "nibbler": "Ниблер — твой наблюдатель, не человек",
     "mail": "Почта команды — письмо спутника",
     "bg": "Фоновая команда",
+    "harness": "Харнесс Луны — автоматическая подсказка, не человек",
 }
+
+
+def harness_only(text) -> bool:
+    """Сообщение user, которое целиком написал харнесс (слов человека нет)."""
+    return isinstance(text, str) and text.startswith(OPEN) and HUMAN_OPEN not in text
 
 OPEN = "<пометки_харнесса>"
 CLOSE = "</пометки_харнесса>"

@@ -82,11 +82,31 @@ def _mods_from(param: int) -> frozenset:
     return frozenset(_MOD_BITS.get(param, ()))
 
 
+def paste_text(text: str) -> str:
+    """Переводы строк вставки — как в поле ввода: терминалы шлют \\r."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# Вставка без bracketed paste (старая консоль, часть мобильных терминалов)
+# приходит просто символами, и каждый перевод строки отправлял бы сообщение.
+# Пачка текста с переводом строки внутри или очень длинная — это вставка:
+# руками столько за одно чтение не напечатать.
+BURST_CHARS = 512
+BURST_WINDOW = 0.08  # хвост той же вставки, пришедший следующим чтением
+
+
 class KeyParser:
-    def __init__(self):
+    def __init__(self, clock=None):
+        import time
+
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._buf = ""
-        self._paste: str | None = None
+        # Куски вставки — списком: склейка строки по символу (Windows отдаёт
+        # ввод по одному символу) была квадратичной и вешала Луну на
+        # больших вставках.
+        self._paste: list | None = None
+        self._clock = clock or time.monotonic
+        self._burst_until = 0.0
 
     @property
     def pending(self) -> bool:
@@ -94,8 +114,24 @@ class KeyParser:
         return bool(self._buf) or self._paste is not None
 
     def feed(self, data: bytes) -> list:
-        self._buf += self._decoder.decode(data)
+        text = self._decoder.decode(data)
+        burst = self._burst(text)
+        if burst is not None:
+            return [burst]
+        self._buf += text
         return self._drain(final=False)
+
+    def _burst(self, text: str):
+        """Пачка без bracketed paste, похожая на вставку, — Paste, иначе None."""
+        if self._paste is not None or self._buf or "\x1b" in text or len(text) < 2:
+            return None
+        now = self._clock()
+        inner = text.rstrip("\r\n")
+        looks = len(text) >= BURST_CHARS or ("\r" in inner or "\n" in inner) and len(text) >= 8
+        if not looks and now > self._burst_until:
+            return None
+        self._burst_until = now + BURST_WINDOW
+        return Paste(paste_text(text))
 
     def flush(self) -> list:
         """Тайм-аут ожидания: разрешить висящий Esc и прочее как есть."""
@@ -111,12 +147,12 @@ class KeyParser:
                 if end < 0:
                     if len(self._buf) > len(_PASTE_END):
                         keep = len(_PASTE_END) - 1
-                        self._paste += self._buf[:-keep]
+                        self._paste.append(self._buf[:-keep])
                         self._buf = self._buf[-keep:]
                     break
-                self._paste += self._buf[:end]
+                self._paste.append(self._buf[:end])
                 self._buf = self._buf[end + len(_PASTE_END):]
-                events.append(Paste(self._paste))
+                events.append(Paste(paste_text("".join(self._paste))))
                 self._paste = None
                 continue
             if not self._buf:
@@ -208,7 +244,7 @@ class KeyParser:
         params = body.split(";") if body else []
         code = int(params[0]) if params and params[0].isdigit() else -1
         if code == 200:
-            self._paste = ""
+            self._paste = []
             return None
         if code == 201:  # конец вставки без начала — мусор
             return Unknown(seq)

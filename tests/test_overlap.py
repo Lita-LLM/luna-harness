@@ -31,7 +31,7 @@ def test_vse_frazy_zastavki_vlezayut():
 
     bad = []
     for cols, rows in ((40, 14), (60, 20)):
-        for phrase in phrases.splash_phrases():
+        for phrase in phrases.splash_phrases() + phrases.splash_phrases(newmoon=True):
             buf = Buffer(cols, rows)
             _screen.AUDIT = []
             try:

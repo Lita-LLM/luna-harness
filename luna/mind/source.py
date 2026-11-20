@@ -187,6 +187,11 @@ class AgentSource:
                 self._events.put({"type": "error", "ts": time.time(),
                                   "message": "Ход упал: " + str(exc), "detail": repr(exc)})
                 self._events.put({"type": "turn.done", "ts": time.time(), "reason": "error"})
+                # Ход вылетел, не дойдя до своего конца: агент остался бы
+                # «занят» навсегда, и все следующие сообщения копились бы в
+                # его очереди — снаружи это выглядит как зависание.
+                if getattr(self._agent, "_active", False):
+                    self._agent._active = False
 
         if self._busy():
             self._worker.join(timeout=0.1)

@@ -434,11 +434,21 @@ def _windows_read(timeout, parser) -> list:
         wait_ms = min(wait_ms, int(ESC_FLUSH_TIMEOUT * 1000))
     if kernel32.WaitForSingleObject(handle, wait_ms) != 0:
         return parser.flush()
-    records = (INPUT_RECORD * 32)()
+    # Большая пачка за чтение: вставка в сотни КБ приходит записями по символу.
+    records = (INPUT_RECORD * 1024)()
     read = wintypes.DWORD()
-    if not kernel32.ReadConsoleInputW(handle, records, 32, ctypes.byref(read)):
+    if not kernel32.ReadConsoleInputW(handle, records, 1024, ctypes.byref(read)):
         return []
     events: list = []
+    # Символы пачки копятся и уходят в разбор одним куском: так парсер
+    # видит вставку целиком (и узнаёт её без bracketed paste), а не по букве.
+    run: list = []
+
+    def flush_run() -> None:
+        if run:
+            events.extend(parser.feed("".join(run).encode("utf-8", "replace")))
+            run.clear()
+
     for i in range(read.value):
         rec = records[i]
         if rec.EventType == 1:  # KEY_EVENT
@@ -458,6 +468,7 @@ def _windows_read(timeout, parser) -> list:
                     mods.add("ctrl")
                 if state & 0x0003:
                     mods.add("alt")
+                flush_run()
                 events.append(_keys.Key(chr(ord("a") + vk - 0x41),
                                         mods=frozenset(mods)))
                 continue
@@ -467,6 +478,7 @@ def _windows_read(timeout, parser) -> list:
                 # разбор она ждала продолжения escape-последовательности до
                 # следующей клавиши, и двойной Esc превращался в одиночный.
                 # Последовательности VT-ввода приходят с vk=0 — их не задевает.
+                flush_run()
                 events.extend(parser.flush())
                 events.append(_keys.Key("esc"))
                 continue
@@ -476,6 +488,7 @@ def _windows_read(timeout, parser) -> list:
                 mods = {"ctrl"} if state & 0x000C else set()
                 if state & 0x0003:
                     mods.add("alt")
+                flush_run()
                 events.extend(parser.flush())
                 events.append(_keys.Key("backspace", mods=frozenset(mods)))
                 continue
@@ -488,8 +501,9 @@ def _windows_read(timeout, parser) -> list:
                 high, parser._luna_high = getattr(parser, "_luna_high", ""), ""
                 ch = fix_surrogates(high + ch) if high else ""
             if ch and ch != "\x00":
-                events.extend(parser.feed(ch.encode("utf-8", "replace")))
+                run.append(ch)
             else:
+                flush_run()
                 name = _VK.get(kev.wVirtualKeyCode)
                 if name:
                     mods = set()
@@ -502,6 +516,7 @@ def _windows_read(timeout, parser) -> list:
                         mods.add("alt")
                     events.append(_keys.Key(name, mods=frozenset(mods)))
         elif rec.EventType == 2:  # MOUSE_EVENT (если VT-ввод недоступен)
+            flush_run()
             mev = rec.Event.MouseEvent
             x, y = mev.X + 1, mev.Y + 1
             if mev.dwEventFlags == 0x0004:  # MOUSE_WHEELED
@@ -510,4 +525,5 @@ def _windows_read(timeout, parser) -> list:
             elif mev.dwEventFlags == 0:
                 kind = "press" if mev.dwButtonState else "release"
                 events.append(_keys.Mouse(kind, x, y, button=0))
+    flush_run()
     return events

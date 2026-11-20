@@ -486,8 +486,10 @@ def build_state(records: list) -> dict:
                     break
         elif etype == "session.redone" and data.get("message") == "unsent":
             (injects if active else carry).append(str(data.get("text") or ""))
-        elif etype == "user.inject":
-            if injects:
+        elif etype in ("user.inject", "harness.nudge"):
+            # Подсказка харнесса ложится в историю так же, но очередь
+            # человека не трогает.
+            if injects and etype == "user.inject":
                 injects.pop(0)
             flush_text()
             history.append({"role": "user", "content": str(data.get("text") or "")})

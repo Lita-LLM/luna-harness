@@ -143,7 +143,7 @@ def play_splash(term, screen, settings, bus, started_at: float) -> str:
     from ..core import newmoon as _nm
 
     if _nm.active():
-        phrase = phrases.event_phrase("newmoon") or phrases.random_splash()
+        phrase = phrases.random_splash(newmoon=True)
     elif sky.is_full:
         phrase = phrases.event_phrase("fullmoon") or phrases.random_splash()
     else:

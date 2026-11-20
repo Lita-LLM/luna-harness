@@ -54,7 +54,8 @@ class WidthTest(unittest.TestCase):
         from luna.ui import phrases
         from luna.ui.chat import HELP_TEXT
 
-        texts = [HELP_TEXT] + phrases.spinner_phrases() + phrases.splash_phrases()
+        texts = [HELP_TEXT] + phrases.spinner_phrases(False) + phrases.splash_phrases()
+        texts += phrases.spinner_phrases(True) + phrases.splash_phrases(True)
         for name in ("splash", "render", "main", "chat"):
             for _label, buf in snapshot.render_frames(name, 100, 28, [0.0, 0.6, 1.2]):
                 texts.extend("".join(cell[0] for cell in row) for row in buf.cells)

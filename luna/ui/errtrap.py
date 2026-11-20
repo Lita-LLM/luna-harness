@@ -99,6 +99,29 @@ class ErrorTrap:
         except Exception:  # noqa: BLE001 — ловушка не имеет права падать сама
             pass
 
+    def catch(self, where: str, exc: BaseException) -> None:
+        """Ошибка, которую цикл чата поймал сам и пережил: в лог и в ленту.
+
+        Одна и та же ошибка подряд (сломанный кадр падает каждый кадр) —
+        в ленту раз в несколько секунд, в лог — каждый раз счётчиком.
+        """
+        try:
+            sig = (where, type(exc).__name__, str(exc)[:200])
+            now = time.monotonic()
+            last = getattr(self, "_last_catch", None)
+            if last is not None and last[0] == sig and now - last[1] < 5.0:
+                self._repeats = getattr(self, "_repeats", 0) + 1
+                if self._file is not None:
+                    self._file.write("--- " + where + ": повтор " + str(self._repeats) +
+                                     " — " + sig[1] + ": " + sig[2] + "\n")
+                return
+            self._last_catch = (sig, now)
+            self._repeats = 0
+            self._report(where + " — Луна пережила ошибку и работает дальше",
+                         type(exc), exc, exc.__traceback__)
+        except Exception:  # noqa: BLE001 — ловушка не имеет права падать сама
+            pass
+
     def _thread_hook(self, args) -> None:
         name = getattr(args.thread, "name", "?")
         self._report("Фоновый поток " + str(name) + " упал",

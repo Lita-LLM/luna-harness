@@ -1,4 +1,9 @@
-"""Легендарные фразы из docs/ДИЗАЙН.md: лежат в phrases.json рядом, читаются лениво."""
+"""Легендарные фразы из docs/ДИЗАЙН.md: лежат в phrases.json рядом, читаются лениво.
+
+В Новолунии у заставки и спиннера свои, тёмные фразы (splash_newmoon,
+spinner_newmoon). Событие может быть строкой или списком — тогда фраза
+выбирается случайно.
+"""
 
 from __future__ import annotations
 
@@ -19,23 +24,44 @@ def _load() -> dict:
     return _cache
 
 
-def spinner_phrases() -> list[str]:
-    return list(_load().get("spinner") or [])
+def _dark() -> bool:
+    try:
+        from ..core import newmoon
+
+        return bool(newmoon.active())
+    except Exception:  # noqa: BLE001 — фраза не важнее старта
+        return False
 
 
-def splash_phrases() -> list[str]:
-    return list(_load().get("splash") or [])
+def _pick(key: str, newmoon) -> list[str]:
+    data = _load()
+    if newmoon is None:
+        newmoon = _dark()
+    if newmoon and data.get(key + "_newmoon"):
+        return [str(p) for p in data[key + "_newmoon"]]
+    return [str(p) for p in data.get(key) or []]
 
 
-def random_spinner() -> str:
-    phrases = spinner_phrases()
+def spinner_phrases(newmoon: bool | None = None) -> list[str]:
+    return _pick("spinner", newmoon)
+
+
+def splash_phrases(newmoon: bool | None = False) -> list[str]:
+    return _pick("splash", newmoon)
+
+
+def random_spinner(newmoon: bool | None = None) -> str:
+    phrases = spinner_phrases(newmoon)
     return random.choice(phrases) if phrases else "Думает"
 
 
-def random_splash() -> str:
-    phrases = splash_phrases()
+def random_splash(newmoon: bool | None = None) -> str:
+    phrases = _pick("splash", newmoon)
     return random.choice(phrases) if phrases else "Лунапарк открыт."
 
 
 def event_phrase(name: str) -> str:
-    return str((_load().get("events") or {}).get(name) or "")
+    value = (_load().get("events") or {}).get(name)
+    if isinstance(value, list):
+        value = random.choice(value) if value else ""
+    return str(value or "")

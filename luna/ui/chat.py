@@ -767,8 +767,23 @@ class ChatApp:
         if callable(poll):
             events.extend(poll())
         for ev in events:
-            self.on_agent_event(ev)
+            try:
+                self.on_agent_event(ev)
+            except Exception as exc:  # noqa: BLE001 — одно кривое событие не роняет чат
+                self.stumble("Событие " + str((ev or {}).get("type") if isinstance(ev, dict)
+                                              else type(ev).__name__), exc)
         return events
+
+    def stumble(self, where: str, exc: BaseException) -> None:
+        """Ошибка пережита: в лог и в ленту, а Луна работает дальше."""
+        if self.trap is not None and hasattr(self.trap, "catch"):
+            self.trap.catch(where, exc)
+            return
+        try:
+            self._add(Entry("error", text=where + ": " + type(exc).__name__ + ": " +
+                            str(exc)[:300]))
+        except Exception:  # noqa: BLE001
+            pass
 
     def restore(self, records: list) -> None:
         """Воспроизвести журнал прошлой сессии в ленту (luna --continue).
@@ -792,10 +807,14 @@ class ChatApp:
                     self.session_title = str(rec.get("title") or self.session_title)
                     self._session_titled = True
                 data = rec.get("data") or {}
-                if rec.get("kind") == "event":
-                    self.on_agent_event(data)
-                elif rec.get("kind") == "command":
-                    self._restore_command(data)
+                try:
+                    if rec.get("kind") == "event":
+                        self.on_agent_event(data)
+                    elif rec.get("kind") == "command":
+                        self._restore_command(data)
+                except Exception as exc:  # noqa: BLE001 — битая запись журнала не губит сессию
+                    self.stumble("Запись журнала " + str(data.get("type") or rec.get("kind")),
+                                 exc)
         finally:
             self._restoring = False
         self.busy = False
@@ -3208,6 +3227,8 @@ class ChatApp:
             return bool(entry.items)
         if entry.kind == "tide":
             return bool(entry.output)
+        if entry.kind == "user":
+            return _user_long(entry.text)
         return False
 
     def _toggle_expand_all(self) -> None:
@@ -3810,12 +3831,15 @@ class ChatApp:
         Саму картинку терминал приложению не отдаёт (вставка несёт только
         текст), поэтому честный максимум — путь к файлу из буфера.
         """
-        text = _clipboard_text()
+        try:
+            text = _clipboard_text() or ""
+        except Exception:  # noqa: BLE001 — буфер чужой программы не должен ронять Луну
+            text = ""
         stripped = text.strip()
-        if stripped and "\n" not in stripped:
+        if stripped and "\n" not in stripped and len(stripped) < 1024:
             path = Path(stripped.strip('"'))
             if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif",
-                                       ".webp", ".bmp") and path.is_file():
+                                       ".webp", ".bmp") and _is_file(path):
                 self.editor.insert("@" + stripped.strip('"') + " ")
                 self._add(Entry("notice", text="Картинка из буфера вложена "
                                                "файлом: " + str(path)))
@@ -3979,19 +4003,33 @@ class ChatApp:
     def _insert_paste(self, text: str) -> None:
         """Вставка в поле ввода (ЗАДАЧА-20): перетащенный файл — @путём,
         большая вставка — свёрнутым маркером [вставлено N строк]."""
+        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         stripped = text.strip().strip('"').strip("'")
-        if "\n" not in stripped and stripped:
+        if "\n" not in stripped and stripped and len(stripped) < 1024:
             candidate = stripped
             if candidate.startswith("file://"):
                 from urllib.parse import unquote, urlparse
 
                 candidate = unquote(urlparse(candidate).path)
-            path = Path(candidate).expanduser()
-            if path.is_file():
-                self.editor.insert("@" + str(path) + " ")
+            if _is_file(candidate):
+                self.editor.insert("@" + str(Path(candidate).expanduser()) + " ")
                 return
         lines = text.count("\n") + 1 if text else 0
         threshold = int(self.settings.get("ui.paste_collapse_lines") or 0)
+        # Длинная строка без переводов (минифицированный JSON, лог в одну
+        # строку) тоже сворачивается: перенос такой строки в поле ввода
+        # на каждом кадре и вешал экран.
+        max_chars = int(self.settings.get("ui.paste_collapse_chars") or 0)
+        if max_chars and len(text) > max_chars and not (threshold and lines > threshold):
+            placeholder = "[вставлено " + _size_label(len(text)) + "]"
+            base = placeholder
+            n = 2
+            while placeholder in self._pastes and self._pastes[placeholder] != text:
+                placeholder = base[:-1] + " · " + str(n) + "]"
+                n += 1
+            self._pastes[placeholder] = text
+            self.editor.insert(placeholder)
+            return
         if threshold and lines > threshold:
             placeholder = "[вставлено " + str(lines) + " строк]"
             base = placeholder
@@ -4008,6 +4046,12 @@ class ChatApp:
         """Клик по свёрнутой вставке в поле ввода — развернуть обратно."""
         for placeholder, full in list(self._pastes.items()):
             if placeholder in self.editor.text:
+                if len(full) > _EXPAND_MAX:
+                    # Поле ввода переносит текст на каждом кадре: мегабайт в нём
+                    # — это замерший экран. Вставка уйдёт модели целиком и так.
+                    self._flash_hint("Вставка слишком большая, чтобы развернуть её в "
+                                     "поле ввода, — она уйдёт модели целиком.")
+                    return
                 self.editor.set_text(
                     self.editor.text.replace(placeholder, full, 1))
                 del self._pastes[placeholder]
@@ -4760,10 +4804,13 @@ class ChatApp:
 
         w = max(4, width)
         if entry.kind == "user":
-            lines = wrap_spans([Span(entry.text)], w - 2)
+            shown, more = _user_view(entry.text, self._exp(entry))
+            lines = wrap_spans([Span(shown)], w - 2)
             for i, line in enumerate(lines):
                 prefix = "› " if i == 0 else "  "
                 add([(prefix, "amber")] + [(s.text, "user") for s in line])
+            if more:
+                add([("  ", None), (more, "dim")])
         elif entry.kind == "agent":
             md_lines = _incremental(entry, "md", entry.text, w,
                                     lambda s: render_markdown(s, w), None)
@@ -5707,6 +5754,70 @@ def _copy_to_clipboard(text: str, term: Terminal) -> str:
     return copy_text(text, write=term.write)
 
 
+_EXPAND_MAX = 60_000  # больше — свёрнутую вставку в поле ввода не разворачиваем
+
+# Сообщение человека в ленте: длинное — свёрнуто до начала, развёрнутое —
+# с потолком. Перенос мегабайтной вставки занимал секунды на кадр.
+_USER_FOLD_LINES = 40
+_USER_FOLD_CHARS = 8_000
+_USER_HEAD_LINES = 12
+_USER_HEAD_CHARS = 3_000
+_USER_MAX_LINES = 3_000
+_USER_MAX_CHARS = 200_000
+
+
+def _user_long(text: str) -> bool:
+    return len(text) > _USER_FOLD_CHARS or text.count("\n", 0, 200_000) >= _USER_FOLD_LINES
+
+
+def _user_view(text: str, expanded: bool) -> tuple:
+    """(что показать, подпись про скрытое или "")."""
+    if not _user_long(text):
+        return text, ""
+    max_lines, max_chars = ((_USER_MAX_LINES, _USER_MAX_CHARS) if expanded
+                            else (_USER_HEAD_LINES, _USER_HEAD_CHARS))
+    head = text[:max_chars]
+    cut = -1
+    for _ in range(max_lines):
+        cut = head.find("\n", cut + 1)
+        if cut == -1:
+            break
+    if cut != -1:
+        head = head[:cut]
+    if len(head) >= len(text):
+        return text, ""
+    hidden_lines = text.count("\n", len(head))
+    if hidden_lines >= 2:
+        n = hidden_lines
+        word = ("строка" if n % 10 == 1 and n % 100 != 11 else
+                "строки" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "строк")
+        rest = str(n) + " " + word
+    else:
+        rest = _size_label(len(text) - len(head))
+    if expanded:
+        return head, ("… ещё " + rest + " не показано: для ленты слишком длинно, "
+                      "модель получила сообщение целиком")
+    return head, "… ещё " + rest + " — клик или Ctrl+O, чтобы развернуть"
+
+
+def _is_file(candidate) -> bool:
+    """Path.is_file без исключений: на Linux (и в Termux на телефоне) слишком
+    длинное «имя» бросает OSError ENAMETOOLONG, а NUL — ValueError, и
+    огромная однострочная вставка роняла Луну."""
+    try:
+        return Path(candidate).expanduser().is_file()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _size_label(chars: int) -> str:
+    if chars >= 1_000_000:
+        return str(round(chars / 1_000_000, 1)).replace(".", ",") + " млн символов"
+    if chars >= 10_000:
+        return str(chars // 1000) + " тыс. символов"
+    return str(chars) + " символов"
+
+
 def _clipboard_text() -> str:
     """Текст системного буфера обмена, если платформа его отдаёт без библиотек.
 
@@ -5924,29 +6035,60 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
                                    or "Новолуние."))
                     app.open_newmoon_confirm()
                 app.start_source()
+                # Каждый шаг цикла — под защитой: ошибка в одной клавише,
+                # событии или кадре раньше роняла всю Луну посреди работы.
+                # Теперь она в логе и в ленте, а чат живёт дальше. Сдаёмся,
+                # только если ломается подряд одно и то же (кадр за кадром).
+                fails = {"read": 0, "draw": 0}
                 while not app.done:
-                    events = term.read_events(timeout=app.next_timeout())
+                    try:
+                        events = term.read_events(timeout=app.next_timeout())
+                        fails["read"] = 0
+                    except Exception as exc:  # noqa: BLE001
+                        fails["read"] += 1
+                        if fails["read"] > 50:
+                            raise
+                        app.stumble("Чтение ввода", exc)
+                        events = []
                     size = term.size()
                     if size != (screen.cols, screen.rows):
                         screen.resize(*size)
                     for ev in events:
-                        if isinstance(ev, Key):
-                            app.handle_key(ev)
-                        elif isinstance(ev, Mouse):
-                            app.handle_mouse(ev)
-                        elif isinstance(ev, Paste):
-                            app.handle_paste(ev)
-                        elif isinstance(ev, Resize):
-                            screen.resize(ev.cols, ev.rows)
-                    app.poll_source()
-                    if app._redraw:
-                        # Ctrl+L: следующий кадр — целиком, не диффом.
-                        app._redraw = False
-                        screen.resize(*term.size())
-                    if app.edit_request is not None:
-                        _run_external_editor(app, term, screen, trap)
-                    buf, cursor = app.draw(size[0], size[1], time.monotonic())
-                    screen.present(buf, cursor=cursor)
+                        try:
+                            if isinstance(ev, Key):
+                                app.handle_key(ev)
+                            elif isinstance(ev, Mouse):
+                                app.handle_mouse(ev)
+                            elif isinstance(ev, Paste):
+                                app.handle_paste(ev)
+                            elif isinstance(ev, Resize):
+                                screen.resize(ev.cols, ev.rows)
+                        except Exception as exc:  # noqa: BLE001
+                            app.stumble("Обработка " + _event_label(ev), exc)
+                    try:
+                        app.poll_source()
+                        if app._redraw:
+                            # Ctrl+L: следующий кадр — целиком, не диффом.
+                            app._redraw = False
+                            screen.resize(*term.size())
+                        if app.edit_request is not None:
+                            _run_external_editor(app, term, screen, trap)
+                    except Exception as exc:  # noqa: BLE001
+                        app.stumble("Фоновые события", exc)
+                    try:
+                        buf, cursor = app.draw(size[0], size[1], time.monotonic())
+                        screen.present(buf, cursor=cursor)
+                        fails["draw"] = 0
+                    except Exception as exc:  # noqa: BLE001
+                        fails["draw"] += 1
+                        if fails["draw"] > 50:
+                            raise
+                        app.stumble("Отрисовка кадра", exc)
+                        # Кадр мог оборваться на середине: следующий — целиком.
+                        try:
+                            screen.resize(*term.size())
+                        except Exception:  # noqa: BLE001
+                            pass
             finally:
                 trap.uninstall()
                 if app is not None:
@@ -5982,6 +6124,16 @@ def run_chat(started_at: float = 0.0, *, splash_first: bool = False, fake: bool 
         return RELAUNCH_NEWMOON
     print(phrases.event_phrase("end") or "Орёл сел.")
     return 0
+
+
+def _event_label(ev) -> str:
+    if isinstance(ev, Key):
+        return "клавиши " + ev.label
+    if isinstance(ev, Mouse):
+        return "мыши"
+    if isinstance(ev, Paste):
+        return "вставки (" + str(len(ev.text)) + " симв.)"
+    return "ввода"
 
 
 def _run_external_editor(app: ChatApp, term: Terminal, screen: Screen,

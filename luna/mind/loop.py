@@ -634,10 +634,19 @@ class Agent:
             self.publish({"type": "error", "message": err.title, "detail": err.detail or err.hint,
                           "code": err.code, "data": getattr(err, "data", None) or {}})
             reason = "error"
-        self._stash_leftovers()
-        self.publish({"type": "turn.done", "turn": turn, "reason": reason})
-        self._active = False
-        self._after_turn()
+        try:
+            self._stash_leftovers()
+        finally:
+            self.publish({"type": "turn.done", "turn": turn, "reason": reason})
+            self._active = False
+        try:
+            self._after_turn()
+        except Exception as exc:  # noqa: BLE001 — прилив/уборка после хода не роняют сессию
+            from ..core.errors import HumanError, unexpected
+
+            err = exc if isinstance(exc, HumanError) else unexpected(exc, "после хода")
+            self.publish({"type": "error", "message": err.title,
+                          "detail": err.detail or err.hint})
         return reason
 
     def _stash_leftovers(self) -> None:
@@ -665,7 +674,33 @@ class Agent:
         extra = [a for c in carried for a in (c.get("attachments") or [])]
         return text, extra + list(attachments or [])
 
+    def _stall_nudge(self, result) -> bool:
+        """Ответ без вызова тула похож на сорванное действие — подтолкнуть.
+
+        Подсказка ложится в историю сообщением user в конверте харнесса и в
+        журнал событием harness.nudge: продолженная сессия видит то же.
+        """
+        specs = self._specs()
+        if not specs:
+            return False
+        from . import stall
+        from ..core.envelope import compose
+
+        names = [getattr(s, "name", "") for s in specs]
+        kind = stall.diagnose(result.text, names)
+        if not kind:
+            return False
+        text = compose("", [{"from": "harness", "text": stall.NUDGES[kind]}])
+        self._history.append({"role": "user", "content": text})
+        self.publish({"type": "harness.nudge", "kind": kind, "text": text})
+        self.publish({"type": "notice", "level": "info", "text": stall.NOTICES[kind]})
+        return True
+
     def _steps(self, max_steps: int) -> str:
+        nudge_limit = 2
+        if self.settings is not None:
+            nudge_limit = max(0, int(self.settings.get("agent.stall_nudges", 2) or 0))
+        nudges = 0
         for _step in range(max_steps):
             if self._interrupt.is_set():
                 return "interrupted"
@@ -710,6 +745,9 @@ class Agent:
                     self.publish({"type": "user.inject", "text": nxt["text"]})
                     self.publish({"type": "notice", "level": "info",
                                   "text": "Сообщение из очереди ушло следующим шагом"})
+                    continue
+                if nudges < nudge_limit and self._stall_nudge(result):
+                    nudges += 1
                     continue
                 return "end"
             stop = self._run_calls(result.tool_calls)
@@ -961,8 +999,12 @@ class Agent:
                           "text": "Идёт ход — откатить можно только ещё не "
                                   "прочитанное; остальное — когда ход закончится."})
             return None
+        from ..core.envelope import harness_only
+
+        # Подсказки харнесса — не сообщения человека: /undo их пропускает.
         last_user = next((i for i in range(len(self._history) - 1, -1, -1)
-                          if self._history[i].get("role") == "user"), None)
+                          if self._history[i].get("role") == "user"
+                          and not harness_only(self._history[i].get("content"))), None)
         turn_starts = {i for _t, i in self._turn_marks}
         if last_user is not None and last_user not in turn_starts \
                 and self._turn_marks and last_user > self._turn_marks[-1][1]:
